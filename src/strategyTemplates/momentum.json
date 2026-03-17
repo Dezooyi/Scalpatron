@@ -1,0 +1,39 @@
+{
+  "strategy_name": "MACD Momentum",
+  "strategy_type": "momentum",
+  "description": "Enters on MACD histogram crossing above zero (bullish momentum). Combines with RSI to avoid late entries in overbought conditions. Exits on histogram reversal or take profit.",
+  "market": {
+    "symbol": "UGOR/SOL",
+    "timeframe": "5m",
+    "exchange": "solana"
+  },
+  "indicators": [
+    { "type": "MACD", "fast_period": 12, "slow_period": 26, "signal_period": 9 },
+    { "type": "RSI", "period": 14 },
+    { "type": "EMA", "period": 50 }
+  ],
+  "entry_conditions": [
+    { "left": "MACD_histogram", "operator": "crossover", "right": 0 },
+    { "left": "RSI_14", "operator": "<", "right": 70 },
+    { "left": "price", "operator": ">", "right": "EMA_50" }
+  ],
+  "exit_conditions": [
+    { "type": "take_profit", "value": 0.045 },
+    { "type": "stop_loss", "value": 0.02 },
+    {
+      "type": "indicator",
+      "condition": { "left": "MACD_histogram", "operator": "crossunder", "right": 0 }
+    }
+  ],
+  "risk_management": {
+    "position_size": 0.12,
+    "max_positions": 1,
+    "leverage": 1
+  },
+  "execution": {
+    "order_type": "market",
+    "slippage_tolerance": 0.002
+  },
+  "isTemplate": true,
+  "system_prompt": "You are a trading analysis agent for a Solana SPL Token MACD Momentum Bot.\nThe bot enters when the MACD histogram crosses above zero with RSI confirming momentum is not overbought.\n\nTASK:\nAnalyze the market data and recommend optimized indicator parameters for the NEXT cycle.\n\nRespond ONLY with valid JSON in this exact format (no markdown):\n{\n  \"regime\": \"RANGING|TRENDING|DEAD|VOLATILE\",\n  \"confidence\": 0.0-1.0,\n  \"reason\": \"short reasoning (max 120 chars)\",\n  \"analysis\": \"detailed analysis 2-3 sentences\",\n  \"aggressiveness\": 10,\n  \"strategyAdjustments\": {\n    \"indicators\": [\n      { \"type\": \"MACD\", \"fast_period\": 12, \"slow_period\": 26, \"signal_period\": 9 },\n      { \"type\": \"RSI\", \"period\": 14 },\n      { \"type\": \"EMA\", \"period\": 50 }\n    ],\n    \"entry_condition_hints\": \"optional hint about MACD periods or RSI filter threshold\"\n  }\n}\n\nRULES:\n- TRENDING: Preferred regime — MACD crossovers are reliable, keep standard periods\n- RANGING: Increase MACD slow period to filter noise, raise RSI filter threshold to 60+\n- VOLATILE: Increase all MACD periods for smoother signals, reduce aggressiveness\n- DEAD: No momentum signals expected — set aggressiveness to minimum\n- MACD fast period: min 8, max 16\n- MACD slow period: min 20, max 30\n- MACD signal period: min 7, max 12\n- RSI filter: min 50, max 75\n- Only adjust parameters when data justifies it"
+}

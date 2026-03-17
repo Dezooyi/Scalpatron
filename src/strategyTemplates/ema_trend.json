@@ -1,0 +1,38 @@
+{
+  "strategy_name": "EMA Trend Strategy",
+  "strategy_type": "trend",
+  "description": "Follows the trend using EMA crossover (fast/slow). RSI filter avoids overbought entries. Best for trending markets with clear directional momentum.",
+  "market": {
+    "symbol": "UGOR/SOL",
+    "timeframe": "5m",
+    "exchange": "solana"
+  },
+  "indicators": [
+    { "type": "EMA", "period": 20 },
+    { "type": "EMA", "period": 50 },
+    { "type": "RSI", "period": 14 }
+  ],
+  "entry_conditions": [
+    { "left": "EMA_20", "operator": "crossover", "right": "EMA_50" },
+    { "left": "RSI_14", "operator": "<", "right": 65 }
+  ],
+  "exit_conditions": [
+    { "type": "take_profit", "value": 0.04 },
+    { "type": "stop_loss", "value": 0.02 },
+    {
+      "type": "indicator",
+      "condition": { "left": "EMA_20", "operator": "crossunder", "right": "EMA_50" }
+    }
+  ],
+  "risk_management": {
+    "position_size": 0.15,
+    "max_positions": 1,
+    "leverage": 1
+  },
+  "execution": {
+    "order_type": "market",
+    "slippage_tolerance": 0.002
+  },
+  "isTemplate": true,
+  "system_prompt": "You are a trading analysis agent for a Solana SPL Token EMA Trend Following Bot.\nThe bot enters positions when the fast EMA crosses above the slow EMA, confirming trend direction.\n\nTASK:\nAnalyze the market data and recommend optimized indicator parameters for the NEXT cycle.\n\nRespond ONLY with valid JSON in this exact format (no markdown):\n{\n  \"regime\": \"RANGING|TRENDING|DEAD|VOLATILE\",\n  \"confidence\": 0.0-1.0,\n  \"reason\": \"short reasoning (max 120 chars)\",\n  \"analysis\": \"detailed analysis 2-3 sentences\",\n  \"aggressiveness\": 10,\n  \"strategyAdjustments\": {\n    \"indicators\": [\n      { \"type\": \"EMA\", \"period\": 20 },\n      { \"type\": \"EMA\", \"period\": 50 },\n      { \"type\": \"RSI\", \"period\": 14 }\n    ],\n    \"entry_condition_hints\": \"optional hint about threshold adjustments\"\n  }\n}\n\nRULES:\n- TRENDING: Preferred regime — tighten EMA spread for faster entries (fast: 8-15, slow: 20-35)\n- RANGING: Widen EMA spread to reduce false crossovers, set RSI filter to ~55\n- VOLATILE: Widen EMA spread significantly to avoid whipsaws, reduce aggressiveness\n- DEAD: No trend expected — set aggressiveness to minimum (5-10)\n- EMA fast period: min 5, max 20\n- EMA slow period: min 20, max 100\n- RSI filter level: min 40, max 65\n- Only adjust parameters when data justifies it"
+}

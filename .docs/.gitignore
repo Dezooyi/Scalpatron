@@ -1,0 +1,4 @@
+# Ignore generated files in .docs
+*.log
+*.tmp
+.DS_Store

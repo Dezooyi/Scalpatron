@@ -1,0 +1,24 @@
+{
+  "regime": "DEAD",
+  "confidence": 0.65,
+  "reason": "Keine Spikes, minimale Volatilität, flacher Trend über alle Zeitrahmen",
+  "analysis": "Markt zeigt DEAD-Charakteristiken mit extrem geringer Volatilität (0.17% in 1 Min) und keinem einzigen Spike detektiert. Der langfristige Trend ist ebenfalls flach (3% Stärke) über 1000 Ticks. Historische Performance aller Regime zeigt negative PnL, weshalb konservative Einstellungen empfohlen werden.",
+  "aggressiveness": 5,
+  "settings": {
+    "spikeThreshold": 0.12,
+    "sellDropThreshold": 0.08,
+    "floorWindow": 1500,
+    "cooldownTicks": 20
+  },
+  "strategyAdjustments": {
+    "indicators": [
+      { "type": "SMA", "period": 50 },
+      { "type": "RSI", "period": 14 }
+    ],
+    "risk_management": {
+      "position_size": 5,
+      "max_positions": 1
+    },
+    "entry_condition_hints": "Warten auf klare Spikes (>0.2%) vor Entry, niedrige Positionen bei DEAD-Regime"
+  }
+}

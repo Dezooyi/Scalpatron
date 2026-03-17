@@ -1,0 +1,24 @@
+{
+  "regime": "DEAD",
+  "confidence": 0.85,
+  "reason": "Price flat, zero volatility, no spikes detected",
+  "analysis": "Market shows extreme consolidation with price stuck at $41.72 for extended periods. No volume data available from DexScreener, but price action indicates minimal movement. Historical DEAD regime performance is best with 45% win rate.",
+  "aggressiveness": 5,
+  "settings": {
+    "spikeThreshold": 0.15,
+    "sellDropThreshold": 0.03,
+    "floorWindow": 50,
+    "cooldownTicks": 10
+  },
+  "strategyAdjustments": {
+    "indicators": [
+      { "type": "RSI", "period": 14 },
+      { "type": "ATR", "period": 14 }
+    ],
+    "risk_management": {
+      "position_size": 5,
+      "max_positions": 1
+    },
+    "entry_condition_hints": "Wait for clear spike above floor before entering, given flat market conditions"
+  }
+}

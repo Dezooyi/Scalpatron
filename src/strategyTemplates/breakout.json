@@ -1,0 +1,35 @@
+{
+  "strategy_name": "Bollinger Breakout",
+  "strategy_type": "breakout",
+  "description": "Detects Bollinger Band squeeze (low volatility) and trades the breakout when price exits the upper band with momentum. ATR confirms volatility expansion.",
+  "market": {
+    "symbol": "UGOR/SOL",
+    "timeframe": "15m",
+    "exchange": "solana"
+  },
+  "indicators": [
+    { "type": "BB", "period": 20, "std_dev": 2 },
+    { "type": "ATR", "period": 14 },
+    { "type": "RSI", "period": 14 }
+  ],
+  "entry_conditions": [
+    { "left": "price", "operator": ">", "right": "BB_upper" },
+    { "left": "RSI_14", "operator": ">", "right": 50 }
+  ],
+  "exit_conditions": [
+    { "type": "take_profit", "value": 0.05 },
+    { "type": "stop_loss", "value": 0.025 },
+    { "type": "trailing_stop", "trailing_pct": 0.015 }
+  ],
+  "risk_management": {
+    "position_size": 0.1,
+    "max_positions": 1,
+    "leverage": 1
+  },
+  "execution": {
+    "order_type": "market",
+    "slippage_tolerance": 0.003
+  },
+  "isTemplate": true,
+  "system_prompt": "You are a trading analysis agent for a Solana SPL Token Bollinger Breakout Bot.\nThe bot enters when price breaks above the Bollinger upper band after a volatility squeeze, confirmed by ATR expansion.\n\nTASK:\nAnalyze the market data and recommend optimized indicator parameters for the NEXT cycle.\n\nRespond ONLY with valid JSON in this exact format (no markdown):\n{\n  \"regime\": \"RANGING|TRENDING|DEAD|VOLATILE\",\n  \"confidence\": 0.0-1.0,\n  \"reason\": \"short reasoning (max 120 chars)\",\n  \"analysis\": \"detailed analysis 2-3 sentences\",\n  \"aggressiveness\": 10,\n  \"strategyAdjustments\": {\n    \"indicators\": [\n      { \"type\": \"BB\", \"period\": 20, \"std_dev\": 2.0 },\n      { \"type\": \"ATR\", \"period\": 14 },\n      { \"type\": \"RSI\", \"period\": 14 }\n    ],\n    \"entry_condition_hints\": \"optional hint about BB std_dev or RSI confirmation threshold\"\n  }\n}\n\nRULES:\n- VOLATILE: Preferred regime — true breakouts occur frequently, raise ATR multiplier (2-3x)\n- TRENDING: Breakouts can signal trend continuation — moderate ATR multiplier (1.5-2x)\n- RANGING: High false breakout risk — raise BB std_dev above 2.5 to filter noise\n- DEAD: Breakouts very unlikely — set aggressiveness to minimum\n- BB std_dev: min 1.5, max 3.0\n- ATR period: min 10, max 20\n- RSI confirmation threshold: min 45, max 60\n- NOTE: DexScreener provides no real volume data (volume = 0). Volume-based conditions are unreliable.\n- Only adjust parameters when data justifies it"
+}

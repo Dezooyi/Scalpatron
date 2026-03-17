@@ -1,0 +1,24 @@
+{
+  "regime": "DEAD",
+  "confidence": 0.92,
+  "reason": "Low volatility, flat trend, zero spikes detected",
+  "analysis": "Market shows extreme stability with price range of only $0.00001 (0.06%) over the last minute, zero spikes detected, and flat trend strength. Volume is minimal ($67.8k 1h) with 532 buys vs 129 sells, indicating low interest. Historical regime performance shows DEAD has highest win rate at 8%.",
+  "aggressiveness": 10,
+  "settings": {
+    "spikeThreshold": 0.12,
+    "sellDropThreshold": 0.08,
+    "floorWindow": 1500,
+    "cooldownTicks": 15
+  },
+  "strategyAdjustments": {
+    "indicators": [
+      { "type": "RSI", "period": 14 },
+      { "type": "ATR", "period": 14 }
+    ],
+    "risk_management": {
+      "position_size": 10,
+      "max_positions": 1
+    },
+    "entry_condition_hints": "Wait for volatility to increase or volume spike before aggressive entries"
+  }
+}

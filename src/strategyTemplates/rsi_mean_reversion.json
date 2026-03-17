@@ -1,0 +1,41 @@
+{
+  "strategy_name": "RSI Mean Reversion",
+  "strategy_type": "mean_reversion",
+  "description": "Buys when RSI is oversold (below 30) and price is near Bollinger lower band. Sells when RSI recovers to neutral or hits upper band. Best for ranging markets with regular oscillations.",
+  "market": {
+    "symbol": "UGOR/SOL",
+    "timeframe": "5m",
+    "exchange": "solana"
+  },
+  "indicators": [
+    { "type": "RSI", "period": 14 },
+    { "type": "BB", "period": 20, "std_dev": 2 }
+  ],
+  "entry_conditions": [
+    { "left": "RSI_14", "operator": "<", "right": 32 },
+    { "left": "price", "operator": "<=", "right": "BB_lower" }
+  ],
+  "exit_conditions": [
+    { "type": "take_profit", "value": 0.035 },
+    { "type": "stop_loss", "value": 0.02 },
+    {
+      "type": "indicator",
+      "condition": { "left": "RSI_14", "operator": ">=", "right": 55 }
+    },
+    {
+      "type": "indicator",
+      "condition": { "left": "price", "operator": ">=", "right": "BB_upper" }
+    }
+  ],
+  "risk_management": {
+    "position_size": 0.12,
+    "max_positions": 1,
+    "leverage": 1
+  },
+  "execution": {
+    "order_type": "market",
+    "slippage_tolerance": 0.002
+  },
+  "isTemplate": true,
+  "system_prompt": "You are a trading analysis agent for a Solana SPL Token RSI Mean Reversion Bot.\nThe bot buys when RSI is oversold near the Bollinger lower band, and sells when RSI recovers to overbought.\n\nTASK:\nAnalyze the market data and recommend optimized indicator parameters for the NEXT cycle.\n\nRespond ONLY with valid JSON in this exact format (no markdown):\n{\n  \"regime\": \"RANGING|TRENDING|DEAD|VOLATILE\",\n  \"confidence\": 0.0-1.0,\n  \"reason\": \"short reasoning (max 120 chars)\",\n  \"analysis\": \"detailed analysis 2-3 sentences\",\n  \"aggressiveness\": 10,\n  \"strategyAdjustments\": {\n    \"indicators\": [\n      { \"type\": \"RSI\", \"period\": 14 },\n      { \"type\": \"BB\", \"period\": 20, \"std_dev\": 2.0 }\n    ],\n    \"entry_condition_hints\": \"optional hint about RSI oversold/overbought thresholds or BB std_dev\"\n  }\n}\n\nRULES:\n- RANGING: Preferred regime — standard thresholds work well (oversold <32, overbought >55)\n- TRENDING: Risk of counter-trend trades — tighten thresholds (oversold <25, overbought >65), reduce aggressiveness\n- VOLATILE: Widen thresholds significantly (oversold <20, overbought >80), reduce aggressiveness strongly\n- DEAD: Very few signals expected — set aggressiveness to minimum\n- RSI period: min 7, max 21\n- RSI oversold threshold: min 20, max 40\n- RSI overbought threshold: min 55, max 80\n- BB std_dev: min 1.5, max 2.5\n- Only adjust parameters when data justifies it"
+}

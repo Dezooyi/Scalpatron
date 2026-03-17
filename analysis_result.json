@@ -1,0 +1,24 @@
+{
+  "regime": "RANGING",
+  "confidence": 0.75,
+  "reason": "Preis bewegt sich in engen Spannen, geringe Volatilität, klare Richtung fehlt.",
+  "analysis": "Der Preis bewegt sich in einer sehr engen Spanne ($0.6618 - $0.6621) mit minimaler Volatilität (0.0227%). Trend ist FLAT (2% Stärke). Historische Daten zeigen RANGING als profitabelstes Regime (44% Win-Rate). Dead-Regime ist unrentabel.",
+  "aggressiveness": 10,
+  "settings": {
+    "spikeThreshold": 0.3,
+    "sellDropThreshold": 0.15,
+    "floorWindow": 20,
+    "cooldownTicks": 5
+  },
+  "strategyAdjustments": {
+    "indicators": [
+      { "type": "SMA", "period": 20 },
+      { "type": "RSI", "period": 14 }
+    ],
+    "risk_management": {
+      "position_size": 10,
+      "max_positions": 1
+    },
+    "entry_condition_hints": "Beobachte auf kurze Spikes innerhalb der engen Spanne. Keine Änderung der aggressiven Parameter nötig."
+  }
+}

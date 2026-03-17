@@ -1,0 +1,1649 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UGOR Range Spike Scalper — Dokumentation & Dashboard-Prototyp</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --dim: #8b949e;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --red: #f85149;
+      --yellow: #d29922;
+      --cyan: #39d2c0;
+      --purple: #bc8cff;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+
+    /* Navigation */
+    nav { position: fixed; top: 0; left: 0; width: 240px; height: 100vh; background: var(--surface); border-right: 1px solid var(--border); padding: 20px; overflow-y: auto; z-index: 10; }
+    nav h2 { font-size: 14px; color: var(--cyan); margin-bottom: 8px; letter-spacing: 1px; text-transform: uppercase; }
+    nav .logo { font-size: 18px; font-weight: 700; color: var(--text); margin-bottom: 24px; }
+    nav .logo span { color: var(--cyan); }
+    nav ul { list-style: none; }
+    nav ul li { margin-bottom: 2px; }
+    nav ul li a { color: var(--dim); text-decoration: none; font-size: 14px; display: block; padding: 6px 12px; border-radius: 6px; transition: all .15s; }
+    nav ul li a:hover, nav ul li a.active { color: var(--text); background: rgba(88,166,255,.1); }
+    nav ul li a.active { border-left: 2px solid var(--accent); }
+
+    /* Content */
+    main { margin-left: 240px; padding: 40px 60px; max-width: 960px; }
+    section { display: none; }
+    section.active { display: block; }
+
+    h1 { font-size: 32px; margin-bottom: 8px; }
+    h1 span { color: var(--cyan); }
+    h2 { font-size: 22px; margin: 32px 0 12px; color: var(--accent); }
+    h3 { font-size: 16px; margin: 20px 0 8px; color: var(--text); }
+    p, li { color: var(--dim); font-size: 15px; }
+    p { margin-bottom: 12px; }
+    ul, ol { margin-left: 20px; margin-bottom: 16px; }
+
+    /* Code */
+    code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--cyan); }
+    pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; overflow-x: auto; margin-bottom: 16px; }
+    pre code { background: none; padding: 0; color: var(--text); }
+
+    /* Tables */
+    table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+    th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14px; }
+    th { color: var(--accent); font-weight: 600; }
+    td { color: var(--dim); }
+
+    /* Cards */
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+    .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .card h3 { margin: 0 0 4px; font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: .5px; }
+    .card .value { font-size: 24px; font-weight: 700; }
+    .card .value.green { color: var(--green); }
+    .card .value.red { color: var(--red); }
+    .card .value.cyan { color: var(--cyan); }
+
+    /* Flow Diagram */
+    .flow { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 24px; font-family: 'JetBrains Mono', monospace; font-size: 13px; white-space: pre; line-height: 1.4; color: var(--dim); overflow-x: auto; }
+    .flow .hl { color: var(--cyan); }
+    .flow .sig { color: var(--green); font-weight: 700; }
+    .flow .warn { color: var(--yellow); }
+
+    /* Dashboard Prototype */
+    .dash { background: #000; border: 2px solid var(--border); border-radius: 12px; padding: 20px; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.5; }
+    .dash .header { color: var(--cyan); font-weight: 700; font-size: 15px; }
+    .dash .dim { color: #555; }
+    .dash .green { color: var(--green); }
+    .dash .red { color: var(--red); }
+    .dash .yellow { color: var(--yellow); }
+    .dash .bold { font-weight: 700; color: var(--text); }
+    .sparkline { letter-spacing: 1px; color: var(--cyan); }
+
+    /* Settings Panel Prototype */
+    .settings-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 24px; }
+    .setting-row { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+    .setting-row label { width: 180px; color: var(--dim); font-size: 14px; }
+    .setting-row input[type=range] { flex: 1; accent-color: var(--accent); }
+    .setting-row .val { width: 60px; text-align: right; font-family: monospace; color: var(--cyan); font-size: 15px; }
+    .btn { background: var(--accent); color: #000; border: none; padding: 8px 20px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 14px; }
+    .btn:hover { opacity: .9; }
+    .btn.outline { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+    .btn.outline:hover { background: rgba(88,166,255,.1); }
+
+    /* Status Badge */
+    .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+    .badge.done { background: rgba(63,185,80,.15); color: var(--green); }
+    .badge.next { background: rgba(210,153,34,.15); color: var(--yellow); }
+
+    /* Backtest */
+    .progress-bar { width: 100%; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 8px 0; }
+    .progress-bar .fill { height: 100%; background: var(--accent); transition: width 0.2s; width: 0; }
+    .speed-select { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+    .speed-select button { background: var(--surface); border: 1px solid var(--border); color: var(--dim); padding: 6px 16px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+    .speed-select button.active { background: var(--accent); color: #000; border-color: var(--accent); }
+    .bt-status { display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 13px; font-weight: 600; }
+    .bt-status.idle { background: rgba(139,148,158,.15); color: var(--dim); }
+    .bt-status.running { background: rgba(88,166,255,.15); color: var(--accent); }
+    .bt-status.completed { background: rgba(63,185,80,.15); color: var(--green); }
+    .bt-row { display: flex; gap: 16px; margin-bottom: 12px; align-items: center; }
+    .bt-row label { width: 160px; color: var(--dim); font-size: 14px; flex-shrink: 0; }
+    .bt-row input[type=datetime-local], .bt-row input[type=number] { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 6px; font-size: 14px; }
+    .bt-row input[type=datetime-local] { width: 220px; }
+    .bt-row input[type=number] { width: 80px; }
+    .bt-row input[type=checkbox] { accent-color: var(--accent); width: 18px; height: 18px; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn.green { background: var(--green); }
+    .btn.red { background: var(--red); }
+    .btn.purple { background: var(--purple); color: #000; }
+
+    /* Agent UI */
+    .agent-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 16px; }
+    .agent-panel h3 { margin: 0 0 12px; color: var(--purple); }
+    .agent-row { display: flex; gap: 16px; margin-bottom: 12px; align-items: center; }
+    .agent-row label { width: 180px; color: var(--dim); font-size: 14px; flex-shrink: 0; }
+    .agent-row select, .agent-row input[type=number], .agent-row input[type=text] { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 6px; font-size: 14px; }
+    .agent-row select { width: 260px; }
+    .agent-row input[type=number] { width: 100px; }
+    .agent-row input[type=text] { flex: 1; }
+    .agent-row input[type=checkbox] { accent-color: var(--purple); width: 18px; height: 18px; }
+    .agent-row .val { width: 60px; text-align: right; font-family: monospace; color: var(--purple); font-size: 15px; }
+    .agent-advice { background: #000; border: 2px solid var(--border); border-radius: 12px; padding: 20px; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.5; margin-bottom: 16px; }
+    .agent-advice .regime { font-size: 20px; font-weight: 700; display: inline-block; padding: 2px 12px; border-radius: 6px; margin-bottom: 8px; }
+    .agent-advice .regime.RANGING { background: rgba(63,185,80,.2); color: var(--green); }
+    .agent-advice .regime.TRENDING { background: rgba(248,81,73,.2); color: var(--red); }
+    .agent-advice .regime.DEAD { background: rgba(139,148,158,.2); color: var(--dim); }
+    .agent-advice .regime.VOLATILE { background: rgba(210,153,34,.2); color: var(--yellow); }
+    .confidence-bar { width: 200px; height: 8px; background: var(--border); border-radius: 4px; display: inline-block; vertical-align: middle; overflow: hidden; }
+    .confidence-bar .fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+    .agent-prompt-area { width: 100%; min-height: 200px; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 12px; border-radius: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.5; resize: vertical; }
+    .agent-history-item { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 13px; cursor: pointer; transition: background 0.15s; }
+    .agent-history-item:hover { background: rgba(88,166,255,.05); }
+    .agent-history-item:last-child { border-bottom: none; }
+
+    /* Console Log Panel */
+    .console-panel {
+      background: #000; border: 2px solid var(--border); border-radius: 12px;
+      padding: 12px 16px; font-family: 'JetBrains Mono', monospace; font-size: 12px;
+      line-height: 1.6; max-height: 250px; overflow-y: auto; margin-top: 16px;
+    }
+    .console-panel .log-entry { white-space: pre-wrap; }
+    .console-panel .log-entry.info { color: var(--dim); }
+    .console-panel .log-entry.warn { color: var(--yellow); }
+    .console-panel .log-entry.error { color: var(--red); }
+    .console-panel .log-entry.agent { color: var(--purple); }
+    .console-panel .log-entry.trade { color: var(--green); }
+    .console-panel .log-time { color: #555; margin-right: 8px; }
+
+    /* Controls Bar */
+    .controls-bar {
+      display: flex; gap: 12px; align-items: center; margin: 16px 0;
+      padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; flex-wrap: wrap;
+    }
+    .controls-bar .mode-badge {
+      font-family: monospace; font-weight: 700; padding: 4px 12px; border-radius: 6px; font-size: 13px;
+    }
+    .controls-bar .mode-badge.paper { background: rgba(210,153,34,.15); color: var(--yellow); }
+    .controls-bar .mode-badge.live { background: rgba(248,81,73,.15); color: var(--red); }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      nav { display: none; }
+      main { margin-left: 0; padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">UGOR <span>Scalper</span></div>
+  <h2>Dokumentation</h2>
+  <ul>
+    <li><a href="#overview" class="active" onclick="showSection('overview')">Übersicht</a></li>
+    <li><a href="#architecture" onclick="showSection('architecture')">Architektur</a></li>
+    <li><a href="#modules" onclick="showSection('modules')">Module</a></li>
+    <li><a href="#strategy" onclick="showSection('strategy')">Trading-Strategie</a></li>
+    <li><a href="#configuration" onclick="showSection('configuration')">Konfiguration</a></li>
+    <li><a href="#operations" onclick="showSection('operations')">Betrieb</a></li>
+  </ul>
+  <h2 style="margin-top:24px">Prototyp</h2>
+  <ul>
+    <li><a href="#dashboard" onclick="showSection('dashboard')">Dashboard UI</a></li>
+    <li><a href="#settings-ui" onclick="showSection('settings-ui')">Settings Panel</a></li>
+    <li><a href="#backtest" onclick="showSection('backtest')">Backtesting</a></li>
+    <li><a href="#agent-ui" onclick="showSection('agent-ui')">KI Agent</a></li>
+  </ul>
+</nav>
+
+<main>
+
+  <!-- OVERVIEW -->
+  <section id="overview" class="active">
+    <h1>Solana <span>BotTrader01</span></h1>
+    <p>Range Spike Scalper f&uuml;r den UGOR-Token auf Solana. Kauft am Stufenboden, verkauft am Spike-Scheitelpunkt (0.3%&ndash;3.7% Upside).</p>
+
+    <div class="card-grid">
+      <div class="card">
+        <h3>Token</h3>
+        <div class="value cyan">UGOR</div>
+        <p style="font-size:11px;margin-top:4px;word-break:break-all">UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW</p>
+      </div>
+      <div class="card">
+        <h3>Strategie</h3>
+        <div class="value green">Spike Scalp</div>
+        <p style="font-size:12px;margin-top:4px">Floor-Median + Spike Detection</p>
+      </div>
+      <div class="card">
+        <h3>Modus</h3>
+        <div class="value" style="color:var(--yellow)">Paper</div>
+        <p style="font-size:12px;margin-top:4px">10 SOL simuliert</p>
+      </div>
+      <div class="card">
+        <h3>Preis-Feed</h3>
+        <div class="value" style="color:var(--purple)">DexScreener</div>
+        <p style="font-size:12px;margin-top:4px">Polling 2s, kein Key</p>
+      </div>
+    </div>
+
+    <h2>Phasen-Status</h2>
+    <table>
+      <tr><th>Phase</th><th>Modul</th><th>Status</th></tr>
+      <tr><td>0</td><td>npm init + Dependencies</td><td><span class="badge done">Done</span></td></tr>
+      <tr><td>1</td><td>tsconfig + .env + config.ts + wallet.ts</td><td><span class="badge done">Done</span></td></tr>
+      <tr><td>2</td><td>priceFeed.ts (DexScreener)</td><td><span class="badge done">Done</span></td></tr>
+      <tr><td>3</td><td>patternDetector.ts (Floor + Spike)</td><td><span class="badge done">Done</span></td></tr>
+      <tr><td>4</td><td>trader.ts (Paper-Trading)</td><td><span class="badge done">Done</span></td></tr>
+      <tr><td>5</td><td>dashboard.ts (Terminal-UI)</td><td><span class="badge done">Done</span></td></tr>
+      <tr><td>6</td><td>agent.ts (Correction Agent)</td><td><span class="badge done">Done</span></td></tr>
+      <tr><td>7</td><td>Web-Interface</td><td><span class="badge next">Next</span></td></tr>
+    </table>
+
+    <h2>Schnellstart</h2>
+    <pre><code>npx tsx src/index.ts    # Bot starten (Paper-Modus, echte UGOR-Preise)</code></pre>
+    <p>Tasten: <code>[s]</code> Settings &middot; <code>[r]</code> Reset &middot; <code>[p]</code> Paper/Live &middot; <code>[q]</code> Quit</p>
+
+    <h2>Projektstruktur</h2>
+    <pre><code>Solana_BotTrader01/
+├── src/
+│   ├── index.ts            # App-Einstieg, Event-Loop
+│   ├── config.ts           # Zentrale Konfiguration aus .env
+│   ├── wallet.ts           # Keypair-Verwaltung, Devnet-Airdrop
+│   ├── priceFeed.ts        # DexScreener UGOR-Preis (Polling)
+│   ├── patternDetector.ts  # Floor-Median + Spike-Erkennung
+│   ├── trader.ts           # Paper-Trading mit PnL-Tracking
+│   ├── agent.ts            # Correction Agent (Auto-Optimierung)
+│   ├── dashboard.ts        # Terminal-UI mit ANSI-Farben
+│   └── logger.ts           # Trade-Log (JSONL-Persistenz)
+├── logs/                   # Trade-Logs (paper-trades.jsonl)
+├── docs/                   # Dokumentation (MD + HTML)
+├── .env                    # Private Keys (nicht committen!)
+├── tsconfig.json
+└── package.json</code></pre>
+  </section>
+
+  <!-- ARCHITECTURE -->
+  <section id="architecture">
+    <h1>Architektur</h1>
+
+    <h2>System-Datenfluss</h2>
+    <div class="flow"><span class="hl">DexScreener API</span>
+     │  GET /latest/dex/tokens/&lt;UGOR_MINT&gt;  (alle 2s)
+     ▼
+<span class="hl">PriceFeed</span> ──PricePoint──▶ <span class="hl">history[]</span>
+     │
+     ▼  tick() Callback
+<span class="hl">PatternDetector</span>.analyze(history)
+     │  Floor = Median(last N prices)
+     │  Spike% = (price - floor) / floor
+     ▼
+<span class="sig">PatternResult</span> { signal: BUY|SELL|HOLD, floor, spike%, peak }
+     │
+     ▼
+<span class="hl">Trader</span>.handleSignal()
+     │  BUY:  SOL → UGOR (Position öffnen)
+     │  SELL: UGOR → SOL (PnL berechnen)
+     ▼
+<span class="hl">Logger</span> ──▶ logs/paper-trades.jsonl
+     │
+     ▼  nach jedem Trade
+<span class="warn">CorrectionAgent</span>.analyze(tradeLog)
+     │  Win-Rate, Avg PnL, Avg Spike
+     ▼  AgentAdvice
+<span class="hl">PatternDetector</span>.updateSettings()
+     │
+     ▼
+<span class="hl">Dashboard</span>.render() ──▶ Terminal (ANSI)</div>
+
+    <h2>Modul-Abh&auml;ngigkeiten</h2>
+    <pre><code>config.ts ◀─── priceFeed.ts
+               patternDetector.ts (standalone)
+               trader.ts ◀─── logger.ts
+               agent.ts (standalone, nur Types)
+               dashboard.ts (standalone, nur Types)
+
+index.ts ◀─── alle Module</code></pre>
+
+    <h2>State-Management</h2>
+    <table>
+      <tr><th>State</th><th>Gehalten von</th><th>Persistiert</th></tr>
+      <tr><td>Preis-History</td><td>PriceFeed.history[]</td><td>Nein</td></tr>
+      <tr><td>Spike-Tracking</td><td>PatternDetector</td><td>Nein</td></tr>
+      <tr><td>Position</td><td>Trader.position</td><td>Nein</td></tr>
+      <tr><td>Balances</td><td>Trader.balanceSOL/UGOR</td><td>Nein</td></tr>
+      <tr><td>Trade-Log</td><td>Logger.entries[]</td><td>Ja (JSONL)</td></tr>
+      <tr><td>Settings</td><td>PatternDetector.settings</td><td>Nein</td></tr>
+    </table>
+  </section>
+
+  <!-- MODULES -->
+  <section id="modules">
+    <h1>Module</h1>
+
+    <h2>config.ts</h2>
+    <p>Zentrale Konfiguration aus <code>.env</code>. Exportiert typisiertes <code>CONFIG</code>-Objekt.</p>
+    <pre><code>CONFIG.RPC_URL           // Solana RPC Endpoint
+CONFIG.WALLET_PRIVATE_KEY // Base58 Secret Key
+CONFIG.UGOR_MINT         // UGOR Token Mint
+CONFIG.DEXSCREENER_URL   // Preis-API
+CONFIG.POLL_INTERVAL_MS  // Polling-Intervall (2000ms)</code></pre>
+
+    <h2>priceFeed.ts</h2>
+    <div class="card">
+      <h3>Klasse: PriceFeed</h3>
+      <table>
+        <tr><td><code>start(onPrice)</code></td><td>Startet Polling, Callback pro Tick</td></tr>
+        <tr><td><code>stop()</code></td><td>Stoppt Polling</td></tr>
+        <tr><td><code>getHistory()</code></td><td>Alle PricePoints</td></tr>
+      </table>
+      <p style="margin-top:8px">API: <code>GET /latest/dex/tokens/&lt;UGOR_MINT&gt;</code> &mdash; nimmt Pair mit h&ouml;chstem 24h-Volumen</p>
+    </div>
+
+    <h2>patternDetector.ts</h2>
+    <div class="card">
+      <h3>Klasse: PatternDetector</h3>
+      <table>
+        <tr><td><code>analyze(history)</code></td><td>→ PatternResult (signal, floor, spike%)</td></tr>
+        <tr><td><code>updateSettings(partial)</code></td><td>Settings zur Laufzeit ändern</td></tr>
+        <tr><td><code>reset()</code></td><td>Internen State zurücksetzen</td></tr>
+      </table>
+      <p style="margin-top:8px"><strong>Algorithmus:</strong> Floor = Median(last N) → Spike% = (price-floor)/floor → State-Machine: WAIT→BUY→TRACK→SELL→COOLDOWN</p>
+    </div>
+
+    <h2>trader.ts</h2>
+    <div class="card">
+      <h3>Klasse: Trader</h3>
+      <table>
+        <tr><td><code>handleSignal(result, settings)</code></td><td>Trade ausf&uuml;hren wenn BUY/SELL</td></tr>
+        <tr><td><code>getStats()</code></td><td>Balances, W/L, PnL</td></tr>
+      </table>
+      <p style="margin-top:8px">Paper-Trading: simuliert 10 SOL, 1 SOL pro Trade. Nur eine Position gleichzeitig.</p>
+    </div>
+
+    <h2>agent.ts</h2>
+    <div class="card">
+      <h3>Klasse: CorrectionAgent</h3>
+      <p>Analysiert Trade-Log (letzte 20 Trades) und passt Settings automatisch an.</p>
+      <table>
+        <tr><th>Bedingung</th><th>Anpassung</th></tr>
+        <tr><td>Win-Rate &lt; 40%</td><td>spikeThreshold +30%</td></tr>
+        <tr><td>Win-Rate &gt; 60%, PnL &lt; 0.5%</td><td>sellDropThreshold -20%</td></tr>
+        <tr><td>Avg Spike &gt; 3&times; Threshold</td><td>sellDropThreshold -30%</td></tr>
+        <tr><td>Win-Rate &gt; 80%</td><td>spikeThreshold -15%</td></tr>
+      </table>
+    </div>
+
+    <h2>logger.ts</h2>
+    <p>Persistentes Trade-Log in JSONL. Jede Zeile = ein Trade mit Timestamp, Preis, Floor, Spike%, PnL, Settings.</p>
+
+    <h2>dashboard.ts</h2>
+    <p>Terminal-UI mit ANSI-Farben, Sparkline-Chart (Unicode-Blocks), farbcodierten Signalen, Trade-History.</p>
+  </section>
+
+  <!-- STRATEGY -->
+  <section id="strategy">
+    <h1>Trading-Strategie</h1>
+    <p>Range Spike Scalper &mdash; nutzt repetitive Preis-Spikes innerhalb einer Konsolidierungszone.</p>
+
+    <h2>Grundidee</h2>
+    <div class="flow">     Spike Peak (<span class="red">SELL</span>)
+        ╱╲
+       ╱  ╲
+      ╱    ╲──── Drop ≥ sellDropThreshold → <span class="red">Sell-Signal</span>
+     ╱      ╲
+────╱────────╲────────── Stufenboden (Floor = Median)
+   ▲                 ▲
+  <span class="sig">BUY</span>               <span class="sig">BUY</span>
+  (spike% ≥ threshold)</div>
+
+    <h2>Signale</h2>
+    <table>
+      <tr><th>Signal</th><th>Bedingung</th><th>Aktion</th></tr>
+      <tr><td style="color:var(--green)">BUY</td><td>Spike% &ge; spikeThreshold, kein aktiver Spike, kein Cooldown</td><td>Kaufe UGOR mit tradeSize SOL</td></tr>
+      <tr><td style="color:var(--red)">SELL</td><td>Im Spike, Drop vom Peak &ge; sellDropThreshold</td><td>Verkaufe gesamte Position → SOL</td></tr>
+      <tr><td style="color:var(--dim)">HOLD</td><td>Alles andere (Datensammlung, Cooldown, kein Spike)</td><td>Nichts tun</td></tr>
+    </table>
+
+    <h2>Floor-Berechnung</h2>
+    <p><strong>Median</strong> der letzten <code>floorWindow</code> Preise. Median statt Durchschnitt weil:</p>
+    <ul>
+      <li>Robust gegen einzelne Spike-Ausreißer</li>
+      <li>Floor bleibt stabil auch während Spikes</li>
+    </ul>
+
+    <h2>State-Machine</h2>
+    <div class="flow">              Spike% ≥ Threshold
+  ┌──────────┐ ──────────────────▶ ┌──────────────┐
+  │ <span class="sig">WAITING</span>  │                     │  <span class="warn">IN SPIKE</span>    │
+  │(kein Pos)│ ◀────────────────── │(Peak tracken)│
+  └──────────┘   Drop ≥ sellDrop   └──────────────┘
+       ▲              │
+       │              ▼
+  ┌──────────┐
+  │ <span class="dim">COOLDOWN</span> │  (N Ticks warten)
+  └──────────┘</div>
+
+    <h2>Risiken</h2>
+    <ul>
+      <li><strong>Kein Slippage-Modell</strong> im Paper-Modus</li>
+      <li><strong>Polling-Latenz</strong> (2s) &mdash; echte Spikes können k&uuml;rzer sein</li>
+      <li><strong>UGOR-Liquidit&auml;t</strong> begrenzt &mdash; gro&szlig;e Orders bewegen den Preis</li>
+      <li><strong>MEV/Frontrunning</strong> auf Solana m&ouml;glich</li>
+    </ul>
+  </section>
+
+  <!-- CONFIGURATION -->
+  <section id="configuration">
+    <h1>Konfiguration</h1>
+
+    <h2>.env &mdash; Umgebungsvariablen</h2>
+    <table>
+      <tr><th>Variable</th><th>Default</th><th>Beschreibung</th></tr>
+      <tr><td><code>SOLANA_RPC_URL</code></td><td>https://api.devnet.solana.com</td><td>Solana RPC Endpoint</td></tr>
+      <tr><td><code>WALLET_PRIVATE_KEY</code></td><td>(auto-generiert)</td><td>Bot-Wallet Secret Key (Base58)</td></tr>
+      <tr><td><code>UGOR_MINT</code></td><td>UGoRwdj9...</td><td>UGOR Token Mint Address</td></tr>
+      <tr><td><code>POLL_INTERVAL_MS</code></td><td>2000</td><td>Preis-Polling in ms</td></tr>
+    </table>
+
+    <h2>PatternSettings &mdash; Trading-Parameter</h2>
+    <table>
+      <tr><th>Parameter</th><th>Default</th><th>Bereich</th><th>Beschreibung</th></tr>
+      <tr><td><code>floorWindow</code></td><td>20</td><td>5&ndash;100</td><td>Ticks f&uuml;r Floor-Median</td></tr>
+      <tr><td><code>spikeThreshold</code></td><td>0.3%</td><td>0.1&ndash;5.0%</td><td>Min-Abweichung f&uuml;r Spike</td></tr>
+      <tr><td><code>sellDropThreshold</code></td><td>0.15%</td><td>0.05&ndash;1.0%</td><td>Drop vom Peak = Sell</td></tr>
+      <tr><td><code>cooldownTicks</code></td><td>5</td><td>0&ndash;50</td><td>Pause nach Sell</td></tr>
+    </table>
+
+    <h2>Zusammenspiel</h2>
+    <div class="flow">Preis
+  │
+  │         Peak ─────┐
+  │        ╱           │ ← <span class="red">sellDropThreshold</span> (0.15%)
+  │       ╱            ▼
+  │      ╱ Spike   <span class="red">Sell-Signal</span>
+  │     ╱
+  │────╱───── <span class="sig">spikeThreshold</span> (0.3%) ── <span class="sig">BUY-Signal</span>
+  │
+  │═══════════════ <span class="hl">Floor (Median)</span>
+  │
+  └────────────────────────────── Zeit
+        ◀──────────▶
+         <span class="hl">floorWindow</span></div>
+
+    <h2>Tuning-Empfehlungen</h2>
+    <table>
+      <tr><th>Marktphase</th><th>floorWindow</th><th>spikeThreshold</th><th>sellDropThreshold</th></tr>
+      <tr><td>Hohe Volatilit&auml;t</td><td>10&ndash;15</td><td>0.5&ndash;1.0%</td><td>0.2&ndash;0.3%</td></tr>
+      <tr><td>Niedrige Volatilit&auml;t</td><td>25&ndash;40</td><td>0.2&ndash;0.3%</td><td>0.1&ndash;0.15%</td></tr>
+      <tr><td>Seitw&auml;rts (Range)</td><td>20</td><td>0.3%</td><td>0.15%</td></tr>
+      <tr><td>Starker Trend</td><td>30&ndash;50</td><td>1.0&ndash;2.0%</td><td>0.3&ndash;0.5%</td></tr>
+    </table>
+  </section>
+
+  <!-- OPERATIONS -->
+  <section id="operations">
+    <h1>Betrieb</h1>
+
+    <h2>Starten</h2>
+    <pre><code># Kompletter Bot mit Dashboard
+npx tsx src/index.ts
+
+# Nur Wallet testen
+npx tsx src/wallet.ts
+
+# Nur Preis-Feed testen (10 Ticks)
+npx tsx src/priceFeed.ts</code></pre>
+
+    <h2>Tastenkürzel</h2>
+    <table>
+      <tr><th>Taste</th><th>Aktion</th></tr>
+      <tr><td><code>s</code></td><td>Settings &auml;ndern (interaktiver Dialog)</td></tr>
+      <tr><td><code>r</code></td><td>Reset auf Default-Settings</td></tr>
+      <tr><td><code>p</code></td><td>Paper/Live toggle</td></tr>
+      <tr><td><code>q</code></td><td>Beenden mit Final-Stats</td></tr>
+    </table>
+
+    <h2>Logs auswerten</h2>
+    <pre><code># Alle Sells
+cat logs/paper-trades.jsonl | grep '"SELL"'
+
+# Win-Rate berechnen
+cat logs/paper-trades.jsonl | grep '"SELL"' | \
+  python3 -c "import sys,json
+sells=[json.loads(l) for l in sys.stdin]
+wins=[s for s in sells if s.get('pnlPercent',0)>0]
+print(f'Sells: {len(sells)} Wins: {len(wins)} Rate: {len(wins)/len(sells)*100:.0f}%')"</code></pre>
+
+    <h2>Troubleshooting</h2>
+    <table>
+      <tr><th>Problem</th><th>L&ouml;sung</th></tr>
+      <tr><td>fetch failed</td><td>Netzwerk pr&uuml;fen, DexScreener evtl. down</td></tr>
+      <tr><td>SAMMLE DATEN bleibt stehen</td><td><code>floorWindow</code> reduzieren via <code>[s]</code></td></tr>
+      <tr><td>Keine Trades</td><td><code>spikeThreshold</code> senken</td></tr>
+      <tr><td>Zu viele Verluste</td><td><code>spikeThreshold</code> erh&ouml;hen, Agent abwarten</td></tr>
+    </table>
+
+    <h2>Mainnet-Umstellung</h2>
+    <ol>
+      <li>Neues Bot-Wallet in Phantom erstellen (dediziert)</li>
+      <li>Kleinen Betrag SOL + UGOR transferieren</li>
+      <li>Private Key exportieren → in <code>.env</code></li>
+      <li><code>SOLANA_RPC_URL=https://api.mainnet-beta.solana.com</code></li>
+      <li>Im Dashboard <code>[p]</code> → Live-Modus</li>
+    </ol>
+  </section>
+
+  <!-- LIVE DASHBOARD -->
+  <section id="dashboard">
+    <h1>Dashboard <span>Live</span></h1>
+    <p id="connStatus" style="margin-bottom:12px"><span class="badge" style="background:rgba(248,81,73,.15);color:var(--red)">Nicht verbunden</span> Starte Bot: <code>npx tsx src/index.ts</code> &rarr; dann &ouml;ffne <code>http://localhost:3000</code></p>
+
+    <!-- Controls Bar -->
+    <div class="controls-bar">
+      <button class="btn" id="modeToggleBtn" onclick="toggleMode()" style="font-size:13px; padding:6px 14px">Paper/Live</button>
+      <span class="mode-badge paper" id="modeBadge">PAPER</span>
+      <button class="btn outline" onclick="resetSettings()" style="font-size:13px; padding:6px 14px">Reset Defaults</button>
+      <span style="flex:1"></span>
+      <span class="dim" style="font-size:12px">Agent:</span>
+      <span id="dashAgentStatus" class="dim" style="font-size:12px">--</span>
+      <span class="dim" style="font-size:12px; margin-left:8px">Regime:</span>
+      <span id="dashAgentRegime" style="font-size:13px; font-weight:700; color:var(--dim)">--</span>
+    </div>
+
+    <div class="dash" id="dashProto">
+      <div class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</div>
+      <div><span class="header">  UGOR Range Spike Scalper</span>  <span class="yellow" id="dMode">[--]</span></div>
+      <div class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</div>
+      <br>
+      <div>  <span class="bold">Preis</span>    $<span id="dPrice">--</span>  <span class="dim" id="dTime">--:--:--</span></div>
+      <div>  <span class="bold">Floor</span>    $<span id="dFloor">--</span></div>
+      <div>  <span class="bold">Spike</span>    <span id="dSpike" class="dim">--%</span></div>
+      <div id="dPeakRow" style="display:none">  <span class="bold">Peak</span>     $<span id="dPeak">--</span>  <span class="red">Drop: <span id="dDrop">--</span>%</span></div>
+      <div>  <span class="bold">Signal</span>   <span class="dim" id="dSignal">--</span></div>
+      <br>
+      <div>  <span class="bold">Chart</span>    <span class="sparkline" id="dChart"></span></div>
+      <br>
+      <div class="dim">────────────────────────────────────────────────────────────</div>
+      <div>  <span class="bold">SOL</span>      <span id="dSOL">--</span>    <span class="bold">UGOR</span>  <span id="dUGOR">--</span></div>
+      <div id="dPosRow" style="display:none">  <span class="bold">Position</span> entry $<span id="dPosEntry">--</span>  <span id="dUnPnl">--</span></div>
+      <div>  <span class="bold">Trades</span>   <span id="dTrades">0</span>  W:<span class="green" id="dWins">0</span> L:<span class="red" id="dLosses">0</span>  PnL: <span id="dPnl" class="dim">0.00%</span></div>
+      <br>
+      <div class="dim">────────────────────────────────────────────────────────────</div>
+      <div>  <span class="bold">Letzte Trades</span></div>
+      <div id="dTradeList"><span class="dim">  (noch keine Trades)</span></div>
+      <br>
+      <div class="dim">────────────────────────────────────────────────────────────</div>
+      <div>  <span class="bold">Settings</span>  floor:<span id="dFW">--</span> spike:<span id="dST">--</span>% drop:<span id="dSD">--</span>% cd:<span id="dCD">--</span></div>
+      <div class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</div>
+    </div>
+
+    <!-- Console Log -->
+    <h2>Konsole</h2>
+    <div class="console-panel" id="consolePanel">
+      <div class="log-entry info">Warte auf Bot-Verbindung...</div>
+    </div>
+    <div style="margin-top:8px; display:flex; gap:8px; align-items:center">
+      <button class="btn outline" onclick="clearConsole()" style="font-size:12px; padding:4px 10px">Konsole leeren</button>
+      <label style="display:flex; align-items:center; gap:4px; font-size:12px; color:var(--dim)">
+        <input type="checkbox" id="consoleAutoscroll" checked style="accent-color:var(--accent)">
+        Auto-Scroll
+      </label>
+    </div>
+  </section>
+
+  <!-- LIVE SETTINGS -->
+  <section id="settings-ui">
+    <h1>Settings <span>Panel</span></h1>
+    <p>Settings werden live an den laufenden Bot gesendet via <code>POST /api/settings</code>.</p>
+    <p id="settingsStatus"></p>
+
+    <div class="settings-panel">
+      <h3 style="margin-bottom:20px; color:var(--cyan)">Pattern Detection Settings</h3>
+
+      <div class="setting-row">
+        <label>Floor Window (Ticks)</label>
+        <input type="range" id="sFloorWindow" min="5" max="100" value="20" oninput="this.nextElementSibling.textContent=this.value">
+        <span class="val">20</span>
+      </div>
+
+      <div class="setting-row">
+        <label>Spike Threshold (%)</label>
+        <input type="range" id="sSpikeThreshold" min="10" max="500" value="30" oninput="this.nextElementSibling.textContent=(this.value/100).toFixed(2)">
+        <span class="val">0.30</span>
+      </div>
+
+      <div class="setting-row">
+        <label>Sell Drop Threshold (%)</label>
+        <input type="range" id="sSellDrop" min="5" max="100" value="15" oninput="this.nextElementSibling.textContent=(this.value/100).toFixed(2)">
+        <span class="val">0.15</span>
+      </div>
+
+      <div class="setting-row">
+        <label>Cooldown (Ticks)</label>
+        <input type="range" id="sCooldown" min="0" max="50" value="5" oninput="this.nextElementSibling.textContent=this.value">
+        <span class="val">5</span>
+      </div>
+
+      <div style="margin-top:20px; display:flex; gap:12px;">
+        <button class="btn" onclick="applySettings()">Apply &rarr; Bot</button>
+        <button class="btn outline" onclick="resetSettings()">Reset Defaults</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- BACKTESTING -->
+  <section id="backtest">
+    <h1>Back<span>testing</span></h1>
+    <p id="btDataInfo" style="margin-bottom:16px"><span class="dim">Lade Datenbereich...</span></p>
+
+    <!-- Import Section -->
+    <div class="settings-panel" style="margin-bottom:16px">
+      <h3 style="margin-bottom:12px; color:var(--purple)">Historische Daten laden (GeckoTerminal)</h3>
+      <p style="font-size:13px; margin-bottom:12px">1-Minuten-Candles von GeckoTerminal importieren (kostenlos, kein Key). Daten werden mit aufgezeichneten Ticks zusammengef&uuml;hrt.</p>
+      <div class="bt-row">
+        <label>Zeitraum (Stunden)</label>
+        <input type="number" id="btImportHours" value="6" min="1" max="72" step="1">
+        <button class="btn" id="btImportBtn" onclick="importHistorical()" style="background:var(--purple)">Importieren</button>
+        <span class="dim" id="btImportStatus" style="font-size:13px"></span>
+      </div>
+    </div>
+
+    <div class="settings-panel">
+      <h3 style="margin-bottom:16px; color:var(--cyan)">Test-Zeitraum</h3>
+
+      <div class="bt-row">
+        <label>Von</label>
+        <input type="datetime-local" id="btFrom">
+      </div>
+      <div class="bt-row">
+        <label>Bis</label>
+        <input type="datetime-local" id="btTo">
+      </div>
+
+      <h3 style="margin:20px 0 12px; color:var(--cyan)">Geschwindigkeit</h3>
+      <div class="speed-select">
+        <button data-speed="1" onclick="selectSpeed(1)">1x</button>
+        <button data-speed="5" onclick="selectSpeed(5)">5x</button>
+        <button data-speed="10" class="active" onclick="selectSpeed(10)">10x</button>
+        <button data-speed="50" onclick="selectSpeed(50)">50x</button>
+        <button data-speed="100" onclick="selectSpeed(100)">100x</button>
+        <button data-speed="200" onclick="selectSpeed(200)">200x</button>
+        <button data-speed="500" onclick="selectSpeed(500)">500x</button>
+        <button data-speed="0" onclick="selectSpeed(0)">Instant</button>
+      </div>
+
+      <h3 style="margin:20px 0 12px; color:var(--cyan)">Pattern Detection Settings</h3>
+
+      <div class="setting-row">
+        <label>Floor Window (Ticks)</label>
+        <input type="range" id="btFloorWindow" min="5" max="100" value="20" oninput="this.nextElementSibling.textContent=this.value">
+        <span class="val">20</span>
+      </div>
+      <div class="setting-row">
+        <label>Spike Threshold (%)</label>
+        <input type="range" id="btSpikeThreshold" min="10" max="500" value="30" oninput="this.nextElementSibling.textContent=(this.value/100).toFixed(2)">
+        <span class="val">0.30</span>
+      </div>
+      <div class="setting-row">
+        <label>Sell Drop Threshold (%)</label>
+        <input type="range" id="btSellDrop" min="5" max="100" value="15" oninput="this.nextElementSibling.textContent=(this.value/100).toFixed(2)">
+        <span class="val">0.15</span>
+      </div>
+      <div class="setting-row">
+        <label>Cooldown (Ticks)</label>
+        <input type="range" id="btCooldown" min="0" max="50" value="5" oninput="this.nextElementSibling.textContent=this.value">
+        <span class="val">5</span>
+      </div>
+
+      <h3 style="margin:20px 0 12px; color:var(--cyan)">Zusatz-Konfiguration</h3>
+
+      <div class="bt-row">
+        <label>Initial SOL</label>
+        <input type="number" id="btInitialSOL" value="10" min="0.1" step="0.1">
+      </div>
+      <div class="bt-row">
+        <label>Trade Size (SOL)</label>
+        <input type="number" id="btTradeSize" value="1" min="0.1" step="0.1">
+      </div>
+      <div class="bt-row">
+        <label>Correction Agent</label>
+        <input type="checkbox" id="btEnableAgent" checked>
+        <span class="dim" style="font-size:13px">Auto-Optimierung aktiv</span>
+      </div>
+
+      <div style="margin-top:20px; display:flex; gap:12px; align-items:center;">
+        <button class="btn green" id="btStartBtn" onclick="startBacktest()">Backtest Starten</button>
+        <button class="btn red" id="btStopBtn" onclick="stopBacktest()" disabled>Stoppen</button>
+        <span class="bt-status idle" id="btStatus">Bereit</span>
+      </div>
+    </div>
+
+    <!-- Progress -->
+    <div class="progress-bar"><div class="fill" id="btProgressFill"></div></div>
+    <p class="dim" style="font-size:13px" id="btProgressText">0/0 (0%)</p>
+
+    <!-- Backtest Live Dashboard -->
+    <div class="dash" id="btDash" style="margin-top:16px">
+      <div class="dim">&mdash;&mdash; Backtest-Ergebnis wird hier angezeigt &mdash;&mdash;</div>
+      <br>
+      <div>  <span class="bold">Preis</span>    $<span id="btPrice">--</span>  <span class="dim" id="btTime">--:--:--</span></div>
+      <div>  <span class="bold">Floor</span>    $<span id="btFloor">--</span></div>
+      <div>  <span class="bold">Spike</span>    <span id="btSpike" class="dim">--%</span></div>
+      <div>  <span class="bold">Signal</span>   <span class="dim" id="btSignal">--</span></div>
+      <br>
+      <div>  <span class="bold">Chart</span>    <span class="sparkline" id="btChart"></span></div>
+      <br>
+      <div class="dim">────────────────────────────────────────────────────────────</div>
+      <div>  <span class="bold">SOL</span>      <span id="btSOL">--</span>    <span class="bold">UGOR</span>  <span id="btUGOR">--</span></div>
+      <div>  <span class="bold">Trades</span>   <span id="btTrades">0</span>  W:<span class="green" id="btWins">0</span> L:<span class="red" id="btLosses">0</span>  PnL: <span id="btPnl" class="dim">0.00%</span></div>
+      <br>
+      <div class="dim">────────────────────────────────────────────────────────────</div>
+      <div>  <span class="bold">Letzte Trades</span></div>
+      <div id="btTradeList"><span class="dim">  (noch keine Trades)</span></div>
+    </div>
+
+    <!-- Summary (hidden until complete) -->
+    <div id="btSummary" style="display:none; margin-top:20px"></div>
+
+    <!-- Save Button -->
+    <div style="margin-top:20px">
+      <button class="btn outline" id="btSaveBtn" onclick="saveBacktestReport()" disabled>Protokoll als Markdown speichern</button>
+    </div>
+  </section>
+
+  <!-- AGENT UI -->
+  <section id="agent-ui">
+    <h1>KI <span>Agent</span></h1>
+    <p>Lokaler LLM-Agent (Ollama) analysiert den Markt zyklisch und passt Pattern Detection Settings dynamisch an.</p>
+
+    <!-- Status -->
+    <div class="card-grid" style="margin-top:20px">
+      <div class="card">
+        <h3>Status</h3>
+        <div class="value" id="agentStatusVal" style="color:var(--dim)">Lade...</div>
+      </div>
+      <div class="card">
+        <h3>Modell</h3>
+        <div class="value" id="agentModelVal" style="color:var(--purple); font-size:18px">--</div>
+      </div>
+      <div class="card">
+        <h3>Regime</h3>
+        <div class="value" id="agentRegimeVal" style="color:var(--dim)">--</div>
+      </div>
+      <div class="card">
+        <h3>Analysen</h3>
+        <div class="value cyan" id="agentHistoryCount">0</div>
+      </div>
+    </div>
+
+    <!-- Letzte Empfehlung -->
+    <div class="agent-advice" id="agentAdvicePanel">
+      <div style="color:var(--dim)">Noch keine Analyse durchgef&uuml;hrt. Agent muss erst einen Zyklus abschlie&szlig;en.</div>
+    </div>
+
+    <!-- Konfiguration -->
+    <div class="agent-panel">
+      <h3>Konfiguration</h3>
+
+      <div class="agent-row">
+        <label>LLM Modell</label>
+        <select id="agentModel" onchange="updateAgentConfig()">
+          <option value="">Lade Modelle...</option>
+        </select>
+        <button class="btn outline" onclick="loadAgentModels()" style="font-size:12px; padding:4px 10px">&#8635; Aktualisieren</button>
+      </div>
+
+      <div class="agent-row">
+        <label>Zyklus (Minuten)</label>
+        <input type="number" id="agentCycle" value="21" min="1" max="120" step="1" onchange="updateAgentConfig()">
+        <span class="dim" style="font-size:12px">Wie oft analysiert wird</span>
+      </div>
+
+      <div class="agent-row">
+        <label>Temperature</label>
+        <input type="range" id="agentTemp" min="0" max="100" value="30" style="flex:1; accent-color:var(--purple)" oninput="this.nextElementSibling.textContent=(this.value/100).toFixed(2)" onchange="updateAgentConfig()">
+        <span class="val">0.30</span>
+      </div>
+
+      <div class="agent-row">
+        <label>Max Tokens</label>
+        <input type="number" id="agentMaxTokens" value="512" min="128" max="2048" step="64" onchange="updateAgentConfig()">
+      </div>
+
+      <div class="agent-row">
+        <label>Min. Confidence</label>
+        <input type="range" id="agentMinConf" min="0" max="100" value="40" style="flex:1; accent-color:var(--purple)" oninput="this.nextElementSibling.textContent=(this.value/100).toFixed(2)" onchange="updateAgentConfig()">
+        <span class="val">0.40</span>
+      </div>
+
+      <div class="agent-row">
+        <label>Auto-Apply</label>
+        <input type="checkbox" id="agentAutoApply" checked onchange="updateAgentConfig()">
+        <span class="dim" style="font-size:13px">Settings automatisch anwenden (sonst nur Empfehlung)</span>
+      </div>
+
+      <div style="margin-top:16px; display:flex; gap:12px; align-items:center;">
+        <button class="btn green" id="agentStartBtn" onclick="startAgent()">Agent Starten</button>
+        <button class="btn red" id="agentStopBtn" onclick="stopAgent()" disabled>Stoppen</button>
+        <button class="btn purple" onclick="triggerAgentAnalysis()">Jetzt Analysieren</button>
+        <span class="dim" id="agentConfigStatus" style="font-size:13px"></span>
+      </div>
+    </div>
+
+    <!-- System Prompt -->
+    <div class="agent-panel">
+      <h3>System Prompt</h3>
+      <p style="font-size:13px; margin-bottom:12px; color:var(--dim)">Definiert die Anweisungen f&uuml;r das LLM. Marktdaten werden automatisch angeh&auml;ngt.</p>
+      <textarea class="agent-prompt-area" id="agentPrompt"></textarea>
+      <div style="margin-top:12px; display:flex; gap:12px">
+        <button class="btn purple" onclick="saveAgentPrompt()">Prompt Speichern</button>
+        <button class="btn outline" onclick="resetAgentPrompt()">Default wiederherstellen</button>
+      </div>
+    </div>
+
+    <!-- History -->
+    <div class="agent-panel">
+      <h3>Analyse-Historie</h3>
+      <div id="agentHistoryList" style="max-height: 400px; overflow-y: auto;">
+        <div class="dim" style="padding:12px">Noch keine Analysen vorhanden</div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script>
+const API = window.location.origin;
+let connected = false;
+
+function showSection(id) {
+  document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  const link = document.querySelector(`nav a[href="#${id}"]`);
+  if (link) link.classList.add('active');
+  if (id === 'dashboard') loadDashboardAgentStatus();
+  if (id === 'backtest') loadDataRange();
+  if (id === 'agent-ui') { loadAgentStatus(); loadAgentModels(); loadAgentHistory(); }
+}
+
+// --- SSE Live-Verbindung ---
+function connectSSE() {
+  const es = new EventSource(API + '/api/stream');
+  es.onopen = () => {
+    connected = true;
+    document.getElementById('connStatus').innerHTML =
+      '<span class="badge done">Verbunden</span> Live-Daten vom Bot';
+    appendConsoleLog('Verbunden mit Bot', 'info', Date.now());
+  };
+  es.onmessage = (e) => {
+    try { updateDashboard(JSON.parse(e.data)); } catch {}
+  };
+  es.addEventListener('log', (e) => {
+    try {
+      const log = JSON.parse(e.data);
+      appendConsoleLog(log.message, log.level, log.timestamp);
+    } catch {}
+  });
+  es.addEventListener('agent', (e) => {
+    try {
+      const advice = JSON.parse(e.data);
+      // Update dashboard agent indicators
+      const regEl = document.getElementById('dashAgentRegime');
+      if (regEl) {
+        regEl.textContent = advice.regime;
+        const colors = { RANGING: 'var(--green)', TRENDING: 'var(--red)', DEAD: 'var(--dim)', VOLATILE: 'var(--yellow)' };
+        regEl.style.color = colors[advice.regime] || 'var(--dim)';
+      }
+      const stEl = document.getElementById('dashAgentStatus');
+      if (stEl) {
+        const changes = Object.keys(advice.adjustedSettings).length;
+        stEl.textContent = changes > 0 ? changes + ' Settings geändert' : 'Keine Änderungen';
+        stEl.style.color = changes > 0 ? 'var(--cyan)' : 'var(--dim)';
+      }
+      // Update Agent UI page if displayed
+      displayAgentAdvice(advice);
+      loadAgentHistory();
+      loadAgentStatus();
+    } catch {}
+  });
+  es.onerror = () => {
+    connected = false;
+    document.getElementById('connStatus').innerHTML =
+      '<span class="badge" style="background:rgba(248,81,73,.15);color:var(--red)">Nicht verbunden</span> Starte Bot: <code>npx tsx src/index.ts</code> &rarr; dann &ouml;ffne <code>http://localhost:3000</code>';
+    appendConsoleLog('Verbindung verloren, versuche Neuverbindung...', 'warn', Date.now());
+    es.close();
+    setTimeout(connectSSE, 3000);
+  };
+}
+
+function sparkline(prices, width) {
+  if (prices.length < 2) return '';
+  const vals = prices.map(p => p.price);
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const range = max - min || 1;
+  const blocks = ' \u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588';
+  return vals.slice(-width).map(p => {
+    const idx = Math.round(((p - min) / range) * (blocks.length - 1));
+    return blocks[idx];
+  }).join('');
+}
+
+function updateDashboard(state) {
+  const { prices, pattern, stats, settings, recentTrades, mode } = state;
+  const last = prices[prices.length - 1];
+
+  // Mode
+  document.getElementById('dMode').textContent = `[${mode}]`;
+
+  // Preis
+  if (last) {
+    document.getElementById('dPrice').textContent = last.price.toFixed(8);
+    document.getElementById('dTime').textContent = new Date(last.timestamp).toISOString().slice(11, 19);
+  }
+
+  // Pattern
+  if (pattern) {
+    document.getElementById('dFloor').textContent = pattern.floor.toFixed(8);
+    const spikeEl = document.getElementById('dSpike');
+    spikeEl.textContent = pattern.spikePercent.toFixed(3) + '%';
+    spikeEl.className = pattern.spikePercent >= settings.spikeThreshold ? 'green' : 'dim';
+
+    if (pattern.peakPrice > 0) {
+      document.getElementById('dPeakRow').style.display = '';
+      document.getElementById('dPeak').textContent = pattern.peakPrice.toFixed(8);
+      document.getElementById('dDrop').textContent = pattern.dropFromPeak.toFixed(3);
+    } else {
+      document.getElementById('dPeakRow').style.display = 'none';
+    }
+
+    const sigEl = document.getElementById('dSignal');
+    sigEl.textContent = pattern.signal;
+    sigEl.className = pattern.signal === 'BUY' ? 'green' : pattern.signal === 'SELL' ? 'red' : 'dim';
+  }
+
+  // Chart
+  document.getElementById('dChart').textContent = sparkline(prices, 50);
+
+  // Stats
+  document.getElementById('dSOL').textContent = stats.balanceSOL.toFixed(4);
+  document.getElementById('dUGOR').textContent = Math.round(stats.balanceUGOR);
+  document.getElementById('dTrades').textContent = stats.totalTrades;
+  document.getElementById('dWins').textContent = stats.wins;
+  document.getElementById('dLosses').textContent = stats.losses;
+  const pnlEl = document.getElementById('dPnl');
+  pnlEl.textContent = (stats.totalPnlPercent >= 0 ? '+' : '') + stats.totalPnlPercent.toFixed(2) + '%';
+  pnlEl.className = stats.totalPnlPercent >= 0 ? 'green' : 'red';
+
+  // Position
+  if (stats.currentPosition) {
+    document.getElementById('dPosRow').style.display = '';
+    document.getElementById('dPosEntry').textContent = stats.currentPosition.entryPrice.toFixed(8);
+    const unPnl = ((last.price - stats.currentPosition.entryPrice) / stats.currentPosition.entryPrice * 100);
+    const unPnlEl = document.getElementById('dUnPnl');
+    unPnlEl.textContent = (unPnl >= 0 ? '+' : '') + unPnl.toFixed(2) + '%';
+    unPnlEl.className = unPnl >= 0 ? 'green' : 'red';
+  } else {
+    document.getElementById('dPosRow').style.display = 'none';
+  }
+
+  // Recent Trades
+  const tradeList = document.getElementById('dTradeList');
+  if (recentTrades.length === 0) {
+    tradeList.innerHTML = '<span class="dim">  (noch keine Trades)</span>';
+  } else {
+    tradeList.innerHTML = recentTrades.slice(-5).map(t => {
+      const time = new Date(t.timestamp).toISOString().slice(11, 19);
+      const actClass = t.action === 'BUY' ? 'green' : 'red';
+      const pnl = t.pnlPercent != null
+        ? ` <span class="${t.pnlPercent >= 0 ? 'green' : 'red'}">${t.pnlPercent >= 0 ? '+' : ''}${t.pnlPercent.toFixed(2)}%</span>`
+        : '';
+      return `  <span class="dim">${time}</span> <span class="${actClass}">${t.action}</span>  $${t.price.toFixed(8)}${pnl}`;
+    }).join('\n');
+  }
+
+  // Settings display
+  document.getElementById('dFW').textContent = settings.floorWindow;
+  document.getElementById('dST').textContent = settings.spikeThreshold;
+  document.getElementById('dSD').textContent = settings.sellDropThreshold;
+  document.getElementById('dCD').textContent = settings.cooldownTicks;
+
+  // Mode badge
+  updateModeBadge(mode);
+
+  // Sync sliders mit aktuellen Bot-Settings
+  syncSliders(settings);
+}
+
+function syncSliders(settings) {
+  const fw = document.getElementById('sFloorWindow');
+  const st = document.getElementById('sSpikeThreshold');
+  const sd = document.getElementById('sSellDrop');
+  const cd = document.getElementById('sCooldown');
+  if (fw && !fw.matches(':active')) { fw.value = settings.floorWindow; fw.nextElementSibling.textContent = settings.floorWindow; }
+  if (st && !st.matches(':active')) { st.value = Math.round(settings.spikeThreshold * 100); st.nextElementSibling.textContent = settings.spikeThreshold.toFixed(2); }
+  if (sd && !sd.matches(':active')) { sd.value = Math.round(settings.sellDropThreshold * 100); sd.nextElementSibling.textContent = settings.sellDropThreshold.toFixed(2); }
+  if (cd && !cd.matches(':active')) { cd.value = settings.cooldownTicks; cd.nextElementSibling.textContent = settings.cooldownTicks; }
+}
+
+// --- Settings API ---
+async function applySettings() {
+  const settings = {
+    floorWindow: parseInt(document.getElementById('sFloorWindow').value),
+    spikeThreshold: parseInt(document.getElementById('sSpikeThreshold').value) / 100,
+    sellDropThreshold: parseInt(document.getElementById('sSellDrop').value) / 100,
+    cooldownTicks: parseInt(document.getElementById('sCooldown').value),
+  };
+  try {
+    const res = await fetch(API + '/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      document.getElementById('settingsStatus').innerHTML =
+        '<span class="badge done">Settings angewendet</span>';
+      setTimeout(() => document.getElementById('settingsStatus').innerHTML = '', 3000);
+    }
+  } catch {
+    document.getElementById('settingsStatus').innerHTML =
+      '<span class="badge" style="background:rgba(248,81,73,.15);color:var(--red)">Fehler: Bot nicht erreichbar</span>';
+  }
+}
+
+async function resetSettings() {
+  try {
+    await fetch(API + '/api/reset', { method: 'POST' });
+    document.getElementById('settingsStatus').innerHTML =
+      '<span class="badge done">Defaults wiederhergestellt</span>';
+    setTimeout(() => document.getElementById('settingsStatus').innerHTML = '', 3000);
+  } catch {
+    document.getElementById('settingsStatus').innerHTML =
+      '<span class="badge" style="background:rgba(248,81,73,.15);color:var(--red)">Fehler: Bot nicht erreichbar</span>';
+  }
+}
+
+// --- Backtest Module ---
+let btEventSource = null;
+let btSpeed = 10;
+
+function toLocalDatetime(ts) {
+  return new Date(ts - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
+async function importHistorical() {
+  const hours = parseInt(document.getElementById('btImportHours').value) || 6;
+  const btn = document.getElementById('btImportBtn');
+  const status = document.getElementById('btImportStatus');
+  btn.disabled = true;
+  status.textContent = 'Importiere... (kann 1-2 Min dauern)';
+  status.style.color = 'var(--accent)';
+
+  try {
+    const res = await fetch(API + '/api/backtest/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hours }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      const from = new Date(data.from).toLocaleString('de-DE');
+      const to = new Date(data.to).toLocaleString('de-DE');
+      status.textContent = `${data.imported} Candles importiert (${from} \u2013 ${to}). Gesamt: ${data.totalAfter}`;
+      status.style.color = 'var(--green)';
+      loadDataRange(); // Refresh data range display
+    } else {
+      status.textContent = 'Fehler: ' + (data.error || 'Unbekannt');
+      status.style.color = 'var(--red)';
+    }
+  } catch {
+    status.textContent = 'Server nicht erreichbar';
+    status.style.color = 'var(--red)';
+  }
+  btn.disabled = false;
+}
+
+async function loadDataRange() {
+  try {
+    const res = await fetch(API + '/api/backtest/data-range');
+    const data = await res.json();
+    if (data.earliest) {
+      const from = new Date(data.earliest).toLocaleString('de-DE');
+      const to = new Date(data.latest).toLocaleString('de-DE');
+      const mins = ((data.latest - data.earliest) / 60000).toFixed(0);
+      document.getElementById('btDataInfo').innerHTML =
+        `Aufgenommene Daten: <strong>${from}</strong> bis <strong>${to}</strong> (${data.count} Ticks, ~${mins} Min)`;
+      document.getElementById('btFrom').value = toLocalDatetime(data.earliest);
+      document.getElementById('btTo').value = toLocalDatetime(data.latest);
+    } else {
+      document.getElementById('btDataInfo').innerHTML =
+        '<span style="color:var(--red)">Keine aufgenommenen Preisdaten. Bot muss erst laufen um Daten zu sammeln.</span>';
+    }
+  } catch {
+    document.getElementById('btDataInfo').textContent = 'Server nicht erreichbar';
+  }
+}
+
+function selectSpeed(s) {
+  btSpeed = s;
+  document.querySelectorAll('.speed-select button').forEach(b => {
+    b.classList.toggle('active', parseInt(b.dataset.speed) === s);
+  });
+}
+
+function connectBacktestSSE() {
+  if (btEventSource) btEventSource.close();
+  btEventSource = new EventSource(API + '/api/backtest/stream');
+  btEventSource.addEventListener('tick', (e) => {
+    try { updateBacktestDashboard(JSON.parse(e.data)); } catch {}
+  });
+  btEventSource.addEventListener('complete', (e) => {
+    try {
+      const summary = JSON.parse(e.data);
+      showBacktestSummary(summary);
+    } catch {}
+    document.getElementById('btStatus').className = 'bt-status completed';
+    document.getElementById('btStatus').textContent = 'Abgeschlossen';
+    document.getElementById('btStartBtn').disabled = false;
+    document.getElementById('btStopBtn').disabled = true;
+    document.getElementById('btSaveBtn').disabled = false;
+  });
+}
+
+async function startBacktest() {
+  const config = {
+    fromTimestamp: new Date(document.getElementById('btFrom').value).getTime(),
+    toTimestamp: new Date(document.getElementById('btTo').value).getTime(),
+    speed: btSpeed,
+    settings: {
+      floorWindow: parseInt(document.getElementById('btFloorWindow').value),
+      spikeThreshold: parseInt(document.getElementById('btSpikeThreshold').value) / 100,
+      sellDropThreshold: parseInt(document.getElementById('btSellDrop').value) / 100,
+      cooldownTicks: parseInt(document.getElementById('btCooldown').value),
+    },
+    initialSOL: parseFloat(document.getElementById('btInitialSOL').value) || 10,
+    tradeSize: parseFloat(document.getElementById('btTradeSize').value) || 1,
+    enableAgent: document.getElementById('btEnableAgent').checked,
+  };
+
+  // Reset UI
+  document.getElementById('btSummary').style.display = 'none';
+  document.getElementById('btSaveBtn').disabled = true;
+  document.getElementById('btProgressFill').style.width = '0%';
+  document.getElementById('btProgressText').textContent = '0/0 (0%)';
+
+  connectBacktestSSE();
+
+  try {
+    const res = await fetch(API + '/api/backtest/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      document.getElementById('btStatus').className = 'bt-status running';
+      document.getElementById('btStatus').textContent = `Laufend (${data.ticks} Ticks)`;
+      document.getElementById('btStartBtn').disabled = true;
+      document.getElementById('btStopBtn').disabled = false;
+    } else {
+      alert('Fehler: ' + (data.error || 'Unbekannt'));
+    }
+  } catch {
+    alert('Server nicht erreichbar');
+  }
+}
+
+async function stopBacktest() {
+  await fetch(API + '/api/backtest/stop', { method: 'POST' });
+  if (btEventSource) { btEventSource.close(); btEventSource = null; }
+  document.getElementById('btStatus').className = 'bt-status idle';
+  document.getElementById('btStatus').textContent = 'Gestoppt';
+  document.getElementById('btStartBtn').disabled = false;
+  document.getElementById('btStopBtn').disabled = true;
+}
+
+function updateBacktestDashboard(state) {
+  // Progress
+  document.getElementById('btProgressFill').style.width = (state.progress * 100) + '%';
+  document.getElementById('btProgressText').textContent =
+    `${state.currentTick}/${state.totalTicks} (${(state.progress * 100).toFixed(1)}%)`;
+
+  const { prices, pattern, stats, recentTrades } = state;
+  const last = prices[prices.length - 1];
+
+  if (last) {
+    document.getElementById('btPrice').textContent = last.price.toFixed(8);
+    document.getElementById('btTime').textContent = new Date(last.timestamp).toISOString().slice(11, 19);
+  }
+
+  if (pattern) {
+    document.getElementById('btFloor').textContent = pattern.floor.toFixed(8);
+    const spikeEl = document.getElementById('btSpike');
+    spikeEl.textContent = pattern.spikePercent.toFixed(3) + '%';
+    spikeEl.className = pattern.spikePercent >= state.settings.spikeThreshold ? 'green' : 'dim';
+    const sigEl = document.getElementById('btSignal');
+    sigEl.textContent = pattern.signal;
+    sigEl.className = pattern.signal === 'BUY' ? 'green' : pattern.signal === 'SELL' ? 'red' : 'dim';
+  }
+
+  document.getElementById('btChart').textContent = sparkline(prices, 50);
+  document.getElementById('btSOL').textContent = stats.balanceSOL.toFixed(4);
+  document.getElementById('btUGOR').textContent = Math.round(stats.balanceUGOR);
+  document.getElementById('btTrades').textContent = stats.totalTrades;
+  document.getElementById('btWins').textContent = stats.wins;
+  document.getElementById('btLosses').textContent = stats.losses;
+  const pnlEl = document.getElementById('btPnl');
+  pnlEl.textContent = (stats.totalPnlPercent >= 0 ? '+' : '') + stats.totalPnlPercent.toFixed(2) + '%';
+  pnlEl.className = stats.totalPnlPercent >= 0 ? 'green' : 'red';
+
+  const tradeList = document.getElementById('btTradeList');
+  if (recentTrades.length === 0) {
+    tradeList.innerHTML = '<span class="dim">  (noch keine Trades)</span>';
+  } else {
+    tradeList.innerHTML = recentTrades.slice(-5).map(t => {
+      const time = new Date(t.timestamp).toISOString().slice(11, 19);
+      const actClass = t.action === 'BUY' ? 'green' : 'red';
+      const pnl = t.pnlPercent != null
+        ? ` <span class="${t.pnlPercent >= 0 ? 'green' : 'red'}">${t.pnlPercent >= 0 ? '+' : ''}${t.pnlPercent.toFixed(2)}%</span>`
+        : '';
+      return `  <span class="dim">${time}</span> <span class="${actClass}">${t.action}</span>  $${t.price.toFixed(8)}${pnl}`;
+    }).join('\n');
+  }
+}
+
+function showBacktestSummary(summary) {
+  const el = document.getElementById('btSummary');
+  el.style.display = 'block';
+  const { finalStats, duration, priceRange, settingsHistory } = summary;
+  const winRate = finalStats.totalTrades > 0
+    ? ((finalStats.wins / finalStats.totalTrades) * 100).toFixed(0) : '0';
+  el.innerHTML = `
+    <h2 style="color:var(--cyan)">Backtest Ergebnis</h2>
+    <div class="card-grid">
+      <div class="card"><h3>Trades</h3><div class="value cyan">${finalStats.totalTrades}</div></div>
+      <div class="card"><h3>Win-Rate</h3><div class="value ${finalStats.wins > finalStats.losses ? 'green' : 'red'}">${winRate}%</div></div>
+      <div class="card"><h3>PnL</h3><div class="value ${finalStats.totalPnlPercent >= 0 ? 'green' : 'red'}">${finalStats.totalPnlPercent >= 0 ? '+' : ''}${finalStats.totalPnlPercent.toFixed(2)}%</div></div>
+      <div class="card"><h3>SOL Final</h3><div class="value cyan">${finalStats.balanceSOL.toFixed(4)}</div></div>
+    </div>
+    <p style="color:var(--dim)">
+      ${duration.ticks} Ticks in ${(duration.wallTimeMs / 1000).toFixed(1)}s |
+      Datenzeitraum: ${(duration.dataTimeMs / 60000).toFixed(1)} Min |
+      Preis: $${priceRange.min.toFixed(8)} &ndash; $${priceRange.max.toFixed(8)}
+    </p>
+    ${settingsHistory.length > 0
+      ? `<p style="color:var(--dim)">Agent hat Settings ${settingsHistory.length}x angepasst</p>`
+      : '<p style="color:var(--dim)">Agent hat keine Anpassungen vorgenommen</p>'}
+  `;
+}
+
+async function saveBacktestReport() {
+  try {
+    const res = await fetch(API + '/api/backtest/report');
+    if (!res.ok) { alert('Kein Report verf\u00fcgbar'); return; }
+    const md = await res.text();
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `backtest-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch {
+    alert('Fehler beim Laden des Reports');
+  }
+}
+
+// --- Agent Module ---
+
+const DEFAULT_AGENT_PROMPT = `Du bist ein Trading-Analyse-Agent für einen Solana SPL Token Scalping Bot.
+Der Bot kauft am Stufenboden und verkauft am Spike-Scheitelpunkt.
+
+AUFGABE:
+Analysiere die Marktdaten und empfehle optimierte Settings für den NÄCHSTEN Zyklus.
+
+Antworte NUR mit validem JSON in diesem Format:
+{
+  "regime": "RANGING|TRENDING|DEAD|VOLATILE",
+  "confidence": 0.0-1.0,
+  "reason": "kurze Begründung",
+  "analysis": "detaillierte Analyse 2-3 Sätze",
+  "settings": {
+    "spikeThreshold": number,
+    "sellDropThreshold": number,
+    "floorWindow": number,
+    "cooldownTicks": number
+  }
+}
+
+REGELN:
+- RANGING: Spike-Trading optimal, normale Thresholds
+- TRENDING: Gefährlich für Scalper, erhöhe spikeThreshold deutlich (>1.5%)
+- DEAD: Sehr niedrige Volatilität, senke spikeThreshold (<0.15%) oder pausiere
+- VOLATILE: Hohe schnelle Schwankungen, erhöhe sellDropThreshold
+- spikeThreshold: min 0.05, max 5.0
+- sellDropThreshold: min 0.03, max 2.0
+- floorWindow: min 10, max 50
+- cooldownTicks: min 2, max 20
+- Passe Settings nur an wenn nötig, nicht um des Änderns willen`;
+
+async function loadAgentStatus() {
+  try {
+    const res = await fetch(API + '/api/agent/status');
+    if (!res.ok) {
+      document.getElementById('agentStatusVal').textContent = 'Nicht verfügbar';
+      document.getElementById('agentStatusVal').style.color = 'var(--red)';
+      return;
+    }
+    const data = await res.json();
+    const statusEl = document.getElementById('agentStatusVal');
+    if (data.analyzing) {
+      statusEl.textContent = 'Analysiert...';
+      statusEl.style.color = 'var(--yellow)';
+    } else if (data.running) {
+      statusEl.textContent = 'Aktiv';
+      statusEl.style.color = 'var(--green)';
+    } else {
+      statusEl.textContent = 'Inaktiv';
+      statusEl.style.color = 'var(--dim)';
+    }
+
+    document.getElementById('agentModelVal').textContent = data.config.model;
+    document.getElementById('agentHistoryCount').textContent = data.historyCount;
+
+    // Sync config UI
+    document.getElementById('agentCycle').value = data.config.cycleMinutes;
+    document.getElementById('agentTemp').value = Math.round(data.config.temperature * 100);
+    document.getElementById('agentTemp').nextElementSibling.textContent = data.config.temperature.toFixed(2);
+    document.getElementById('agentMaxTokens').value = data.config.maxTokens;
+    document.getElementById('agentMinConf').value = Math.round(data.config.minConfidence * 100);
+    document.getElementById('agentMinConf').nextElementSibling.textContent = data.config.minConfidence.toFixed(2);
+    document.getElementById('agentAutoApply').checked = data.config.autoApply;
+    document.getElementById('agentPrompt').value = data.config.systemPrompt;
+
+    document.getElementById('agentStartBtn').disabled = data.running;
+    document.getElementById('agentStopBtn').disabled = !data.running;
+
+    // Last advice
+    if (data.lastAdvice) {
+      displayAgentAdvice(data.lastAdvice);
+    }
+
+    // Regime
+    if (data.lastAdvice) {
+      const regEl = document.getElementById('agentRegimeVal');
+      regEl.textContent = data.lastAdvice.regime;
+      const colors = { RANGING: 'var(--green)', TRENDING: 'var(--red)', DEAD: 'var(--dim)', VOLATILE: 'var(--yellow)' };
+      regEl.style.color = colors[data.lastAdvice.regime] || 'var(--dim)';
+    }
+  } catch {
+    document.getElementById('agentStatusVal').textContent = 'Fehler';
+    document.getElementById('agentStatusVal').style.color = 'var(--red)';
+  }
+}
+
+async function loadAgentModels() {
+  try {
+    const res = await fetch(API + '/api/agent/models');
+    const models = await res.json();
+    const select = document.getElementById('agentModel');
+    const current = document.getElementById('agentModelVal').textContent;
+
+    select.innerHTML = models.map(m => {
+      const sizeMB = (m.size / 1024 / 1024).toFixed(0);
+      const selected = m.name === current ? ' selected' : '';
+      return `<option value="${m.name}"${selected}>${m.name} (${m.parameter_size}, ${sizeMB}MB)</option>`;
+    }).join('');
+  } catch {
+    document.getElementById('agentModel').innerHTML = '<option value="">Ollama nicht erreichbar</option>';
+  }
+}
+
+async function updateAgentConfig() {
+  const config = {
+    model: document.getElementById('agentModel').value || undefined,
+    cycleMinutes: parseInt(document.getElementById('agentCycle').value) || 21,
+    temperature: parseInt(document.getElementById('agentTemp').value) / 100,
+    maxTokens: parseInt(document.getElementById('agentMaxTokens').value) || 512,
+    minConfidence: parseInt(document.getElementById('agentMinConf').value) / 100,
+    autoApply: document.getElementById('agentAutoApply').checked,
+  };
+  // Remove undefined keys
+  Object.keys(config).forEach(k => config[k] === undefined && delete config[k]);
+
+  try {
+    const res = await fetch(API + '/api/agent/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      const st = document.getElementById('agentConfigStatus');
+      st.textContent = 'Gespeichert';
+      st.style.color = 'var(--green)';
+      setTimeout(() => { st.textContent = ''; }, 2000);
+      document.getElementById('agentModelVal').textContent = data.config.model;
+    }
+  } catch {}
+}
+
+async function saveAgentPrompt() {
+  const prompt = document.getElementById('agentPrompt').value;
+  try {
+    const res = await fetch(API + '/api/agent/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ systemPrompt: prompt }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      const st = document.getElementById('agentConfigStatus');
+      st.textContent = 'Prompt gespeichert';
+      st.style.color = 'var(--green)';
+      setTimeout(() => { st.textContent = ''; }, 2000);
+    }
+  } catch {}
+}
+
+function resetAgentPrompt() {
+  document.getElementById('agentPrompt').value = DEFAULT_AGENT_PROMPT;
+  saveAgentPrompt();
+}
+
+async function startAgent() {
+  try {
+    await fetch(API + '/api/agent/start', { method: 'POST' });
+    document.getElementById('agentStartBtn').disabled = true;
+    document.getElementById('agentStopBtn').disabled = false;
+    document.getElementById('agentStatusVal').textContent = 'Aktiv';
+    document.getElementById('agentStatusVal').style.color = 'var(--green)';
+  } catch {}
+}
+
+async function stopAgent() {
+  try {
+    await fetch(API + '/api/agent/stop', { method: 'POST' });
+    document.getElementById('agentStartBtn').disabled = false;
+    document.getElementById('agentStopBtn').disabled = true;
+    document.getElementById('agentStatusVal').textContent = 'Inaktiv';
+    document.getElementById('agentStatusVal').style.color = 'var(--dim)';
+  } catch {}
+}
+
+async function triggerAgentAnalysis() {
+  const st = document.getElementById('agentConfigStatus');
+  st.textContent = 'Analysiert...';
+  st.style.color = 'var(--yellow)';
+  document.getElementById('agentStatusVal').textContent = 'Analysiert...';
+  document.getElementById('agentStatusVal').style.color = 'var(--yellow)';
+
+  try {
+    const res = await fetch(API + '/api/agent/trigger', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok && data.advice) {
+      displayAgentAdvice(data.advice);
+      st.textContent = 'Analyse abgeschlossen';
+      st.style.color = 'var(--green)';
+      loadAgentHistory();
+    } else {
+      st.textContent = 'Keine Empfehlung (zu wenig Daten?)';
+      st.style.color = 'var(--red)';
+    }
+    setTimeout(() => { st.textContent = ''; }, 3000);
+    loadAgentStatus();
+  } catch {
+    st.textContent = 'Fehler';
+    st.style.color = 'var(--red)';
+  }
+}
+
+function displayAgentAdvice(advice) {
+  const el = document.getElementById('agentAdvicePanel');
+  const time = new Date(advice.timestamp).toLocaleString('de-DE');
+  const confPercent = (advice.confidence * 100).toFixed(0);
+  const confColor = advice.confidence > 0.7 ? 'var(--green)' : advice.confidence > 0.4 ? 'var(--yellow)' : 'var(--red)';
+
+  const changedKeys = Object.keys(advice.adjustedSettings);
+  const settingsHtml = changedKeys.length > 0
+    ? changedKeys.map(k => `<span style="color:var(--cyan)">${k}</span>: ${advice.adjustedSettings[k]}`).join(' &nbsp;|&nbsp; ')
+    : '<span class="dim">Keine \u00c4nderungen empfohlen</span>';
+
+  el.innerHTML = `
+    <div style="margin-bottom:8px">
+      <span class="regime ${advice.regime}">${advice.regime}</span>
+      <span class="dim" style="margin-left:12px; font-size:12px">${time}</span>
+    </div>
+    <div style="margin-bottom:8px">
+      <span class="bold">Confidence:</span>
+      <div class="confidence-bar" style="margin:0 8px">
+        <div class="fill" style="width:${confPercent}%; background:${confColor}"></div>
+      </div>
+      <span style="color:${confColor}">${confPercent}%</span>
+    </div>
+    <div style="margin-bottom:8px">
+      <span class="bold">Reason:</span> <span style="color:var(--text)">${advice.reason}</span>
+    </div>
+    <div style="margin-bottom:8px">
+      <span class="bold">Analyse:</span> <span class="dim">${advice.analysis}</span>
+    </div>
+    <div>
+      <span class="bold">Settings:</span> ${settingsHtml}
+    </div>
+  `;
+
+  // Update regime card
+  const regEl = document.getElementById('agentRegimeVal');
+  regEl.textContent = advice.regime;
+  const colors = { RANGING: 'var(--green)', TRENDING: 'var(--red)', DEAD: 'var(--dim)', VOLATILE: 'var(--yellow)' };
+  regEl.style.color = colors[advice.regime] || 'var(--dim)';
+}
+
+async function loadAgentHistory() {
+  try {
+    const res = await fetch(API + '/api/agent/history');
+    const history = await res.json();
+    const el = document.getElementById('agentHistoryList');
+    document.getElementById('agentHistoryCount').textContent = history.length;
+
+    if (history.length === 0) {
+      el.innerHTML = '<div class="dim" style="padding:12px">Noch keine Analysen vorhanden</div>';
+      return;
+    }
+
+    el.innerHTML = history.slice().reverse().map((a, i) => {
+      const time = new Date(a.timestamp).toLocaleString('de-DE');
+      const confPercent = (a.confidence * 100).toFixed(0);
+      const confColor = a.confidence > 0.7 ? 'var(--green)' : a.confidence > 0.4 ? 'var(--yellow)' : 'var(--red)';
+      const regimeColors = { RANGING: 'var(--green)', TRENDING: 'var(--red)', DEAD: 'var(--dim)', VOLATILE: 'var(--yellow)' };
+      const changes = Object.keys(a.adjustedSettings).length;
+
+      return `<div class="agent-history-item" onclick="displayAgentAdvice(${JSON.stringify(a).replace(/"/g, '&quot;')})">
+        <span class="dim" style="font-size:11px">${time}</span>
+        <span style="color:${regimeColors[a.regime] || 'var(--dim)'}; font-weight:700; margin-left:8px">${a.regime}</span>
+        <span style="color:${confColor}; margin-left:8px">${confPercent}%</span>
+        <span class="dim" style="margin-left:8px">${changes > 0 ? changes + ' \u00c4nderungen' : 'keine \u00c4nderungen'}</span>
+        <span class="dim" style="margin-left:8px; font-size:11px">${a.reason.slice(0, 60)}${a.reason.length > 60 ? '...' : ''}</span>
+      </div>`;
+    }).join('');
+  } catch {}
+}
+
+// --- Console + Controls ---
+const MAX_CONSOLE_ENTRIES = 200;
+
+function appendConsoleLog(message, level, timestamp) {
+  const panel = document.getElementById('consolePanel');
+  if (!panel) return;
+  const time = new Date(timestamp).toISOString().slice(11, 19);
+  const entry = document.createElement('div');
+  entry.className = 'log-entry ' + level;
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'log-time';
+  timeSpan.textContent = time;
+  entry.appendChild(timeSpan);
+  entry.appendChild(document.createTextNode(message));
+  panel.appendChild(entry);
+  while (panel.children.length > MAX_CONSOLE_ENTRIES) {
+    panel.removeChild(panel.firstChild);
+  }
+  if (document.getElementById('consoleAutoscroll').checked) {
+    panel.scrollTop = panel.scrollHeight;
+  }
+}
+
+function clearConsole() {
+  document.getElementById('consolePanel').innerHTML = '';
+}
+
+async function toggleMode() {
+  try {
+    const res = await fetch(API + '/api/mode', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) updateModeBadge(data.mode);
+  } catch {
+    appendConsoleLog('Fehler: Bot nicht erreichbar', 'error', Date.now());
+  }
+}
+
+function updateModeBadge(mode) {
+  const badge = document.getElementById('modeBadge');
+  if (!badge) return;
+  const isPaper = mode === 'PAPER' || mode.includes('PAPER') || mode.includes('SAMMLE');
+  badge.textContent = isPaper ? 'PAPER' : 'LIVE';
+  badge.className = 'mode-badge ' + (isPaper ? 'paper' : 'live');
+}
+
+async function loadDashboardAgentStatus() {
+  try {
+    const res = await fetch(API + '/api/agent/status');
+    if (!res.ok) return;
+    const data = await res.json();
+    const stEl = document.getElementById('dashAgentStatus');
+    if (data.analyzing) {
+      stEl.textContent = 'Analysiert...';
+      stEl.style.color = 'var(--yellow)';
+    } else if (data.running) {
+      stEl.textContent = 'Aktiv';
+      stEl.style.color = 'var(--green)';
+    } else {
+      stEl.textContent = 'Inaktiv';
+      stEl.style.color = 'var(--dim)';
+    }
+    if (data.lastAdvice) {
+      const regEl = document.getElementById('dashAgentRegime');
+      regEl.textContent = data.lastAdvice.regime;
+      const colors = { RANGING: 'var(--green)', TRENDING: 'var(--red)', DEAD: 'var(--dim)', VOLATILE: 'var(--yellow)' };
+      regEl.style.color = colors[data.lastAdvice.regime] || 'var(--dim)';
+    }
+  } catch {}
+}
+
+// Start
+connectSSE();
+loadDashboardAgentStatus();
+</script>
+
+</body>
+</html>

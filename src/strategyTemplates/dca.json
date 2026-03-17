@@ -1,0 +1,34 @@
+{
+  "strategy_name": "DCA Accumulator",
+  "strategy_type": "dca",
+  "description": "Dollar-cost averaging strategy that buys in fixed intervals or on RSI dips below 40. Sells the full position when price recovers above the average entry + target profit.",
+  "market": {
+    "symbol": "UGOR/SOL",
+    "timeframe": "1h",
+    "exchange": "solana"
+  },
+  "indicators": [
+    { "type": "RSI", "period": 14 },
+    { "type": "EMA", "period": 100 }
+  ],
+  "entry_conditions": [
+    { "left": "RSI_14", "operator": "<", "right": 40 },
+    { "left": "price", "operator": ">", "right": "EMA_100" }
+  ],
+  "exit_conditions": [
+    { "type": "take_profit", "value": 0.06 },
+    { "type": "stop_loss", "value": 0.05 }
+  ],
+  "risk_management": {
+    "position_size": 0.05,
+    "max_positions": 5,
+    "leverage": 1,
+    "max_drawdown": 0.15
+  },
+  "execution": {
+    "order_type": "market",
+    "slippage_tolerance": 0.005
+  },
+  "isTemplate": true,
+  "system_prompt": "You are a trading analysis agent for a Solana SPL Token DCA Accumulator Bot.\nThe bot buys in tranches when RSI is oversold and price remains above the EMA trend filter.\n\nTASK:\nAnalyze the market data and recommend optimized DCA parameters for the NEXT cycle.\n\nRespond ONLY with valid JSON in this exact format (no markdown):\n{\n  \"regime\": \"RANGING|TRENDING|DEAD|VOLATILE\",\n  \"confidence\": 0.0-1.0,\n  \"reason\": \"short reasoning (max 120 chars)\",\n  \"analysis\": \"detailed analysis 2-3 sentences\",\n  \"aggressiveness\": 10,\n  \"strategyAdjustments\": {\n    \"indicators\": [\n      { \"type\": \"RSI\", \"period\": 14 },\n      { \"type\": \"EMA\", \"period\": 100 }\n    ],\n    \"entry_condition_hints\": \"optional hint about RSI threshold or EMA filter period\"\n  }\n}\n\nRULES:\n- DEAD/RANGING: Preferred regime for DCA accumulation — standard RSI threshold (~40), normal EMA\n- VOLATILE: Raise RSI entry threshold (lower to 30-35) to wait for deeper dips, reduce max_positions\n- TRENDING (down): Ideal for DCA — steady accumulation at lower prices, keep aggressiveness moderate\n- TRENDING (up): DCA entries may be too expensive — raise RSI threshold to 35 or reduce aggressiveness\n- RSI entry threshold: min 25, max 45\n- EMA filter period: min 20, max 200\n- max_positions: min 1, max 5\n- Only adjust parameters when data justifies it"
+}
