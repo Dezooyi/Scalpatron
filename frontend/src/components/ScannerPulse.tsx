@@ -161,7 +161,7 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
         </div>
       </div>
 
-      <div className={`relative ${className || 'h-24'} bg-black/40 rounded-lg overflow-hidden shadow-inner border border-primary/10 w-full`}>
+      <div className={`relative ${className || 'h-24'} bg-muted/20 rounded-lg overflow-hidden shadow-inner border border-primary/10 w-full`}>
         {/* Zone Background Layers - Moved to zIndex 5 (Foreground) */}
         <div 
           className="absolute left-0 right-0 bg-emerald-500/5 border-b border-emerald-500/20 transition-all duration-300 cursor-help"
@@ -249,19 +249,19 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
         </div>
 
         <div 
-          className="absolute right-1 text-[9px] font-bold text-emerald-400/60 bg-emerald-950/30 px-1 rounded transition-all duration-300 pointer-events-none"
+          className="absolute right-1 text-[9px] font-bold text-emerald-400/60 bg-emerald-500/10 px-1 rounded transition-all duration-300 pointer-events-none"
           style={{ bottom: `${Math.min(95, thresholdPercent + 2)}%`, zIndex: 10 }}
         >
           THRESHOLD +{spikeThreshold}%
         </div>
         <div 
-          className="absolute right-1 text-[9px] font-bold text-amber-400/60 bg-amber-950/30 px-1 rounded transition-all duration-300 pointer-events-none"
+          className="absolute right-1 text-[9px] font-bold text-amber-400/60 bg-amber-500/10 px-1 rounded transition-all duration-300 pointer-events-none"
           style={{ bottom: `${Math.min(95, floorPercent + 2)}%`, zIndex: 10 }}
         >
           FLOOR
         </div>
         <div 
-          className="absolute right-1 text-[9px] font-bold text-rose-400/60 bg-rose-950/30 px-1 rounded transition-all duration-300 pointer-events-none"
+          className="absolute right-1 text-[9px] font-bold text-rose-400/60 bg-rose-500/10 px-1 rounded transition-all duration-300 pointer-events-none"
           style={{ bottom: `${Math.min(95, sellDropPercent + 2)}%`, zIndex: 10 }}
         >
           SELL DROP -{sellDropThreshold}%
@@ -278,7 +278,7 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
               }}
             />
             <div
-              className="absolute right-0 bg-cyan-950/80 text-cyan-300 text-[9px] font-mono px-1.5 py-0.5 rounded whitespace-nowrap border border-cyan-500/30 pointer-events-none"
+              className="absolute right-0 bg-card text-cyan-400 text-[9px] font-mono px-1.5 py-0.5 rounded whitespace-nowrap border border-cyan-500/30 pointer-events-none"
               style={{
                 bottom: `${priceBars[priceBars.length - 1].normalizedHeight}%`,
                 transform: 'translateX(calc(100% + 4px)) translateY(-50%)',

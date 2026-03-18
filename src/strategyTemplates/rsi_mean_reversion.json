@@ -4,7 +4,7 @@
   "description": "Buys when RSI is oversold (below 30) and price is near Bollinger lower band. Sells when RSI recovers to neutral or hits upper band. Best for ranging markets with regular oscillations.",
   "market": {
     "symbol": "UGOR/SOL",
-    "timeframe": "5m",
+    "timeframe": "1m",
     "exchange": "solana"
   },
   "indicators": [

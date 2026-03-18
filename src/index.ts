@@ -2,11 +2,24 @@ import { initDB } from './db.js';
 import { BotManager } from './botManager.js';
 import { BotServer } from './server.js';
 import { PriceRecorder } from './priceRecorder.js';
+import { saveStrategy } from './db.js';
+import { loadBuiltinTemplates } from './strategyEngine.js';
+
 
 console.log('Scalpatron V1 wird gestartet...');
 
 // Initialize SQLite database
 initDB();
+
+// Load strategy templates into DB if missing
+(async () => {
+    const templates = await loadBuiltinTemplates();
+    for (const t of templates) {
+        saveStrategy(t, true); // true = isTemplate
+    }
+    console.log(`[Init] ${templates.length} Strategy Templates geladen.`);
+})().catch(err => console.error('[Init] Fehler beim Laden der Strategy Templates:', err));
+
 
 const recorder = new PriceRecorder();
 const botManager = new BotManager();

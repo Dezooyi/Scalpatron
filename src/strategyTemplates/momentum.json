@@ -4,18 +4,18 @@
   "description": "Enters on MACD histogram crossing above zero (bullish momentum). Combines with RSI to avoid late entries in overbought conditions. Exits on histogram reversal or take profit.",
   "market": {
     "symbol": "UGOR/SOL",
-    "timeframe": "5m",
+    "timeframe": "1m",
     "exchange": "solana"
   },
   "indicators": [
     { "type": "MACD", "fast_period": 12, "slow_period": 26, "signal_period": 9 },
     { "type": "RSI", "period": 14 },
-    { "type": "EMA", "period": 50 }
+    { "type": "EMA", "period": 26 }
   ],
   "entry_conditions": [
     { "left": "MACD_histogram", "operator": "crossover", "right": 0 },
     { "left": "RSI_14", "operator": "<", "right": 70 },
-    { "left": "price", "operator": ">", "right": "EMA_50" }
+    { "left": "price", "operator": ">", "right": "EMA_26" }
   ],
   "exit_conditions": [
     { "type": "take_profit", "value": 0.045 },

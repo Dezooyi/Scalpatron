@@ -34,8 +34,9 @@ const RATE_LIMIT_CONFIG = {
   maxRetryDelay: 60000,     // Maximales Delay (60s)
 } as const;
 
-// Globale Queue für API-Requests
-let lastRequestTime = 0;
+// Per-token Queue für API-Requests
+// lastRequestTime ist pro Mint-Adresse getrennt, damit 6 Bots sich nicht gegenseitig blockieren
+const lastRequestTimeMap: Map<string, number> = new Map();
 let pendingRequests: Map<string, Promise<number | null>> = new Map();
 
 async function wait(ms: number): Promise<void> {
@@ -49,9 +50,10 @@ async function fetchTokenPrice(mintAddress: string, retryCount = 0): Promise<num
     return pendingRequests.get(cacheKey)!;
   }
 
-  // Rate Limiting: Warten bis Mindestabstand eingehalten ist
+  // Rate Limiting: Warten bis Mindestabstand eingehalten ist (pro Token getrennt)
   const now = Date.now();
-  const timeSinceLastRequest = now - lastRequestTime;
+  const lastRequest = lastRequestTimeMap.get(mintAddress) ?? 0;
+  const timeSinceLastRequest = now - lastRequest;
   if (timeSinceLastRequest < RATE_LIMIT_CONFIG.minRequestInterval) {
     const delay = RATE_LIMIT_CONFIG.minRequestInterval - timeSinceLastRequest;
     console.log(`[PriceFeed] Rate Limiting: Warte ${Math.round(delay)}ms vor API-Request für ${mintAddress}`);
@@ -60,7 +62,7 @@ async function fetchTokenPrice(mintAddress: string, retryCount = 0): Promise<num
 
   const fetchPromise = (async (): Promise<number | null> => {
     try {
-      lastRequestTime = Date.now();
+      lastRequestTimeMap.set(mintAddress, Date.now());
       
       // URL und Request basierend auf Provider zusammenbauen
       if (CONFIG.PRICE_FEED_PROVIDER === 'jupiter') {
@@ -211,6 +213,8 @@ export class PriceFeed extends EventEmitter {
         this.intervalIds.delete(mintAddress);
       }
       this.historyMap.delete(mintAddress);
+      lastRequestTimeMap.delete(mintAddress);
+      pendingRequests.delete(mintAddress);
     } else {
       this.subscriberCounts.set(mintAddress, currentCount - 1);
     }

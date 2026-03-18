@@ -287,11 +287,11 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
                 const isUnchanged = change.oldValue === change.newValue && change.changePercent === 0;
                 return (
                   <div key={i} className="flex items-center gap-1.5 text-[10px] font-mono">
-                    <span className="text-zinc-400 w-14 shrink-0 truncate font-semibold">{displayNames[change.key] ?? change.key}</span>
+                    <span className="text-muted-foreground w-14 shrink-0 truncate font-semibold">{displayNames[change.key] ?? change.key}</span>
                     {!isUnchanged ? (
                       <>
-                        <span className="text-zinc-300 tabular-nums">{String(change.oldValue)}</span>
-                        <span className="text-zinc-400 text-[9px] mx-0.5">→</span>
+                        <span className="text-foreground/80 tabular-nums">{String(change.oldValue)}</span>
+                        <span className="text-muted-foreground text-[9px] mx-0.5">→</span>
                         <span className="text-cyan-400 font-bold tabular-nums">{String(change.newValue)}</span>
                         <span className={`ml-auto text-[9px] font-bold px-1 rounded ${change.changePercent > 0 ? "text-green-400 bg-green-500/15" : change.changePercent < 0 ? "text-red-400 bg-red-500/15" : "text-zinc-300 bg-zinc-500/25"}`}>
                           {change.changePercent > 0 ? "+" : ""}{change.changePercent.toFixed(1)}%
@@ -390,11 +390,11 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
     const durationLabel = entry.count > 1 && durationSec > 0 ? `${durationSec}s` : null;
 
     return {
-      id: entry.timestamp,
+      id: `tick-${entry.timestamp}-${idx}`,
       timestamp: timestampStr,
       badge,
       mainContent: (
-        <span className="font-mono text-white/90 tabular-nums">
+        <span className="font-mono text-foreground/90 tabular-nums">
           ${entry.price.toFixed(entry.price < 0.001 ? 8 : 6)}
         </span>
       ),
@@ -424,14 +424,14 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
     bot.status === "running" ? "Collecting data…" : "Start bot to record price data.";
 
   return (
-    <Card className="border-white/5 bg-linear-to-br from-zinc-900 via-zinc-900/95 to-zinc-800/80 flex flex-col h-full overflow-hidden">
+    <Card className="border-border/30 bg-card flex flex-col h-full overflow-hidden">
       <CardHeader className="p-3 pb-2 shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className={`w-1.5 h-1.5 rounded-full ${bot.status === "running" ? "bg-primary animate-pulse" : "bg-zinc-600"}`} />
+            <span className={`w-1.5 h-1.5 rounded-full ${bot.status === "running" ? "bg-primary animate-pulse" : "bg-muted-foreground/40"}`} />
             <span className="text-xs font-bold text-primary/60 uppercase">Live Feed</span>
             {!isLoading && entries.length > 0 && (
-              <span className="text-[10px] font-mono text-zinc-600">
+              <span className="text-[10px] font-mono text-muted-foreground">
                 {entries.length.toLocaleString()} ticks
               </span>
             )}
@@ -440,7 +440,7 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
             onClick={handleWipe}
             disabled={isWiping || entries.length === 0}
             title="Wipe price history"
-            className="p-1 rounded text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            className="p-1 rounded text-muted-foreground hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
           >
             <Trash2 className="h-3 w-3" />
           </button>
@@ -448,7 +448,7 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
       </CardHeader>
       <CardContent className="p-0 flex-1 overflow-y-scroll min-h-0 relative">
         {isLoading && rows.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-[11px] text-zinc-600 font-mono">
+          <div className="flex items-center justify-center h-full text-[11px] text-muted-foreground font-mono">
             Loading…
           </div>
         ) : (

@@ -103,13 +103,15 @@ interface StrategyConfig {
 | Datei | Typ | Timeframe | Indikatoren | Kurzbeschreibung |
 |-------|-----|-----------|-------------|-----------------|
 | `scalping.json` | scalping | 1m | — | Klassischer Floor+Spike Scalper (PatternDetector) |
-| `ema_trend.json` | trend | 5m | EMA 20/50, RSI 14 | EMA-Crossover mit RSI-Filter |
-| `rsi_mean_reversion.json` | mean_reversion | 5m | RSI 14, BB 20 | RSI Oversold + unteres Bollinger Band |
-| `breakout.json` | breakout | 15m | BB 20, ATR 14, RSI 14 | BB-Squeeze Breakout nach oben |
-| `momentum.json` | momentum | 5m | MACD, RSI 14, EMA 50 | MACD-Histogram Crossover über 0 |
-| `dca.json` | dca | 1h | RSI 14, EMA 100 | RSI-Dip-Käufe mit EMA-Trendfilter |
+| `ema_trend.json` | trend | 1m | EMA 12/26, RSI 14 | EMA-Crossover mit RSI-Filter |
+| `rsi_mean_reversion.json` | mean_reversion | 1m | RSI 14, BB 20 | RSI Oversold + unteres Bollinger Band |
+| `breakout.json` | breakout | 1m | BB 20, ATR 14, RSI 14 | BB-Squeeze Breakout nach oben |
+| `momentum.json` | momentum | 1m | MACD, RSI 14, EMA 26 | MACD-Histogram Crossover über 0 |
+| `dca.json` | dca | 5m | RSI 14, EMA 20 | RSI-Dip-Käufe mit EMA-Trendfilter |
 
 Templates liegen in: `src/strategyTemplates/*.json`
+
+> **Warmup-Zeiten & Diagnose:** Siehe **[docs/strategy-warmup-guide.md](./strategy-warmup-guide.md)**
 
 ---
 
@@ -310,8 +312,10 @@ In `src/strategyTypes.ts` zu `StrategyType` hinzufügen. Wenn Sonderlogik nötig
 
 | Limitation | Auswirkung | Lösungsansatz |
 |-----------|------------|---------------|
+| Candle-Warmup bei großen Timeframes/Perioden | Bot tradet erst nach längerer Wartezeit | Timeframe `1m` + Perioden ≤ 30 verwenden; siehe [strategy-warmup-guide.md](./strategy-warmup-guide.md) |
 | Volume = 0 (DexScreener Ticks) | VWAP ungenau, volumenbasierte Indikatoren blind | WebSocket-Feed oder GeckoTerminal OHLCV mit echtem Volumen |
 | `max_positions > 1` noch nicht implementiert | Nur 1 Position gleichzeitig (Trader-Limitierung) | Trader um Portfolio-Tracking erweitern |
 | Grid-Strategie fehlt Execution-Logik | `strategy_type: 'grid'` wird wie trend behandelt | Grid-spezifische Logik in StrategyEngine |
 | Backtest nutzt noch PatternDetector | StrategyEngine im Backtester noch nicht integriert | `src/backtester.ts` auf StrategyEngine migrieren |
 | ML-Strategie ohne Modell | `strategy_type: 'ml'` ist Placeholder | ONNX-Runtime oder externe Modell-Einbindung |
+| Warmup-UI fehlt | User sieht nicht, warum Bot nicht tradet | Warmup-Countdown/Status-Anzeige im Bot-Card implementieren |

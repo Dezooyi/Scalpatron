@@ -4,16 +4,16 @@
   "description": "Dollar-cost averaging strategy that buys in fixed intervals or on RSI dips below 40. Sells the full position when price recovers above the average entry + target profit.",
   "market": {
     "symbol": "UGOR/SOL",
-    "timeframe": "1h",
+    "timeframe": "5m",
     "exchange": "solana"
   },
   "indicators": [
     { "type": "RSI", "period": 14 },
-    { "type": "EMA", "period": 100 }
+    { "type": "EMA", "period": 20 }
   ],
   "entry_conditions": [
     { "left": "RSI_14", "operator": "<", "right": 40 },
-    { "left": "price", "operator": ">", "right": "EMA_100" }
+    { "left": "price", "operator": ">", "right": "EMA_20" }
   ],
   "exit_conditions": [
     { "type": "take_profit", "value": 0.06 },

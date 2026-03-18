@@ -1,5 +1,5 @@
 import { BotInstance, BotState } from './botInstance.js';
-import { db, wipeLiveFeed, setBotStrategy, getStrategy } from './db.js';
+import { db, wipeLiveFeed, setBotStrategy, getStrategy, getBotStrategyId } from './db.js';
 import { DEFAULT_SETTINGS, PatternSettings } from './patternDetector.js';
 import { randomUUID } from 'crypto';
 
@@ -36,6 +36,13 @@ export class BotManager {
         (row.tradingMode ?? 'fixed') as 'fixed' | 'aggressive',
       );
       bot.updateSettings(settings);
+
+      const strategyId = getBotStrategyId(bot.id);
+      if (strategyId) {
+        const config = getStrategy(strategyId);
+        if (config) bot.updateStrategy(config);
+      }
+
       this.bots.set(bot.id, bot);
       
       // Auto-start if it was running? For now leave them stopped on boot for safety.
@@ -57,14 +64,15 @@ export class BotManager {
 
     // Save to DB
     const stmt = db.prepare(`
-      INSERT INTO bots (id, name, mintAddress, status, initialSOL, paperMode, settings, walletAddress, tradeSize, aggressiveness, tradingMode)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO bots (id, name, mintAddress, status, initialSOL, paperMode, settings, walletAddress, tradeSize, aggressiveness, tradingMode, strategyId)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
       id, config.name, config.mintAddress, 'stopped',
       config.initialSOL, config.paperMode ? 1 : 0, JSON.stringify(settings),
       walletAddress, tradeSize, aggressiveness, tradingMode,
+      config.strategyId ?? null,
     );
 
     const bot = new BotInstance(id, config.name, config.mintAddress, config.initialSOL, config.paperMode,

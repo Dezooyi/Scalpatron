@@ -73,7 +73,21 @@
       "Bash(du -h /i/ARBEIT_2026/_Antigravity_Workspace/Solana_BotTrader00/data/*)",
       "Bash(ls -lt src/*.ts)",
       "Bash(npx tsx:*)",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Bash(node -e \":*)",
+      "Bash(sed -i 's/text-\\\\[9px\\\\]/text-tiny/g' frontend/src/App.tsx)",
+      "Bash(sed -i 's/text-\\\\[10px\\\\]/text-xs-custom/g' frontend/src/App.tsx)",
+      "Bash(sed -i 's/text-\\\\[7px\\\\]/text-2xs/g' frontend/src/App.tsx)",
+      "Bash(sed -i 's/text-\\\\[8px\\\\]/text-3xs/g' frontend/src/App.tsx)",
+      "Bash(sed -i 's/text-\\\\[11px\\\\]/text-sm-custom/g' frontend/src/App.tsx)",
+      "Bash(sed -i 's/text-\\\\[12px\\\\]/text-md-custom/g' frontend/src/App.tsx)",
+      "Bash(curl -s http://localhost:3000/api/bots)",
+      "Bash(curl -s --max-time 5 http://localhost:3000/api/stream)",
+      "Bash(awk 'NR>=1573 && NR<=1580' frontend/src/App.tsx)",
+      "Bash(awk 'NR>=3480 && NR<=3490' frontend/src/App.tsx)",
+      "Bash(awk 'NR>=4360 && NR<=4472' frontend/src/App.tsx)",
+      "Bash(awk 'NR>=1573 && NR<=1680' frontend/src/App.tsx)",
+      "Bash(awk 'NR>=1680 && NR<=1830' frontend/src/App.tsx)"
     ]
   }
 }

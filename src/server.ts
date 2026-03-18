@@ -778,9 +778,11 @@ export class BotServer {
         res.end(JSON.stringify({ error: 'OllamaAgent not initialized' }));
         return;
       }
-      this.ollamaAgent.triggerAnalysis();
+      const body = await parseBody(req);
+      const botId: string | undefined = body?.botId || undefined;
+      this.ollamaAgent.triggerAnalysis(botId);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, message: 'Analysis triggered' }));
+      res.end(JSON.stringify({ ok: true, message: 'Analysis triggered', botId: botId ?? 'all' }));
       return;
     }
 

@@ -173,7 +173,20 @@ export function saveAnimationConfig(config: AnimationConfig): void {
 /**
  * Berechnet die Box-Shadow-Werte basierend auf der Konfiguration
  */
-export function getBoxShadowValues(_config: AnimationConfig, _color: string, _phase: "pulse" | "hold" | "fade"): string {
-  // Glow effects removed per user request
-  return "none";
+export function getBoxShadowValues(config: AnimationConfig, color: string, phase: "pulse" | "hold" | "fade"): string {
+  if (phase === "pulse") {
+    const a = config.pulseIntensity;
+    const spread = config.pulseSpread;
+    const blur = config.pulseBlur;
+    const inset = config.pulseInsetSpread;
+    return `0 0 ${blur}px ${spread}px ${color.replace("rgb", "rgba").replace(")", `, ${a})`)}` +
+           `, inset 0 0 ${inset}px ${color.replace("rgb", "rgba").replace(")", `, ${a * 0.4})`)}`;
+  }
+  if (phase === "hold") {
+    const a = config.holdIntensity;
+    const spread = config.holdSpread;
+    const blur = config.holdBlur;
+    return `0 0 ${blur}px ${spread}px ${color.replace("rgb", "rgba").replace(")", `, ${a})`)}`;
+  }
+  return "0 0 0 0 rgba(0,0,0,0)";
 }

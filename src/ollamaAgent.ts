@@ -393,6 +393,12 @@ export class OllamaAgent {
     } catch { return false; }
   }
 
+  private enqueueBot(botId: string): void {
+    if (!this.analysisQueue.includes(botId)) {
+      this.analysisQueue.push(botId);
+    }
+  }
+
   private async runCycle(): Promise<void> {
     if (!this.botManager) { console.warn('[OllamaAgent] Kein BotManager'); return; }
 
@@ -402,9 +408,7 @@ export class OllamaAgent {
 
     for (const bot of allBots) {
       const state = bot.getState();
-      if (state.status !== 'stopped' && !this.analysisQueue.includes(bot.id)) {
-        this.analysisQueue.push(bot.id);
-      }
+      if (state.status !== 'stopped') this.enqueueBot(bot.id);
     }
 
     if (this.analysisQueue.length > 0) {
@@ -1015,18 +1019,21 @@ ${JSON.stringify(m5HistoryLite, null, 2)}`;
     };
   }
 
-  triggerAnalysis(): void {
+  triggerAnalysis(botId?: string): void {
     if (!this.botManager) return;
-    console.log('[OllamaAgent] Manuelle Analyse für ALLE Bots ausgelöst');
-    logger.system('Manuelle Analyse-Anfrage für alle Bots erhalten.');
-    
-    const bots = this.botManager.getAllBots();
-    for (const bot of bots) {
-      if (!this.analysisQueue.includes(bot.id)) {
-        this.analysisQueue.push(bot.id);
+
+    if (botId) {
+      console.log(`[OllamaAgent] Manuelle Analyse für Bot ${botId} ausgelöst`);
+      logger.info(botId, 'AI_AGENT', 'Manual analysis queued.');
+      this.enqueueBot(botId);
+    } else {
+      console.log('[OllamaAgent] Manuelle Analyse für ALLE Bots ausgelöst');
+      logger.system('Manuelle Analyse-Anfrage für alle Bots erhalten.');
+      for (const bot of this.botManager.getAllBots()) {
+        this.enqueueBot(bot.id);
       }
     }
-    
+
     if (this.analysisQueue.length > 0) {
       this.drainQueue();
     }

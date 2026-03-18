@@ -179,10 +179,20 @@ export class Trader {
     this.losses = 0;
     this.totalPnlPercent = 0;
     this.positions = [];
-    if (initialSOL !== undefined) {
-      this.balanceSOL = initialSOL;
+    
+    // Paper Mode: SOL-Balance auf Startwert zurücksetzen
+    // Live Mode: SOL-Balance behalten (aktueller Wallet-Wert)
+    if (this.paperMode) {
+      // Paper Mode: Balance auf Startwert zurücksetzen
+      if (initialSOL !== undefined) {
+        this.balanceSOL = initialSOL;
+      }
+      this.balanceUGOR = 0;
+    } else {
+      // Live Mode: Balance nicht zurücksetzen - behält aktuellen Wallet-Wert
+      // balanceUGOR wird auf 0 gesetzt, da keine offenen Positionen nach Reset
+      this.balanceUGOR = 0;
     }
-    this.balanceUGOR = 0;
   }
 
   private async executeLiveSwap(inputMint: string, outputMint: string, amountLamports: number): Promise<boolean> {
@@ -246,6 +256,18 @@ export class Trader {
       } else if (this.tradingMode === 'aggressive') {
         // Aggressive mode uses user's "aggressiveness" slider / agent override
         effectiveTradeSize = this.balanceSOL * (this.aggressiveness / 100);
+      }
+      
+      // Balance validation: prevent trades with insufficient or negative balance
+      if (effectiveTradeSize <= 0) {
+        console.warn(`[Trader] BUY abgelehnt: Unzureichendes SOL (effectiveTradeSize: ${effectiveTradeSize.toFixed(4)} SOL, balance: ${this.balanceSOL.toFixed(4)} SOL)`);
+        return null;
+      }
+      
+      // Prevent trades when balance is too low (minimum 0.01 SOL buffer)
+      if (effectiveTradeSize > this.balanceSOL - 0.01) {
+        console.warn(`[Trader] BUY abgelehnt: Trade-Größe (${effectiveTradeSize.toFixed(4)} SOL) exceeds available balance (${this.balanceSOL.toFixed(4)} SOL)`);
+        return null;
       }
       
       const ugorAmount = effectiveTradeSize / result.currentPrice;

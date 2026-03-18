@@ -6,6 +6,11 @@ import { db, updateAgentOutcome, getBotStrategyId, getStrategy, getBotCustomSyst
 import { PriceRecorder } from './priceRecorder.js';
 import { StrategyEngine } from './strategyEngine.js';
 import type { StrategyConfig } from './strategyTypes.js';
+import { TIMEFRAME_MS } from './candleAggregator.js';
+
+const PRICE_FEED_TICKRATE_MS = process.env.PRICE_FEED_TICKRATE_MS
+  ? parseInt(process.env.PRICE_FEED_TICKRATE_MS, 10)
+  : 2000;
 
 export interface BotState {
   id: string;
@@ -28,6 +33,7 @@ export interface BotState {
   strategyId?: string;
   strategyType?: string;
   strategyConfig?: StrategyConfig;
+  warmupProgress?: number; // 0.0 to 1.0
 }
 
 export class BotInstance {
@@ -44,6 +50,7 @@ export class BotInstance {
   public customSystemPrompt: string | null = null;
   private cumulativeTicks = 0;
   private startTime?: number;
+  private initialSOL: number;
 
   constructor(
     id: string,
@@ -60,6 +67,7 @@ export class BotInstance {
     this.name = name;
     this.mintAddress = mintAddress;
     this.walletAddress = walletAddress;
+    this.initialSOL = initialSOL;
     this.detector = new PatternDetector();
     this.recorder = new PriceRecorder();
     this.trader = new Trader({ initialSOL, tradeSize, aggressiveness, tradingMode, paperMode, logFile: `trades-${this.id}.jsonl` });
@@ -104,9 +112,11 @@ export class BotInstance {
   }
 
   /** Reset bot stats and optionally clear trades/prices */
-  public resetStats(clearTrades: boolean, clearPrices: boolean, initialSOL?: number): void {
+  public resetStats(clearTrades: boolean, clearPrices: boolean): void {
     // Reset trader stats in memory
-    this.trader.resetStats(initialSOL);
+    // Paper Mode: Reset SOL balance to initial value
+    // Live Mode: Keep current SOL balance (will be read from wallet)
+    this.trader.resetStats(this.initialSOL);
 
     // Clear trades from database
     if (clearTrades) {
@@ -368,6 +378,7 @@ export class BotInstance {
       strategyId: this.activeStrategyConfig?.id,
       strategyType: this.activeStrategyConfig?.strategy_type,
       strategyConfig: this.activeStrategyConfig,
+      warmupProgress: this.getWarmupProgress(),
     };
 
     // Diagnostic log for history
@@ -376,6 +387,34 @@ export class BotInstance {
     }
 
     return state;
+  }
+
+  private getWarmupProgress(): number {
+    const feed = PriceFeed.getInstance();
+    const history = feed.getHistory(this.mintAddress);
+    const currentTicks = history.length;
+
+    if (!this.activeStrategyConfig || this.activeStrategyConfig.strategy_type === 'scalping') {
+      const required = this.detector.settings.floorWindow;
+      return Math.min(1, currentTicks / required);
+    }
+
+    // Strategy Warmup
+    const timeframe = this.activeStrategyConfig.market.timeframe || '1m';
+    const ms = TIMEFRAME_MS[timeframe as keyof typeof TIMEFRAME_MS] ?? 60_000;
+    const ticksPerCandle = ms / PRICE_FEED_TICKRATE_MS;
+    
+    // Find max indicator period
+    let maxPd = 0;
+    for (const ind of this.activeStrategyConfig.indicators) {
+      const p = Math.max(ind.period || 0, ind.fast_period || 0, ind.slow_period || 0, ind.k_period || 0, ind.d_period || 0);
+      if (p > maxPd) maxPd = p;
+    }
+    
+    const requiredCandles = maxPd > 0 ? maxPd : 10;
+    const requiredTicks = Math.ceil(requiredCandles * ticksPerCandle);
+    
+    return Math.min(1, currentTicks / requiredTicks);
   }
 
   private onPriceTick = async (point: PricePoint) => {
@@ -397,7 +436,13 @@ export class BotInstance {
       logger.info(this.id, 'FEED', `Tick #${history.length} empfangen: $${point.price.toFixed(8)} | Buffer: ${history.length}/${this.detector.settings.floorWindow}`);
     }
 
-    if (history.length < this.detector.settings.floorWindow) {
+    // Block trading during warmup.
+    // Scalping (PatternDetector) needs the tick buffer fully seeded before it can produce
+    // reliable floor/spike values — enforce 100% warmup externally.
+    // Indicator strategies (StrategyEngine) have their own internal 60%-rule warmup guard
+    // (see analyzeGeneric) and return HOLD until ready — no outer block needed.
+    const isScalping = !this.activeStrategyConfig || this.activeStrategyConfig.strategy_type === 'scalping';
+    if (isScalping && history.length < this.detector.settings.floorWindow) {
       return;
     }
 

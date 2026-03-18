@@ -5,6 +5,10 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
+    "dev": "npx tsx src/index.ts",
+    "start": "npx tsx src/index.ts",
+    "frontend": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

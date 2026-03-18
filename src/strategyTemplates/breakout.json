@@ -4,7 +4,7 @@
   "description": "Detects Bollinger Band squeeze (low volatility) and trades the breakout when price exits the upper band with momentum. ATR confirms volatility expansion.",
   "market": {
     "symbol": "UGOR/SOL",
-    "timeframe": "15m",
+    "timeframe": "1m",
     "exchange": "solana"
   },
   "indicators": [

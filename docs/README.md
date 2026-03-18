@@ -11,6 +11,7 @@
 - [Trading-Strategie](./strategy.md) — Range Spike Scalper + Multi-Strategy Architecture
 - [Multi-Strategy](./multi-strategy.md) — JSON Strategy Schema, Templates, IndicatorEngine, Feedback-Loop
 - [Betrieb](./operations.md) — Starten, Dashboard-Bedienung, Logs, Troubleshooting
+- [Design System](./design-system.md) — CSS-Variablen, Runtime-Overrides, `@theme inline` vs. `@theme`, dsConfig.ts
 
 ## Schnellstart
 

@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { Moon, Sun, CheckCircle, XCircle, AlertTriangle, Settings, Server } from "lucide-react";
 import AnimationSettings from "./AnimationSettings";
+import DesignSystemSettings from "./DesignSystemSettings";
+import type { AnimationConfig } from "@/lib/animationConfig";
 import { PageHeader } from "./PageHeader";
 import {
   Card,
@@ -43,9 +45,10 @@ type Props = {
   theme: "dark" | "light";
   onThemeChange: (t: "dark" | "light") => void;
   onSaved?: (settings: Partial<GlobalSettingsData>) => void;
+  onAnimConfigChange?: (config: AnimationConfig) => void;
 };
 
-export default function GlobalSettings({ theme, onThemeChange, onSaved }: Props) {
+export default function GlobalSettings({ theme, onThemeChange, onSaved, onAnimConfigChange }: Props) {
   const [settings, setSettings] = useState<GlobalSettingsData>(DEFAULTS);
   const [apiUrl, setApiUrl] = useState(() => localStorage.getItem(LS_API_URL_KEY) ?? "http://localhost:3000");
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
@@ -211,8 +214,11 @@ export default function GlobalSettings({ theme, onThemeChange, onSaved }: Props)
         </CardContent>
       </Card>
 
+      {/* Design System */}
+      <DesignSystemSettings />
+
       {/* Animation Settings */}
-      <AnimationSettings />
+      <AnimationSettings onConfigChange={onAnimConfigChange} />
     </div>
   );
 }

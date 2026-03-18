@@ -27,3 +27,16 @@ export const getStrategyColor = (type: string | undefined) => {
     default: return 'bg-zinc-500/20 text-zinc-400 border-zinc-500/30';
   }
 };
+
+export const getStrategyDescription = (type: string | undefined) => {
+  switch (type) {
+    case 'trend': return 'Trend Strategy: Folgt dem Markttrend für längerfristige Positionen.';
+    case 'mean_reversion': return 'Mean Reversion: Setzt auf die Rückkehr zum Durchschnittspreis.';
+    case 'breakout': return 'Breakout Strategy: Nutzt massive Ausbrüche aus Preiszonen.';
+    case 'momentum': return 'Momentum Strategy: Exploits the speed of price movements.';
+    case 'dca': return 'DCA Strategy: Dollar Cost Averaging accumulating positions over time.';
+    case 'grid': return 'Grid Strategy: Places buy and sell orders at regular intervals.';
+    case 'ml': return 'Machine Learning: KI-basierte Predictive Modeling Matrix.';
+    default: return 'Scalping Strategy: Exploits small price spikes for quick profits.';
+  }
+};

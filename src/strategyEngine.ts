@@ -82,13 +82,16 @@ export class StrategyEngine {
     const candles = aggregate(ticks, this.config.market.timeframe);
     if (candles.length < 2) return base;
 
-    // --- Warmup guard: require enough candles for all indicator periods ---
+    // --- Warmup guard: require at least 60% of maxPeriod candles ---
+    // EMA/RSI/BB produce reasonable values well before a full period is complete.
+    // Using 60% threshold allows trading to start sooner without sacrificing accuracy.
     const maxPeriod = this.config.indicators.reduce((max, ind) => {
       const p = ind.slow_period ?? ind.period ?? 1;
       return Math.max(max, p);
     }, 1);
-    if (candles.length < maxPeriod) {
-      base.reason = `warming up (${candles.length}/${maxPeriod} candles)`;
+    const minCandlesNeeded = Math.max(2, Math.ceil(maxPeriod * 0.6));
+    if (candles.length < minCandlesNeeded) {
+      base.reason = `warming up (${candles.length}/${minCandlesNeeded} candles needed, max period: ${maxPeriod})`;
       return base;
     }
 

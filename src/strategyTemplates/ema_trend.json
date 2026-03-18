@@ -4,16 +4,16 @@
   "description": "Follows the trend using EMA crossover (fast/slow). RSI filter avoids overbought entries. Best for trending markets with clear directional momentum.",
   "market": {
     "symbol": "UGOR/SOL",
-    "timeframe": "5m",
+    "timeframe": "1m",
     "exchange": "solana"
   },
   "indicators": [
-    { "type": "EMA", "period": 20 },
-    { "type": "EMA", "period": 50 },
+    { "type": "EMA", "period": 12 },
+    { "type": "EMA", "period": 26 },
     { "type": "RSI", "period": 14 }
   ],
   "entry_conditions": [
-    { "left": "EMA_20", "operator": "crossover", "right": "EMA_50" },
+    { "left": "EMA_12", "operator": "crossover", "right": "EMA_26" },
     { "left": "RSI_14", "operator": "<", "right": 65 }
   ],
   "exit_conditions": [
@@ -21,7 +21,7 @@
     { "type": "stop_loss", "value": 0.02 },
     {
       "type": "indicator",
-      "condition": { "left": "EMA_20", "operator": "crossunder", "right": "EMA_50" }
+      "condition": { "left": "EMA_12", "operator": "crossunder", "right": "EMA_26" }
     }
   ],
   "risk_management": {

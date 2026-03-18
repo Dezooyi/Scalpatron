@@ -1,21 +1,23 @@
 {
   "regime": "DEAD",
-  "confidence": 0.8,
-  "reason": "Flat trend, low volatility, no volume signal",
-  "analysis": "Market shows flat trend with 1% strength and 0.56% volatility. No significant price movement detected in last minute.",
+  "confidence": 0.9,
+  "reason": "Zero volatility, flat trend, minimal volume",
+  "analysis": "Price has been stuck at $0.002607 for the last minute with 0% volatility and 0% trend strength. This indicates a complete lack of market activity.",
   "aggressiveness": 5,
   "settings": {
     "spikeThreshold": 0.1,
     "sellDropThreshold": 0.15,
-    "floorWindow": 20,
+    "floorWindow": 200,
     "cooldownTicks": 5
   },
   "strategyAdjustments": {
-    "indicators": [],
+    "indicators": [
+      { "type": "RSI", "period": 14 }
+    ],
     "risk_management": {
       "position_size": 5,
       "max_positions": 1
     },
-    "entry_condition_hints": "Wait for spike > 0.1% above floor"
+    "entry_condition_hints": "Wait for volatility spike."
   }
 }

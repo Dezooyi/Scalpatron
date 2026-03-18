@@ -28,10 +28,10 @@ const BADGE: Record<BadgeVariant, string> = {
 };
 
 const ACCENT_BG: Record<string, string> = {
-  primary: "border-l-2 border-primary bg-zinc-800/80",
-  purple:  "border-l-2 border-purple-500 bg-purple-900/20",
-  green:   "border-l-2 border-green-500 bg-green-900/10",
-  red:     "border-l-2 border-red-500 bg-red-900/10",
+  primary: "border-l-2 border-primary bg-muted/40",
+  purple:  "border-l-2 border-purple-500 bg-purple-500/10",
+  green:   "border-l-2 border-green-500 bg-green-500/5",
+  red:     "border-l-2 border-red-500 bg-red-500/5",
 };
 
 function LogFeedRow({ row, isLatest }: { row: LogFeedRowData; isLatest: boolean }) {
@@ -41,15 +41,15 @@ function LogFeedRow({ row, isLatest }: { row: LogFeedRowData; isLatest: boolean 
   const accentClass = row.accent
     ? ACCENT_BG[row.accent]
     : isLatest
-    ? "border-l-2 border-primary bg-zinc-800/80"
-    : "bg-zinc-900/40";
+    ? "border-l-2 border-primary bg-muted/40"
+    : "bg-muted/20";
 
   function handleMouseEnter(e: React.MouseEvent) {
     setHovered(true);
     if (row.hoverText && !row.expandedContent) {
       tooltip.show(
         <>
-          <span className="font-mono text-zinc-400 mr-3 text-[11px]">{row.timestamp}</span>
+          <span className="font-mono text-muted-foreground mr-3 text-[11px]">{row.timestamp}</span>
           {row.hoverText}
         </>,
         e
@@ -71,7 +71,7 @@ function LogFeedRow({ row, isLatest }: { row: LogFeedRowData; isLatest: boolean 
       className={`relative flex flex-col gap-1 py-1.5 px-2.5 rounded-md text-micro shadow-sm
         animate-in slide-in-from-top-2 fade-in duration-300 transition-all
         ${accentClass}
-        ${hovered ? "scale-[1.015] shadow-lg z-10 !bg-zinc-800/95" : "hover:bg-zinc-800/60"}
+        ${hovered ? "scale-[1.015] shadow-lg z-10 bg-muted/60!" : "hover:bg-muted/30"}
       `}
       style={{ opacity: row.opacity ?? 1 }}
       onMouseEnter={handleMouseEnter}
@@ -79,13 +79,13 @@ function LogFeedRow({ row, isLatest }: { row: LogFeedRowData; isLatest: boolean 
       onMouseLeave={handleMouseLeave}
     >
       <div className="flex items-center gap-1.5 min-w-0">
-        <span className="font-mono text-zinc-400 shrink-0 tabular-nums text-[9px]">
+        <span className="font-mono text-muted-foreground shrink-0 tabular-nums text-[9px]">
           {row.timestamp}
         </span>
         <span className={`text-[8px] font-black px-1.5 py-0.5 rounded shrink-0 border ${BADGE[row.badge.variant]}`}>
           {row.badge.text}
         </span>
-        <span className={`flex-1 min-w-0 font-mono text-zinc-300 text-[10px] ${hovered ? "whitespace-normal break-words" : "truncate"}`}>
+        <span className={`flex-1 min-w-0 font-mono text-foreground/80 text-[10px] ${hovered ? "whitespace-normal wrap-break-word" : "truncate"}`}>
           {row.mainContent}
         </span>
         {row.rightContent && (

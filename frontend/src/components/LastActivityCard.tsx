@@ -44,12 +44,12 @@ export function LastActivityCard({ bot }: LastActivityCardProps) {
   const lastActivityTime = lastTrade?.timestamp || bot.priceHistory?.[bot.priceHistory.length - 1];
 
   return (
-    <Card className="border-white/5 bg-gradient-to-br from-zinc-900 via-zinc-900/95 to-zinc-800/80">
+    <Card className="border-border/30 bg-card">
       <CardHeader className="p-3 pb-2">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Clock className="h-4 w-4 text-blue-400" />
-            <h4 className="text-xs font-bold text-white uppercase">Last Activity</h4>
+            <h4 className="text-xs font-bold text-foreground uppercase">Last Activity</h4>
           </div>
           <SignalBadge signal={signal} />
         </div>
@@ -57,10 +57,10 @@ export function LastActivityCard({ bot }: LastActivityCardProps) {
       <CardContent className="p-3 pt-0">
         <div className="grid grid-cols-3 gap-2">
           {/* Last Trade Info */}
-          <div className="rounded-lg bg-zinc-900/50 border border-zinc-800 p-2.5 min-w-0">
+          <div className="rounded-lg bg-muted/30 border border-border p-2.5 min-w-0">
             <div className="flex items-center gap-1.5 mb-1.5">
               <Zap className="h-3 w-3 text-yellow-400" />
-              <span className="text-[9px] font-bold uppercase text-zinc-500">Last Trade</span>
+              <span className="text-[9px] font-bold uppercase text-muted-foreground">Last Trade</span>
             </div>
             {lastTrade ? (
               <div className="flex flex-col gap-1">
@@ -71,7 +71,7 @@ export function LastActivityCard({ bot }: LastActivityCardProps) {
                     {lastTrade.action}
                   </span>
                   <span
-                    className="text-[10px] text-zinc-500 cursor-help"
+                    className="text-[10px] text-muted-foreground cursor-help"
                     onMouseEnter={(e) => tooltip.show(`Trade executed at ${formatDateTime(lastTrade.timestamp)}`, e)}
                     onMouseMove={(e) => tooltip.move(e)}
                     onMouseLeave={() => tooltip.hide()}
@@ -80,7 +80,7 @@ export function LastActivityCard({ bot }: LastActivityCardProps) {
                   </span>
                 </div>
                 <div
-                  className="text-sm font-mono text-white cursor-help"
+                  className="text-sm font-mono text-foreground cursor-help"
                   onMouseEnter={(e) => tooltip.show(`Execution price: $${lastTrade.price.toFixed(8)}`, e)}
                   onMouseMove={(e) => tooltip.move(e)}
                   onMouseLeave={() => tooltip.hide()}
@@ -102,7 +102,7 @@ export function LastActivityCard({ bot }: LastActivityCardProps) {
                 )}
                 {lastTrade.exitPrice && (
                   <div
-                    className="text-[10px] font-mono text-zinc-500 cursor-help"
+                    className="text-[10px] font-mono text-muted-foreground cursor-help"
                     onMouseEnter={(e) => tooltip.show(`Exit price: $${lastTrade.exitPrice!.toFixed(8)}`, e)}
                     onMouseMove={(e) => tooltip.move(e)}
                     onMouseLeave={() => tooltip.hide()}
@@ -112,17 +112,17 @@ export function LastActivityCard({ bot }: LastActivityCardProps) {
                 )}
               </div>
             ) : (
-              <div className="text-sm text-zinc-500 text-center py-2">
+              <div className="text-sm text-muted-foreground text-center py-2">
                 No trades yet
               </div>
             )}
           </div>
 
           {/* Position Info */}
-          <div className="rounded-lg bg-zinc-900/50 border border-zinc-800 p-2.5 min-w-0">
+          <div className="rounded-lg bg-muted/30 border border-border p-2.5 min-w-0">
             <div className="flex items-center gap-1.5 mb-1.5">
               <Zap className="h-3 w-3 text-purple-400" />
-              <span className="text-[9px] font-bold uppercase text-zinc-500">Position</span>
+              <span className="text-[9px] font-bold uppercase text-muted-foreground">Position</span>
             </div>
             <div className="flex flex-col gap-1">
               <div
@@ -136,15 +136,15 @@ export function LastActivityCard({ bot }: LastActivityCardProps) {
               {bot.stats?.currentPosition && inPosition && (
                 <>
                   <div
-                    className="text-[10px] font-mono text-zinc-400 cursor-help"
-                    onMouseEnter={(e) => tooltip.show(`Entry price: $${bot.stats!.currentPosition!.entryPrice.toFixed(8)}`, e)}
+                    className="text-[10px] font-mono text-muted-foreground cursor-help"
+                    onMouseEnter={(e) => tooltip.show(`Entry price: $${bot.stats?.currentPosition?.entryPrice?.toFixed(8) || "—"}`, e)}
                     onMouseMove={(e) => tooltip.move(e)}
                     onMouseLeave={() => tooltip.hide()}
                   >
-                    Entry: ${bot.stats.currentPosition.entryPrice.toFixed(6)}
+                    Entry: ${bot.stats?.currentPosition?.entryPrice?.toFixed(6) || "—"}
                   </div>
                   <div
-                    className="text-[10px] font-mono text-white cursor-help"
+                    className="text-[10px] font-mono text-foreground cursor-help"
                     onMouseEnter={(e) => tooltip.show(`Current market price: $${bot.stats!.lastPrice.toFixed(8)}`, e)}
                     onMouseMove={(e) => tooltip.move(e)}
                     onMouseLeave={() => tooltip.hide()}
@@ -157,13 +157,13 @@ export function LastActivityCard({ bot }: LastActivityCardProps) {
           </div>
 
           {/* Last Price Update */}
-          <div className="rounded-lg bg-zinc-900/50 border border-zinc-800 p-2.5 min-w-0">
+          <div className="rounded-lg bg-muted/30 border border-border p-2.5 min-w-0">
             <div className="flex items-center gap-1.5 mb-1.5">
               <Clock className="h-3 w-3 text-blue-400" />
-              <span className="text-[9px] font-bold uppercase text-zinc-500">Last Update</span>
+              <span className="text-[9px] font-bold uppercase text-muted-foreground">Last Update</span>
             </div>
             <div
-              className="text-sm font-mono text-zinc-400 cursor-help"
+              className="text-sm font-mono text-muted-foreground cursor-help"
               onMouseEnter={(e) => tooltip.show(`Last price update: ${formatDateTime(lastActivityTime)}`, e)}
               onMouseMove={(e) => tooltip.move(e)}
               onMouseLeave={() => tooltip.hide()}
