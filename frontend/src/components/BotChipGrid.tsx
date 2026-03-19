@@ -1,4 +1,4 @@
-import { memo, useState, useEffect } from "react";
+import { memo, useState, useEffect, useSyncExternalStore } from "react";
 import {
   Play,
   Square,
@@ -16,9 +16,9 @@ import type { AnimationConfig } from "@/lib/animationConfig";
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
-export function formatUptime(startTime?: number): string {
+function formatUptime(startTime?: number, currentTime: number = Date.now()): string {
   if (!startTime) return "—";
-  const sec = Math.floor((Date.now() - startTime) / 1000);
+  const sec = Math.floor((currentTime - startTime) / 1000);
   if (sec < 60) return `${sec}s`;
   const min = Math.floor(sec / 60);
   if (min < 60) return `${min}m`;
@@ -134,14 +134,38 @@ interface BotChipProps {
   tradeFlash: "buy" | "sell" | null;
   aiFlash: boolean;
   animEnabled: boolean;
-  backgroundPulseTrigger: "buy" | "sell" | "ai" | false;
+  /** @deprecated Wird nicht mehr in BotChip verwendet, aber für API-Kompatibilität beibehalten */
+  backgroundPulseTrigger?: "buy" | "sell" | "ai" | false;
   onSelect: () => void;
 }
 
-const BotChip = memo(({ bot, sizeVariant, isSelected, isDeleting, tokenSymbol, tradeFlash, aiFlash, animEnabled, backgroundPulseTrigger, onSelect }: BotChipProps) => {
+// External store for current time (updates every second)
+const timeSubscribers = new Set<() => void>();
+let currentTimeCache = Date.now();
+
+function subscribeToTime(callback: () => void) {
+  timeSubscribers.add(callback);
+  return () => timeSubscribers.delete(callback);
+}
+
+function getCurrentTime(): number {
+  return currentTimeCache;
+}
+
+// Update time cache every second
+if (typeof window !== "undefined") {
+  setInterval(() => {
+    currentTimeCache = Date.now();
+    timeSubscribers.forEach(cb => cb());
+  }, 1000);
+}
+
+const BotChip = memo(({ bot, sizeVariant, isSelected, isDeleting, tokenSymbol, tradeFlash, aiFlash, animEnabled, onSelect }: BotChipProps) => {
+  const currentTime = useSyncExternalStore(subscribeToTime, getCurrentTime, getCurrentTime);
+  
   const lastTrade = bot.recentTrades?.[0];
   const lastEvent = lastTrade?.action ?? null;
-  const eventAge = (Date.now() - (lastTrade?.timestamp ?? 0)) / 1000;
+  const eventAge = (currentTime - (lastTrade?.timestamp ?? 0)) / 1000;
   const isRunning = bot.status === "running";
 
   const trendDirection = lastEvent === "BUY" ? "UP" : lastEvent === "SELL" ? "DOWN" : "FLAT";
@@ -159,7 +183,7 @@ const BotChip = memo(({ bot, sizeVariant, isSelected, isDeleting, tokenSymbol, t
   const winRate = (bot.stats?.totalTrades ?? 0) > 0
     ? Math.round(((bot.stats.wins ?? 0) / bot.stats.totalTrades) * 100)
     : null;
-  const uptime = formatUptime(bot.startTime);
+  const uptime = formatUptime(bot.startTime, currentTime);
 
   const flashColor = aiFlash
     ? "rgba(168, 85, 247"
@@ -168,7 +192,7 @@ const BotChip = memo(({ bot, sizeVariant, isSelected, isDeleting, tokenSymbol, t
       : "rgba(239, 68, 68";
 
   const est24h = (() => {
-    const hours = (Date.now() - (bot.startTime || Date.now())) / 3600000;
+    const hours = (currentTime - (bot.startTime || currentTime)) / 3600000;
     return hours > 0.05 ? Math.round((bot.stats?.totalTrades || 0) / hours * 24) : "—";
   })();
 
@@ -221,7 +245,6 @@ const BotChip = memo(({ bot, sizeVariant, isSelected, isDeleting, tokenSymbol, t
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
               <StatusButton isRunning={isRunning} status={bot.status} size="xl" />
-              {/* <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${isRunning ? `bg-green-500 ${backgroundPulseTrigger ? "animate-pulse-trigger" : "animate-pulse"} shadow-[0_0_6px_#22c55e]` : `bg-zinc-600 ${backgroundPulseTrigger ? "animate-pulse-trigger" : ""}`}`} /> */}
               <div className="flex flex-col min-w-0">
                 <div className="flex items-center gap-2 truncate">
                   <span className="text-base font-black text-primary uppercase shrink-0">{tokenSymbol}</span>
@@ -232,7 +255,6 @@ const BotChip = memo(({ bot, sizeVariant, isSelected, isDeleting, tokenSymbol, t
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
               <StrategyBadge strategyType={st} iconSize="h-2 w-2" />
-              
             </div>
           </div>
 
@@ -268,7 +290,6 @@ const BotChip = memo(({ bot, sizeVariant, isSelected, isDeleting, tokenSymbol, t
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
               <StatusButton isRunning={isRunning} status={bot.status} size="l" />
-              {/* <span className={`w-2 h-2 rounded-full shrink-0 ${isRunning ? "bg-green-500 animate-pulse shadow-[0_0_6px_#22c55e]" : "bg-muted-foreground/40"}`} /> */}
               <div className="flex flex-col min-w-0">
                 <div className="flex items-center gap-1.5 truncate">
                   <span className="text-sm font-black text-primary uppercase shrink-0">{tokenSymbol}</span>
@@ -278,7 +299,7 @@ const BotChip = memo(({ bot, sizeVariant, isSelected, isDeleting, tokenSymbol, t
               </div>
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
-              <StrategyBadge strategyType={st} iconSize="h-2 w-2" />              
+              <StrategyBadge strategyType={st} iconSize="h-2 w-2" />
             </div>
           </div>
 
@@ -299,7 +320,7 @@ const BotChip = memo(({ bot, sizeVariant, isSelected, isDeleting, tokenSymbol, t
 
           <div className="flex items-center justify-between gap-1 pt-1.5 border-t border-border/30 mt-1.5">
             <div className="flex items-baseline gap-1">
-              <span className="text-xs font-mono text-muted-foreground">${bot.stats?.lastPrice?.toFixed(5) || "—"}</span>              
+              <span className="text-xs font-mono text-muted-foreground">${bot.stats?.lastPrice?.toFixed(5) || "—"}</span>
               <span className={`text-xs font-bold ${trendColor}`}>{trendDirection}</span>
             </div>
             <span className="text-xs font-mono text-zinc-500 truncate tabular-nums">{bot.mintAddress?.slice(0, 6)}…{bot.mintAddress?.slice(-4)}</span>
@@ -314,13 +335,11 @@ const BotChip = memo(({ bot, sizeVariant, isSelected, isDeleting, tokenSymbol, t
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
               <StatusButton isRunning={isRunning} status={bot.status} size="m" />
-              {/* <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isRunning ? "bg-green-500 animate-pulse" : "bg-muted-foreground/40"}`} /> */}
               <span className="text-l font-black text-primary uppercase shrink-0">{tokenSymbol}</span>
               <span className="font-bold text-l truncate">{bot.name}</span>
             </div>
             <div className="flex items-center gap-1 shrink-0">
               <StrategyBadge strategyType={st} iconSize="h-1.5 w-1.5" />
-              
             </div>
           </div>
 
