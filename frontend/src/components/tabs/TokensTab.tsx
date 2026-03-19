@@ -132,39 +132,51 @@ export function TokensTab({
       </Card>
 
       <Dialog open={isAddTokenDialogOpen} onOpenChange={setIsAddTokenDialogOpen}>
-        <DialogContent className="sm:max-w-[500px]">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Database className="h-5 w-5 text-primary" />
-              Add Token to Whitelist
-            </DialogTitle>
-            <DialogDescription>
-              Enter a Solana token mint address to add it to your whitelist.
-              Token info will be fetched from DexScreener.
-            </DialogDescription>
+        <DialogContent className="w-[95vw] max-w-[520px] bg-black/85 backdrop-blur-2xl border-white/10 text-zinc-100 shadow-2xl overflow-y-auto max-h-[90vh]">
+          {/* Top gradient line */}
+          <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/60 to-transparent pointer-events-none" />
+          {/* Top glow */}
+          <div className="absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-primary/8 to-transparent pointer-events-none rounded-t-lg" />
+
+          <DialogHeader className="relative">
+            <div className="flex items-center gap-3 mb-1">
+              <div className="p-2 bg-primary/10 rounded-lg border border-primary/20">
+                <Database className="h-5 w-5 text-primary" />
+              </div>
+              <div>
+                <DialogTitle className="text-lg font-black tracking-tight">Add Token to Whitelist</DialogTitle>
+                <DialogDescription className="text-zinc-500 text-xs mt-0.5">
+                  Enter a Solana token mint address. Token info will be fetched from DexScreener.
+                </DialogDescription>
+              </div>
+            </div>
           </DialogHeader>
 
-          <div className="space-y-4 py-4">
+          <div className="space-y-4 py-2 relative">
             <div className="space-y-2">
-              <Label htmlFor="mintAddress">Mint Address *</Label>
+              <div className="flex items-center gap-2">
+                <Database className="h-3.5 w-3.5 text-primary/70" />
+                <Label htmlFor="mintAddress" className="text-xs font-bold uppercase tracking-wider text-zinc-400">Mint Address *</Label>
+              </div>
               <div className="flex gap-2">
                 <Input
                   id="mintAddress"
-                  placeholder="Enter Solana mint address (e.g., UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW)"
+                  placeholder="e.g. UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW"
                   value={newTokenMintAddress}
                   onChange={(e) => setNewTokenMintAddress(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && onLookupToken()}
-                  className="font-mono text-sm"
+                  className="font-mono text-sm bg-zinc-800/80 border-white/10 text-zinc-100 placeholder:text-zinc-600 focus:border-primary/50"
                 />
                 <Button
                   variant="outline"
                   onClick={onLookupToken}
                   disabled={isLookingUp || !newTokenMintAddress.trim()}
+                  className="bg-zinc-800/80 border-white/10 text-zinc-400 hover:text-primary shrink-0"
                 >
                   {isLookingUp ? <Activity className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
                 </Button>
               </div>
-              {lookupError && <p className="text-sm text-red-400">{lookupError}</p>}
+              {lookupError && <p className="text-[11px] text-red-400">{lookupError}</p>}
             </div>
 
             {lookupResult && (
@@ -206,9 +218,10 @@ export function TokensTab({
             )}
           </div>
 
-          <DialogFooter>
+          <DialogFooter className="relative border-t border-white/5 pt-4 mt-1">
             <Button
-              variant="outline"
+              variant="ghost"
+              className="text-zinc-400 hover:text-zinc-200"
               onClick={() => {
                 setIsAddTokenDialogOpen(false);
                 setNewTokenMintAddress("");
@@ -218,7 +231,11 @@ export function TokensTab({
             >
               Cancel
             </Button>
-            <Button onClick={onAddToken} disabled={!lookupResult || isLookingUp}>
+            <Button
+              onClick={onAddToken}
+              disabled={!lookupResult || isLookingUp}
+              className="bg-primary text-primary-foreground hover:bg-primary/80 font-bold"
+            >
               <Plus className="mr-2 h-4 w-4" /> Add to Whitelist
             </Button>
           </DialogFooter>

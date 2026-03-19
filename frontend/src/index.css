@@ -127,6 +127,57 @@
   body {
     @apply bg-background text-foreground font-sans;
   }
+
+  /* Moderne Scrollbar für Webkit-Browser (Chrome, Edge, Safari) */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: oklch(0.2 0 0 / 0.3);
+    border-radius: 8px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: linear-gradient(
+      180deg,
+      oklch(0.75 0.18 190 / 0.8),
+      oklch(0.65 0.15 190)
+    );
+    border-radius: 8px;
+    border: 2px solid oklch(0.2 0 0 / 0.3);
+    background-clip: padding-box;
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(
+      180deg,
+      oklch(0.85 0.18 190),
+      oklch(0.75 0.15 190)
+    );
+    box-shadow: 0 0 10px oklch(0.75 0.18 190 / 0.5);
+  }
+
+  ::-webkit-scrollbar-thumb:active {
+    background: linear-gradient(
+      180deg,
+      oklch(0.6 0.15 190),
+      oklch(0.5 0.12 190)
+    );
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: oklch(0.2 0 0 / 0.3);
+    border-radius: 8px;
+  }
+
+  /* Moderne Scrollbar für Firefox */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: oklch(0.75 0.18 190) oklch(0.2 0 0 / 0.3);
+  }
 }
 
 @layer utilities {
@@ -269,6 +320,16 @@
     }
   }
 
+  @keyframes tick-pulse {
+    0% { transform: scale(1); border-color: var(--primary); }
+    50% { transform: scale(1.008); border-color: white; }
+    100% { transform: scale(1); }
+  }
+
+  .tick-pulse {
+    animation: tick-pulse 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  }
+
   @keyframes inner-pulse {
     0% {
       opacity: 0;
@@ -350,7 +411,7 @@
   }
 
   .global-pulse-circle {
-    position: absolute;
+    position: fixed;
     left: 50%;
     top: 50%;
     width: 800vmax;
@@ -361,7 +422,8 @@
     opacity: 0;
     pointer-events: none;
     /* GPU-beschleunigt und zentriert */
-    transform: translate(-50%, -50%) translate3d(0, 0, 0);
+    transform: translate(-50%, -50%);
+    will-change: transform, opacity;
   }
 
   .global-pulse-circle-2 {
@@ -523,6 +585,21 @@
     animation: ai-update-flash 1.5s ease-out forwards;
   }
 
+  /* Animation Reset Class - forces animation to restart */
+  .animation-reset {
+    animation-play-state: running !important;
+  }
+
+  /* Shimmer background animation for selected strategy */
+  @keyframes shimmer {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(200%);
+    }
+  }
+
   /* Glow Utility Classes für Signal-Farben */
   .glow-green {
     box-shadow: 0 0 30px 10px rgba(34, 197, 94, 0.4), inset 0 0 40px rgba(34, 197, 94, 0.1);
@@ -627,8 +704,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    border-bottom: 1px solid var(--border);
-    background: var(--card);
+    border-bottom: 0px solid var(--border);
+    background: transparent;
     padding: 0.75rem 1.5rem;
     flex-shrink: 0;
     z-index: 100;
@@ -708,13 +785,13 @@
     border-bottom: 0.375rem solid var(--popover);
   }
 
-  /* Navigation in der Mitte */
+  /* Navigation in der Mitte - rechts ausgerichtet */
   .topbar-nav {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     flex: 1;
-    justify-content: center;
+    justify-content: flex-end;
   }
 
   .topbar-nav-item {
@@ -831,7 +908,7 @@
     flex-shrink: 0;
   }
 
-  /* Backend Connected Indicator */
+  /* Backend Connected Indicator - als Icon-Button ohne Hintergrund */
   .backend-indicator-wrapper {
     display: flex;
     align-items: center;
@@ -843,10 +920,10 @@
     gap: 0.375rem;
     font-size: 0.75rem;
     color: var(--muted-foreground);
-    padding: 0.375rem 0.75rem;
+    padding: 0.375rem;
     border-radius: 0.5rem;
-    background: var(--secondary);
-    border: 1px solid var(--border);
+    background: transparent;
+    border: none;
   }
 
   .backend-indicator-dot {
@@ -996,3 +1073,12 @@
     }
   }
 }
+  /* Fast shimmer for loading states */
+  @keyframes shimmer-fast {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(300%); }
+  }
+  .animate-shimmer-fast {
+    animation: shimmer-fast 1.2s infinite linear;
+  }
+

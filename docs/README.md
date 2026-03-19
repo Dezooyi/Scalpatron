@@ -10,6 +10,7 @@
 - [Konfiguration](./configuration.md) — .env, PatternSettings, Strategy Config, AI-Aggressiveness
 - [Trading-Strategie](./strategy.md) — Range Spike Scalper + Multi-Strategy Architecture
 - [Multi-Strategy](./multi-strategy.md) — JSON Strategy Schema, Templates, IndicatorEngine, Feedback-Loop
+- [Trading-Engine](./TRADING_ENGINE.md) — Technical Deep-Dive into execution flow, swaps and generic tokens
 - [Betrieb](./operations.md) — Starten, Dashboard-Bedienung, Logs, Troubleshooting
 - [Design System](./design-system.md) — CSS-Variablen, Runtime-Overrides, `@theme inline` vs. `@theme`, dsConfig.ts
 

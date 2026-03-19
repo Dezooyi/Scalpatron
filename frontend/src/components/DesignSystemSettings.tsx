@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Palette, RotateCcw } from "lucide-react";
+import { Palette, RotateCcw, Save, CheckCircle } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -80,12 +80,19 @@ function ColorRow({
 // ── Main component ────────────────────────────────────────────────────────────
 export default function DesignSystemSettings() {
   const [config, setConfig] = useState<DSConfig>(loadStoredDSConfig);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saved">("idle");
 
   function update<K extends keyof DSConfig>(key: K, value: DSConfig[K]) {
     const next = { ...config, [key]: value };
     setConfig(next);
     applyDSConfig(next);
-    saveDSConfig(next);
+    // Don't auto-save on every change - wait for explicit save
+  }
+
+  function handleSave() {
+    saveDSConfig(config);
+    setSaveStatus("saved");
+    setTimeout(() => setSaveStatus("idle"), 2000);
   }
 
   function reset() {
@@ -234,10 +241,18 @@ export default function DesignSystemSettings() {
           </div>
         </div>
 
-        <Button variant="outline" size="sm" onClick={reset} className="flex items-center gap-2">
-          <RotateCcw className="w-4 h-4" />
-          Reset to Defaults
-        </Button>
+        {/* Action Buttons */}
+        <div className="flex gap-2">
+          <Button variant="default" size="sm" onClick={handleSave} className="flex items-center gap-2">
+            <Save className="w-4 h-4" />
+            Save Design System
+            {saveStatus === "saved" && <CheckCircle className="w-4 h-4" />}
+          </Button>
+          <Button variant="outline" size="sm" onClick={reset} className="flex items-center gap-2">
+            <RotateCcw className="w-4 h-4" />
+            Reset to Defaults
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );

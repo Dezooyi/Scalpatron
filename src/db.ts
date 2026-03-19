@@ -73,6 +73,16 @@ export function initDB() {
       value TEXT NOT NULL
     );
 
+    -- Bot Order Tabelle für persistente Speicherung der Bot-Reihenfolge
+    CREATE TABLE IF NOT EXISTS bot_order (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      botId TEXT NOT NULL UNIQUE,
+      position INTEGER NOT NULL,
+      FOREIGN KEY (botId) REFERENCES bots(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_bot_order_position ON bot_order(position ASC);
+
     -- Live Feed Tabelle für persistente Speicherung von Preisdaten und Events
     CREATE TABLE IF NOT EXISTS live_feed (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -576,4 +586,51 @@ export function setBotCustomSystemPrompt(botId: string, prompt: string): void {
 
 export function clearBotCustomSystemPrompt(botId: string): void {
   db.prepare('UPDATE bots SET customSystemPrompt = NULL WHERE id = ?').run(botId);
+}
+
+// --- Bot Order Persistence ---
+
+/**
+ * Speichert die Reihenfolge der Bots in der Datenbank.
+ * @param botIds Array von Bot-IDs in der gewünschten Reihenfolge
+ */
+export function saveBotOrder(botIds: string[]): void {
+  const stmt = db.prepare(`
+    INSERT OR REPLACE INTO bot_order (botId, position)
+    VALUES (?, ?)
+  `);
+  const insertMany = db.transaction((ids: string[]) => {
+    for (let i = 0; i < ids.length; i++) {
+      stmt.run(ids[i], i);
+    }
+  });
+  insertMany(botIds);
+}
+
+/**
+ * Lädt die gespeicherte Bot-Reihenfolge aus der Datenbank.
+ * @returns Array von Bot-IDs in der gespeicherten Reihenfolge
+ */
+export function getBotOrder(): string[] {
+  const rows = db.prepare(`
+    SELECT botId FROM bot_order
+    ORDER BY position ASC
+  `).all() as { botId: string }[];
+  return rows.map(r => r.botId);
+}
+
+/**
+ * Löscht die gespeicherte Bot-Reihenfolge für einen bestimmten Bot.
+ * Wird verwendet, wenn ein Bot gelöscht wird.
+ */
+export function deleteBotOrder(botId: string): void {
+  db.prepare(`DELETE FROM bot_order WHERE botId = ?`).run(botId);
+}
+
+/**
+ * Ruft Informationen eines Tokens ab.
+ */
+export function getTokenInfo(mintAddress: string): { symbol: string; name: string; decimals: number; priceUsd?: number } | null {
+  const row = db.prepare('SELECT symbol, name, decimals, priceUsd FROM tokens WHERE mintAddress = ?').get(mintAddress) as any;
+  return row || null;
 }

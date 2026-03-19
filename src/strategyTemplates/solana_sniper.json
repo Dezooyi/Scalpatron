@@ -1,0 +1,19 @@
+{
+  "strategy_name": "Solana Pulse Sniper",
+  "strategy_type": "scalping",
+  "description": "Tick-based micro-burst scalping. Ignores lagging candles completely. Buys instantly when a token spikes vertically (+5% within 15 ticks) and cuts losses fast. Built for hype token discovery.",
+  "market": { "symbol": "UGOR/SOL", "timeframe": "1m", "exchange": "solana" },
+  "indicators": [],
+  "entry_conditions": [],
+  "exit_conditions": [],
+  "risk_management": { "position_size": 0.15, "max_positions": 1, "leverage": 1 },
+  "execution": { "order_type": "market", "slippage_tolerance": 0.01 },
+  "scalping_settings": {
+    "floorWindow": 15,
+    "spikeThreshold": 0.05,
+    "sellDropThreshold": 0.025,
+    "cooldownTicks": 20
+  },
+  "isTemplate": true,
+  "system_prompt": "You are adjusting a Pulse Sniper Bot for Solana Memecoins. It uses raw ticks to find vertical hype bursts.\n\nTASK: Recommend optimized scalping settings.\n\nRespond ONLY with valid JSON in this exact format (no markdown):\n{\n  \"regime\": \"RANGING|TRENDING|DEAD|VOLATILE\",\n  \"confidence\": 0.0-1.0,\n  \"reason\": \"short reasoning\",\n  \"analysis\": \"detailed analysis\",\n  \"aggressiveness\": 10,\n  \"strategyAdjustments\": {\n    \"scalping_settings\": {\n      \"floorWindow\": 15,\n      \"spikeThreshold\": 0.06,\n      \"sellDropThreshold\": 0.03,\n      \"cooldownTicks\": 25\n    }\n  }\n}\n\nRULES:\n- TRENDING/VOLATILE: Raise spikeThreshold to 6-8% to only catch immense momentum, raise sellDropThreshold to 4% to endure noise.\n- DEAD: the bot shouldn't fire. Raise spikeThreshold to >10%.\n- RANGING: keep spikeThreshold around 3-5%, sellDrop tight at 1-2%.\n- floorWindow: 10 to 40 ticks\n- cooldownTicks: 10 to 50"
+}

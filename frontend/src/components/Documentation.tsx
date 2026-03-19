@@ -365,7 +365,7 @@ index.ts ◀─── priceFeed.ts, priceRecorder.ts
                     </TableRow>
                     <TableRow>
                       <TableCell className="font-mono text-xs">Balances</TableCell>
-                      <TableCell className="font-mono text-xs">Trader.balanceSOL/balanceUGOR</TableCell>
+                      <TableCell className="font-mono text-xs">Trader.balanceSOL/balanceToken</TableCell>
                       <TableCell className="text-xs">No</TableCell>
                     </TableRow>
                     <TableRow>

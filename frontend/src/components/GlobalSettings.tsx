@@ -65,22 +65,39 @@ export default function GlobalSettings({ theme, onThemeChange, onSaved, onAnimCo
   useEffect(() => {
     fetch(`${apiUrl}/api/settings`)
       .then((r) => r.json())
-      .then((data) => setSettings({ ...DEFAULTS, ...data }))
-      .catch(() => {});
+      .then((data) => {
+        console.log("[GlobalSettings] Loaded settings:", data);
+        // Merge with defaults to ensure all fields are present
+        const merged = { ...DEFAULTS, ...data };
+        console.log("[GlobalSettings] Merged settings:", merged);
+        setSettings(merged);
+      })
+      .catch((err) => console.error("[GlobalSettings] Load error:", err));
   }, [apiUrl]);
 
   function handleSave() {
+    console.log("[GlobalSettings] Saving settings:", settings);
     fetch(`${apiUrl}/api/settings`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(settings),
     })
-      .then(() => {
-        setSaveStatus("saved");
-        onSaved?.(settings);
-        setTimeout(() => setSaveStatus("idle"), 2000);
+      .then(async (res) => {
+        const data = await res.json();
+        console.log("[GlobalSettings] Save response:", data);
+        if (res.ok) {
+          setSaveStatus("saved");
+          onSaved?.(settings);
+          setTimeout(() => setSaveStatus("idle"), 2000);
+        } else {
+          console.error("[GlobalSettings] Save failed:", data);
+          setSaveStatus("error");
+        }
       })
-      .catch(() => setSaveStatus("error"));
+      .catch((err) => {
+        console.error("[GlobalSettings] Save error:", err);
+        setSaveStatus("error");
+      });
   }
 
   async function testConnection() {
@@ -190,6 +207,41 @@ export default function GlobalSettings({ theme, onThemeChange, onSaved, onAnimCo
                 value={settings.tradeSize}
                 onChange={(e) => setField("tradeSize", parseFloat(e.target.value) || 0)}
               />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="aggressiveness">Aggressiveness (1-10)</Label>
+              <Input
+                id="aggressiveness"
+                type="number"
+                min={1}
+                max={10}
+                value={settings.aggressiveness}
+                onChange={(e) => setField("aggressiveness", Math.min(10, Math.max(1, parseFloat(e.target.value) || 1)))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="tradingMode">Trading Mode</Label>
+              <div className="flex gap-2">
+                <Button
+                  variant={settings.tradingMode === "fixed" ? "default" : "outline"}
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => setField("tradingMode", "fixed")}
+                >
+                  Fixed
+                </Button>
+                <Button
+                  variant={settings.tradingMode === "aggressive" ? "default" : "outline"}
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => setField("tradingMode", "aggressive")}
+                >
+                  Aggressive
+                </Button>
+              </div>
             </div>
           </div>
 

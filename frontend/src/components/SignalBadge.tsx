@@ -4,6 +4,7 @@ export type SignalType = "BUY" | "SELL" | "HOLD";
 
 interface SignalBadgeProps {
   signal: SignalType;
+  labelOverride?: string;
   className?: string;
 }
 
@@ -11,7 +12,7 @@ interface SignalBadgeProps {
  * Signal Badge Komponente für Last Activity Card
  * Zeigt den aktuellen Bot-Status als pulsierendes Badge
  */
-export function SignalBadge({ signal, className = "" }: SignalBadgeProps) {
+export function SignalBadge({ signal, labelOverride, className = "" }: SignalBadgeProps) {
   const tooltip = useTooltip();
 
   const getSignalColors = () => {
@@ -46,7 +47,7 @@ export function SignalBadge({ signal, className = "" }: SignalBadgeProps) {
       onMouseMove={(e) => tooltip.move(e)}
       onMouseLeave={() => tooltip.hide()}
     >
-      {signal}
+      {labelOverride || signal}
     </span>
   );
 }

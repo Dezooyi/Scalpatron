@@ -1,1 +1,0 @@
-Hello respond with valid JSON: {"status":"ok"}

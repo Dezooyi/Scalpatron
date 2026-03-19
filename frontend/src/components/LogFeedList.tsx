@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, memo } from "react";
 import { Activity } from "lucide-react";
 import { useTooltip } from "./GlobalTooltip";
 
@@ -34,7 +34,7 @@ const ACCENT_BG: Record<string, string> = {
   red:     "border-l-2 border-red-500 bg-red-500/5",
 };
 
-function LogFeedRow({ row, isLatest }: { row: LogFeedRowData; isLatest: boolean }) {
+const LogFeedRow = memo(({ row, isLatest }: { row: LogFeedRowData; isLatest: boolean }) => {
   const [hovered, setHovered] = useState(false);
   const tooltip = useTooltip();
 
@@ -98,9 +98,10 @@ function LogFeedRow({ row, isLatest }: { row: LogFeedRowData; isLatest: boolean 
       )}
     </div>
   );
-}
+});
+LogFeedRow.displayName = "LogFeedRow";
 
-export function LogFeedList({
+export const LogFeedList = memo(({
   rows,
   emptyIcon,
   emptyMessage = "No entries yet.",
@@ -112,7 +113,7 @@ export function LogFeedList({
   emptyMessage?: string;
   maxItems?: number;
   showFadeGradient?: boolean;
-}) {
+}) => {
   const displayed = maxItems ? rows.slice(0, maxItems) : rows;
 
   if (displayed.length === 0) {
@@ -136,4 +137,5 @@ export function LogFeedList({
       )}
     </div>
   );
-}
+});
+LogFeedList.displayName = "LogFeedList";

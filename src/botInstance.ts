@@ -1,8 +1,8 @@
 import { PriceFeed, PricePoint } from './priceFeed.js';
 import { PatternDetector, PatternSettings } from './patternDetector.js';
-import { Trader, TraderStats } from './trader.js';
+import { Trader, TraderStats, type TradeLogEntry } from './trader.js';
 import { logger } from './appLogger.js';
-import { db, updateAgentOutcome, getBotStrategyId, getStrategy, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt } from './db.js';
+import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt } from './db.js';
 import { PriceRecorder } from './priceRecorder.js';
 import { StrategyEngine } from './strategyEngine.js';
 import type { StrategyConfig } from './strategyTypes.js';
@@ -70,28 +70,51 @@ export class BotInstance {
     this.initialSOL = initialSOL;
     this.detector = new PatternDetector();
     this.recorder = new PriceRecorder();
-    this.trader = new Trader({ initialSOL, tradeSize, aggressiveness, tradingMode, paperMode, logFile: `trades-${this.id}.jsonl` });
+
+    // Token-Info laden
+    const tokenInfo = getTokenInfo(mintAddress);
+    const targetDecimals = tokenInfo?.decimals ?? 6;
+
+    this.trader = new Trader({ 
+      initialSOL, 
+      tradeSize, 
+      aggressiveness, 
+      tradingMode, 
+      paperMode, 
+      logFile: `trades-${this.id}.jsonl`,
+      targetMint: this.mintAddress,
+      targetDecimals
+    });
     this.restoreStatsFromDB();
   }
 
   private restoreStatsFromDB(): void {
     const rows = db.prepare(
-      `SELECT action, price, amount, pnlPercent FROM trades WHERE botId = ? ORDER BY timestamp ASC`
-    ).all(this.id) as { action: string; price: number; amount: number | null; pnlPercent: number | null }[];
+      `SELECT timestamp, action, price, amount, pnlPercent FROM trades WHERE botId = ? ORDER BY timestamp ASC`
+    ).all(this.id) as { timestamp: number; action: string; price: number; amount: number | null; pnlPercent: number | null }[];
 
     let totalTrades = 0, wins = 0, losses = 0, totalPnlPercent = 0;
     
     // We replay trades to restore accumulated balance. 
     // Initialization: Trader sets initialSOL dynamically when instantiated (passed as opts.initialSOL).
-    let currentBalanceSOL = this.trader.getStats().balanceSOL; 
-    let currentBalanceUGOR = 0;
+    let currentBalanceSOL = this.trader.getStats().balanceSOL;
+    let currentBalanceToken = 0;
+
+    let openPositions: any[] = [];
 
     for (const row of rows) {
       if (row.action === 'BUY' && row.amount) {
+        // BUY only restores balance/positions — totalTrades is counted on SELL (closed cycle)
         const investedSOL = row.amount * row.price;
         currentBalanceSOL -= investedSOL;
-        currentBalanceUGOR += row.amount;
+        currentBalanceToken += row.amount;
+        openPositions.push({
+          entryPrice: row.price,
+          entryTime: row.timestamp,
+          amount: row.amount,
+        });
       } else if (row.action === 'SELL' && row.amount) {
+        // SELL = completed trade cycle → count as one trade
         totalTrades++;
         const pnl = row.pnlPercent ?? 0;
         totalPnlPercent += pnl;
@@ -100,15 +123,18 @@ export class BotInstance {
         
         const returnSOL = row.amount * row.price;
         currentBalanceSOL += returnSOL;
-        currentBalanceUGOR -= row.amount;
+        currentBalanceToken -= row.amount;
+        // In current implementation a SELL closes all positions.
+        openPositions = [];
       }
     }
     
     // Safety check against float math weirdness
     currentBalanceSOL = Math.max(0, currentBalanceSOL);
-    currentBalanceUGOR = Math.max(0, currentBalanceUGOR);
+    currentBalanceToken = Math.max(0, currentBalanceToken);
 
-    this.trader.restoreStats(totalTrades, wins, losses, totalPnlPercent, currentBalanceSOL, currentBalanceUGOR);
+    this.trader.restoreStats(totalTrades, wins, losses, totalPnlPercent, currentBalanceSOL, currentBalanceToken);
+    this.trader.restorePositions(openPositions);
   }
 
   /** Reset bot stats and optionally clear trades/prices */
@@ -152,7 +178,7 @@ export class BotInstance {
 
     // Load historical price data from SQLite database (persistent storage)
     // This ensures the bot always has access to price data, even after restart
-    const historicalPrices = this.recorder.loadFromDatabase(this.mintAddress, 10000);
+    const historicalPrices = this.recorder.loadFromDatabase(this.mintAddress, 1000);
     if (historicalPrices.length > 0) {
       console.log(`[BotInstance] ${this.name} lud ${historicalPrices.length} persistente Preisdaten aus SQLite`);
       feed.seedHistory(this.mintAddress, historicalPrices);
@@ -338,6 +364,53 @@ export class BotInstance {
     logger.info(this.id, 'SYSTEM', 'Benutzerdefinierter System-Prompt zurückgesetzt.');
   }
 
+  /** Execute manual BUY/SELL trade from UI */
+  public async executeManualTrade(action: 'BUY' | 'SELL', currentPrice: number): Promise<TradeLogEntry | null> {
+    const settings = this.getSettings();
+    
+    if (action === 'BUY') {
+      const trade = await this.trader.manualBuy(currentPrice, settings);
+      // Save trade to database for persistent storage and frontend display
+      if (trade) {
+        db.prepare(`
+          INSERT INTO trades (botId, timestamp, action, price, amount, pnlPercent)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(
+          this.id,
+          trade.timestamp,
+          trade.action,
+          trade.price,
+          trade.amount ?? null,
+          trade.pnlPercent ?? null
+        );
+      }
+      return trade;
+    } else if (action === 'SELL') {
+      const trade = await this.trader.manualSell(currentPrice, settings);
+      // Save trade to database for persistent storage and frontend display
+      if (trade) {
+        db.prepare(`
+          INSERT INTO trades (botId, timestamp, action, price, amount, pnlPercent)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(
+          this.id,
+          trade.timestamp,
+          trade.action,
+          trade.price,
+          trade.amount ?? null,
+          trade.pnlPercent ?? null
+        );
+        // Feedback loop: attribute SELL outcome to the active agent advice entry
+        if (trade.pnlPercent !== undefined) {
+          updateAgentOutcome(this.id, trade.pnlPercent, trade.pnlPercent > 0);
+        }
+      }
+      return trade;
+    }
+    
+    return null;
+  }
+
   /** Toggle paper mode */
   public togglePaperMode(): void {
     this.setPaperMode(!this.trader.paperMode);
@@ -418,7 +491,7 @@ export class BotInstance {
   }
 
   private onPriceTick = async (point: PricePoint) => {
-    console.log(`[BotInstance] ${this.name} empfaengt Tick: $${point.price}`);
+    // Logging erfolgt zentral im PriceFeed (gruppiert nach Token + Bot-Namen)
     if (this.status !== 'running') return;
     this.cumulativeTicks++;
 

@@ -4,6 +4,7 @@ import { BotServer } from './server.js';
 import { PriceRecorder } from './priceRecorder.js';
 import { saveStrategy } from './db.js';
 import { loadBuiltinTemplates } from './strategyEngine.js';
+import { PriceFeed } from './priceFeed.js';
 
 
 console.log('Scalpatron V1 wird gestartet...');
@@ -24,6 +25,15 @@ initDB();
 const recorder = new PriceRecorder();
 const botManager = new BotManager();
 const server = new BotServer(botManager, recorder, 3000);
+
+// PriceFeed Callback für gruppierte Log-Ausgabe registrieren
+// Liefert die Bot-Namen die ein Token abonnieren
+const priceFeed = PriceFeed.getInstance();
+priceFeed.setBotNamesCallback((mintAddress: string) => {
+  return botManager.getAllBots()
+    .filter(bot => bot.mintAddress === mintAddress)
+    .map(bot => bot.name);
+});
 
 // Create a default demo bot if none exist to avoid an empty dashboard
 if (botManager.getAllBots().length === 0) {

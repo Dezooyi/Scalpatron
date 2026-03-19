@@ -1,0 +1,25 @@
+{
+  "strategy_name": "Solana V-Shape Dip Buyer",
+  "strategy_type": "mean_reversion",
+  "description": "Exploits liquidity cascades (flash crashes). Buys when price wick drops massively below VWAP and Stochastic/RSI is heavily oversold. Captures V-shape recoveries.",
+  "market": { "symbol": "UGOR/SOL", "timeframe": "1m", "exchange": "solana" },
+  "indicators": [
+    { "type": "VWAP" },
+    { "type": "STOCH", "k_period": 14, "d_period": 3 },
+    { "type": "RSI", "period": 14 }
+  ],
+  "entry_conditions": [
+    { "left": "price", "operator": "<", "right": "VWAP" },
+    { "left": "STOCH_K", "operator": "<", "right": 20 },
+    { "left": "RSI_14", "operator": "<", "right": 30 }
+  ],
+  "exit_conditions": [
+    { "type": "take_profit", "value": 0.06 },
+    { "type": "stop_loss", "value": 0.025 },
+    { "type": "indicator", "condition": { "left": "price", "operator": ">=", "right": "VWAP" } }
+  ],
+  "risk_management": { "position_size": 0.1, "max_positions": 1, "leverage": 1 },
+  "execution": { "order_type": "market", "slippage_tolerance": 0.005 },
+  "isTemplate": true,
+  "system_prompt": "You are adjusting a Dip Buyer Bot that capitalizes on flash crashes taking price significantly below VWAP with empty oscillators.\n\nTASK: Adjust thresholds to ensure the bot only buys genuine exhaustion points.\n\nRespond ONLY with valid JSON in this exact format:\n{\n  \"regime\": \"RANGING|TRENDING|DEAD|VOLATILE\",\n  \"confidence\": 0.0-1.0,\n  \"reason\": \"short reasoning\",\n  \"analysis\": \"detailed analysis\",\n  \"aggressiveness\": 10,\n  \"strategyAdjustments\": {\n    \"indicators\": [\n      { \"type\": \"VWAP\" },\n      { \"type\": \"STOCH\", \"k_period\": 14, \"d_period\": 3 },\n      { \"type\": \"RSI\", \"period\": 14 }\n    ],\n    \"entry_condition_hints\": \"adjust RSI to < 20 for steeper dips\"\n  }\n}\n\nRULES:\n- VOLATILE/TRENDING DOWN: The dip must be extreme. Set RSI filter <20, STOCH <15.\n- RANGING: Standard dips work well. RSI <30, STOCH <20.\n- Buy only when momentum drops completely out. Avoid buying into active dumping without exhaustion."
+}

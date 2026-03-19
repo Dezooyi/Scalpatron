@@ -32,7 +32,7 @@ export function BotTelemetry({ bot, tokenBSymbol, className = "" }: BotTelemetry
             <span className="text-[9px] font-bold uppercase text-muted-foreground">{tokenBSymbol} Balance</span>
           </div>
           <div className="text-sm font-black text-primary font-mono flex items-center gap-2">
-            {bot.stats?.balanceUGOR?.toFixed(1) || "0.0"}
+            {bot.stats?.balanceToken?.toFixed(1) || "0.0"}
             {(bot.stats?.openPositionsCount ?? 0) > 1 && (
               <span className="text-[10px] bg-cyan-500/10 text-cyan-400 px-1.5 py-0.5 rounded border border-cyan-500/20">
                 {bot.stats?.openPositionsCount} Tranches

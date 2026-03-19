@@ -41,12 +41,13 @@ export class Dashboard {
     settings: PatternSettings;
     recentTrades: TradeLogEntry[];
     mode: string;
+    tokenSymbol?: string; // Token-Symbol für dynamische Anzeige
   }): void {
     const now = Date.now();
     if (now - this.lastRender < this.minRenderInterval) return;
     this.lastRender = now;
 
-    const { prices, pattern, stats, settings, recentTrades, mode } = data;
+    const { prices, pattern, stats, settings, recentTrades, mode, tokenSymbol = 'TOKEN' } = data;
     const current = prices[prices.length - 1];
     const priceValues = prices.map(p => p.price);
 
@@ -55,7 +56,7 @@ export class Dashboard {
     // Header
     lines.push(CLEAR);
     lines.push(col('━'.repeat(60), DIM));
-    lines.push(col(`  UGOR Range Spike Scalper`, BOLD + CYAN) + col(`  [${mode}]`, YELLOW));
+    lines.push(col(`  ${tokenSymbol} Range Spike Scalper`, BOLD + CYAN) + col(`  [${mode}]`, YELLOW));
     lines.push(col('━'.repeat(60), DIM));
     lines.push('');
 
@@ -82,7 +83,7 @@ export class Dashboard {
 
     // Position & Stats
     lines.push(col('─'.repeat(60), DIM));
-    lines.push(`  ${col('SOL', BOLD)}      ${stats.balanceSOL.toFixed(4)}    ${col('UGOR', BOLD)}  ${stats.balanceUGOR.toFixed(0)}`);
+    lines.push(`  ${col('SOL', BOLD)}      ${stats.balanceSOL.toFixed(4)}    ${col(tokenSymbol, BOLD)}  ${stats.balanceToken.toFixed(0)}`);
     if (stats.currentPosition) {
       const pos = stats.currentPosition;
       const unPnl = ((prices[prices.length - 1]?.price ?? pos.entryPrice) - pos.entryPrice) / pos.entryPrice * 100;

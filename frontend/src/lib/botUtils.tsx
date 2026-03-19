@@ -40,3 +40,14 @@ export const getStrategyDescription = (type: string | undefined) => {
     default: return 'Scalping Strategy: Exploits small price spikes for quick profits.';
   }
 };
+
+export function formatUptime(startTime?: number, currentTime: number = Date.now()): string {
+  if (!startTime) return "—";
+  const sec = Math.floor((currentTime - startTime) / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}h ${min % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}

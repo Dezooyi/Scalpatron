@@ -1,8 +1,11 @@
 import type { PatternResult } from './patternDetector.js';
-import type { TradeLogEntry } from './logger.js';
+import type { TradeLogEntry as TradeLogEntryType } from './logger.js';
 import { Logger } from './logger.js';
 
-import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
+// Re-export TradeLogEntry type for external use
+export type TradeLogEntry = TradeLogEntryType;
+
+import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction } from '@solana/web3.js';
 import { createJupiterApiClient } from '@jup-ag/api';
 import { loadOrCreateKeypair } from './wallet.js';
 import { CONFIG } from './config.js';
@@ -10,7 +13,7 @@ import { CONFIG } from './config.js';
 export interface Position {
   entryPrice: number;
   entryTime: number;
-  amount: number; // simulierte UGOR-Menge
+  amount: number; // Menge des Ziel-Tokens (simuliert oder live)
 }
 
 export interface TraderStats {
@@ -22,7 +25,7 @@ export interface TraderStats {
   openPositionsCount: number;
   lastEntryTime: number | null;
   balanceSOL: number;
-  balanceUGOR: number;
+  balanceToken: number;
   lastPrice: number;
 }
 
@@ -30,7 +33,9 @@ export class Trader {
   private positions: Position[] = [];
   private logger: Logger;
   private balanceSOL: number;
-  private balanceUGOR = 0;
+  private balanceToken = 0;
+  private targetMint: string;
+  private targetDecimals: number;
   private wins = 0;
   private losses = 0;
   private totalPnlPercent = 0;
@@ -54,6 +59,8 @@ export class Trader {
     tradingMode?: 'fixed' | 'aggressive';
     paperMode?: boolean;
     logFile?: string;
+    targetMint?: string;
+    targetDecimals?: number;
   } = {}) {
     this.balanceSOL = opts.initialSOL ?? 10;
     this.tradeSize = opts.tradeSize ?? 1;
@@ -61,10 +68,13 @@ export class Trader {
     this.maxAggressiveness = opts.aggressiveness ?? 10;
     this.tradingMode = opts.tradingMode ?? 'fixed';
     this.paperMode = opts.paperMode ?? true;
+    this.targetMint = opts.targetMint ?? CONFIG.UGOR_MINT;
+    this.targetDecimals = opts.targetDecimals ?? 6;
     this.logger = new Logger(opts.logFile ?? (this.paperMode ? 'paper-trades.jsonl' : 'live-trades.jsonl'));
 
     if (!this.paperMode) {
       this.initLiveMode();
+      this.syncBalances().catch(() => {});
     }
   }
 
@@ -103,6 +113,25 @@ export class Trader {
       maxAggressiveness: this.maxAggressiveness,
       tradingMode: this.tradingMode,
     };
+  }
+
+  async syncBalances(): Promise<void> {
+    if (this.paperMode || !this.connection || !this.keypair) return;
+    try {
+      const lamports = await this.connection.getBalance(this.keypair.publicKey);
+      this.balanceSOL = lamports / LAMPORTS_PER_SOL;
+
+      const tokenMint = new PublicKey(this.targetMint);
+      const accounts = await this.connection.getParsedTokenAccountsByOwner(this.keypair.publicKey, { mint: tokenMint });
+      if (accounts.value.length === 0) {
+        this.balanceToken = 0;
+      } else {
+        this.balanceToken = accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount as number;
+      }
+      console.log(`[Trader] Balances synchronisiert: ${this.balanceSOL.toFixed(4)} SOL | ${this.balanceToken.toFixed(2)} [${this.targetMint.slice(0, 4)}...]`);
+    } catch (e: any) {
+      console.error(`[Trader] Fehler beim Synchronisieren der Balances: ${e.message}`);
+    }
   }
 
   async handleSignal(result: PatternResult, settings: Record<string, number>, maxPositions: number = 1, positionSizePct: number | null = null): Promise<TradeLogEntry | null> {
@@ -148,7 +177,7 @@ export class Trader {
       openPositionsCount: this.positions.length,
       lastEntryTime: this.positions.length > 0 ? this.positions[this.positions.length - 1].entryTime : null,
       balanceSOL: this.balanceSOL,
-      balanceUGOR: this.balanceUGOR,
+      balanceToken: this.balanceToken,
       lastPrice: this._lastPrice
     };
   }
@@ -168,8 +197,13 @@ export class Trader {
       this.balanceSOL = restoredBalanceSOL;
     }
     if (restoredBalanceUGOR !== undefined) {
-      this.balanceUGOR = restoredBalanceUGOR;
+      this.balanceToken = restoredBalanceUGOR;
     }
+  }
+
+  /** Offene Positionen wiederherstellen (nach Server-Neustart) */
+  restorePositions(positions: Position[]): void {
+    this.positions = positions;
   }
 
   /** Statistiken zurücksetzen (für Bot-Reset) */
@@ -187,11 +221,11 @@ export class Trader {
       if (initialSOL !== undefined) {
         this.balanceSOL = initialSOL;
       }
-      this.balanceUGOR = 0;
+      this.balanceToken = 0;
     } else {
       // Live Mode: Balance nicht zurücksetzen - behält aktuellen Wallet-Wert
-      // balanceUGOR wird auf 0 gesetzt, da keine offenen Positionen nach Reset
-      this.balanceUGOR = 0;
+      // balanceToken wird auf 0 gesetzt, da keine offenen Positionen nach Reset
+      this.balanceToken = 0;
     }
   }
 
@@ -251,8 +285,9 @@ export class Trader {
       let effectiveTradeSize = this.tradeSize;
       
       if (positionSizePct !== null) {
-        // Strategy template specifies a fixed percentage of current balance (e.g. 0.05 for 5%)
-        effectiveTradeSize = this.balanceSOL * positionSizePct;
+        // Strategy template specifies a percentage of current balance (e.g. 0.05 for 5%, or 5 for 5%)
+        const pct = positionSizePct > 1 ? positionSizePct / 100 : positionSizePct;
+        effectiveTradeSize = this.balanceSOL * pct;
       } else if (this.tradingMode === 'aggressive') {
         // Aggressive mode uses user's "aggressiveness" slider / agent override
         effectiveTradeSize = this.balanceSOL * (this.aggressiveness / 100);
@@ -274,12 +309,14 @@ export class Trader {
 
       if (!this.paperMode) {
         const amountLamports = Math.floor(effectiveTradeSize * 1e9);
-        const success = await this.executeLiveSwap(CONFIG.SOL_MINT, CONFIG.UGOR_MINT, amountLamports);
+        const success = await this.executeLiveSwap(CONFIG.SOL_MINT, this.targetMint, amountLamports);
         if (!success) return null;
       }
 
       this.balanceSOL -= effectiveTradeSize;
-      this.balanceUGOR += ugorAmount;
+      this.balanceToken += ugorAmount;
+      // Note: totalTrades is only incremented on SELL (= completed trade cycle),
+      // not on BUY, so that Total Trades === wins + losses (closed trades only).
       this.positions.push({
         entryPrice: result.currentPrice,
         entryTime: Date.now(),
@@ -297,6 +334,11 @@ export class Trader {
         settings,
       };
       this.logger.log(entry);
+      
+      if (!this.paperMode) {
+        await this.syncBalances().catch(() => {});
+      }
+      
       return entry;
     } catch (e: any) {
       console.error(`[Trader] buy() Fehler:`, e.message);
@@ -311,17 +353,17 @@ export class Trader {
     this.isSwapping = true;
     try {
       if (!this.paperMode) {
-        const amountLamports = Math.floor(pos.amount * 1e6);
-        const success = await this.executeLiveSwap(CONFIG.UGOR_MINT, CONFIG.SOL_MINT, amountLamports);
+        const amountLamports = Math.floor(pos.amount * Math.pow(10, this.targetDecimals));
+        const success = await this.executeLiveSwap(this.targetMint, CONFIG.SOL_MINT, amountLamports);
         if (!success) return null;
       }
 
       const pnlPercent = ((result.currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
       const solReturn = pos.amount * result.currentPrice;
       this.balanceSOL += solReturn;
-      this.balanceUGOR -= pos.amount;
+      this.balanceToken -= pos.amount;
       this.positions = [];
-      this.totalTrades++;
+      this.totalTrades++; // Only count completed trades (SELL = closed cycle)
       this.totalPnlPercent += pnlPercent;
       if (pnlPercent > 0) this.wins++;
       else this.losses++;
@@ -338,6 +380,11 @@ export class Trader {
         settings,
       };
       this.logger.log(entry);
+      
+      if (!this.paperMode) {
+        await this.syncBalances().catch(() => {});
+      }
+      
       return entry;
     } catch (e: any) {
       console.error(`[Trader] sell() Fehler:`, e.message);
@@ -345,5 +392,33 @@ export class Trader {
     } finally {
       this.isSwapping = false;
     }
+  }
+
+  /** Manual BUY - triggered by user from UI */
+  async manualBuy(currentPrice: number, settings: Record<string, any>): Promise<TradeLogEntry | null> {
+    return await this.buy({
+      signal: 'BUY',
+      currentPrice,
+      floor: 0,
+      peakPrice: currentPrice,
+      spikePercent: 0,
+      dropFromPeak: 0,
+    }, settings, null);
+  }
+
+  /** Manual SELL - triggered by user from UI */
+  async manualSell(currentPrice: number, settings: Record<string, any>): Promise<TradeLogEntry | null> {
+    if (this.positions.length === 0) {
+      console.warn('[Trader] manualSell: No open positions to sell');
+      throw new Error('No open positions to sell');
+    }
+    return await this.sell({
+      signal: 'SELL',
+      currentPrice,
+      floor: 0,
+      peakPrice: currentPrice,
+      spikePercent: 0,
+      dropFromPeak: 0,
+    }, settings);
   }
 }

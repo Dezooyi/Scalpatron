@@ -72,45 +72,13 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
     });
   }, [priceHistory, minPrice, priceRange, floorLevel, thresholdLevel, sellDropLevel]);
 
-  // GSAP setup for tick progress bar
+  // GSAP: Animate adding new bars and the progress bar timer
   useGSAP(() => {
-    if (!progressbarRef.current) return;
+    if (!barsContainerRef.current || !progressbarRef.current) return;
 
-    // Reset progress bar width
-    gsap.set(progressbarRef.current, { width: "0%" });
-  }, { scope: containerRef, dependencies: [tickDuration] });
-
-  // GSAP setup for adding new bars
-  useGSAP(() => {
-    if (!barsContainerRef.current || priceBars.length === 0) return;
-
-    const currentLength = priceBars.length;
-    const newBarsCount = currentLength - prevPriceHistoryLength.current;
-
-    if (newBarsCount > 0) {
-      // Get the new bars that need to be animated
-      const barElements = barsContainerRef.current.querySelectorAll(".price-bar");
-      const newBars = Array.from(barElements).slice(-newBarsCount);
-
-      // Animate new bars entering from bottom
-      gsap.fromTo(
-        newBars,
-        { scaleY: 0, transformOrigin: "bottom" },
-        {
-          scaleY: 1,
-          duration: 0.3,
-          stagger: 0.05,
-          ease: "back.out(1.7)",
-        }
-      );
-    }
-
-    prevPriceHistoryLength.current = currentLength;
-  }, { scope: containerRef, dependencies: [priceBars.length] });
-
-  // Reset progress bar when new tick starts
-  useEffect(() => {
+    // 1. Progress Bar Logic
     if (priceHistory.length > prevPriceHistoryLength.current && prevPriceHistoryLength.current > 0) {
+      // New tick started: Reset and re-run progress bar
       gsap.killTweensOf(progressbarRef.current);
       gsap.set(progressbarRef.current, { width: "0%" });
       
@@ -118,24 +86,39 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
         width: "100%",
         duration: tickDuration / 1000,
         ease: "linear",
-        onComplete: () => {
-          gsap.set(progressbarRef.current, { width: "100%" });
-        }
+        force3D: true,
       });
 
-      prevPriceHistoryLength.current = priceHistory.length;
+      // 2. Bar Animation Logic
+      const newBarsCount = priceBars.length - prevPriceHistoryLength.current;
+      if (newBarsCount > 0) {
+        const barElements = barsContainerRef.current.querySelectorAll(".price-bar");
+        const newBars = Array.from(barElements).slice(-newBarsCount);
+
+        gsap.fromTo(
+          newBars,
+          { scaleY: 0, transformOrigin: "bottom" },
+          {
+            scaleY: 1,
+            duration: 0.4,
+            stagger: 0.05,
+            ease: "back.out(1.4)",
+            force3D: true,
+          }
+        );
+      }
     } else if (priceHistory.length > 0 && prevPriceHistoryLength.current === 0) {
+      // Initial load: Start progress bar
       gsap.to(progressbarRef.current, {
         width: "100%",
         duration: tickDuration / 1000,
         ease: "linear",
-        onComplete: () => {
-          gsap.set(progressbarRef.current, { width: "100%" });
-        }
+        force3D: true,
       });
-      prevPriceHistoryLength.current = priceHistory.length;
     }
-  }, [priceHistory.length, tickDuration]);
+
+    prevPriceHistoryLength.current = priceBars.length;
+  }, { scope: containerRef, dependencies: [priceBars.length, tickDuration] });
 
   const getBarBaseColor = (bar: PriceBar) => {
     if (bar.isAboveThreshold) return "34, 197, 94"; // emerald-500
@@ -149,9 +132,9 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
   const sellDropPercent = ((sellDropLevel - minPrice) / priceRange) * 100;
 
   return (
-    <div ref={containerRef} className="space-y-1.5 w-full">
-      <div className="flex items-center justify-between">
-        <div className="text-micro text-primary/30 font-bold ml-1">Scanner Pulse</div>
+    <div ref={containerRef} className={`flex flex-col h-full w-full ${className || ''}`}>
+      <div className="flex items-center justify-between shrink-0 pb-1">
+        <div className="text-xs font-light text-primary/30 font-bold ml-0">Cluster Tick Tracker</div>
         <div className="flex items-center gap-1 text-[10px] text-primary/50">
           <span className="font-mono" title="Floor Window">F:{floorWindow}</span>
           <span className="text-primary/20">|</span>
@@ -161,7 +144,7 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
         </div>
       </div>
 
-      <div className={`relative ${className || 'h-24'} bg-muted/20 rounded-lg overflow-hidden shadow-inner border border-primary/10 w-full`}>
+      <div className="relative flex-1 min-h-0 bg-muted/20 rounded-lg overflow-hidden shadow-inner border border-primary/10 w-full">
         {/* Zone Background Layers - Moved to zIndex 5 (Foreground) */}
         <div 
           className="absolute left-0 right-0 bg-emerald-500/5 border-b border-emerald-500/20 transition-all duration-300 cursor-help"

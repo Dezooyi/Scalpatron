@@ -31,18 +31,29 @@ export function loadOrCreateKeypair(): Keypair {
   return Keypair.fromSecretKey(secretKey);
 }
 
-async function getUgorBalance(connection: Connection, owner: PublicKey): Promise<number | null> {
+/**
+ * Prüft den Token-Balance für eine gegebene Mint-Adresse
+ * @param connection - Solana Connection
+ * @param owner - Wallet Public Key
+ * @param mintAddress - Token Mint Address
+ * @returns Token Balance oder null wenn Mint nicht existiert
+ */
+export async function getTokenBalance(connection: Connection, owner: PublicKey, mintAddress: string): Promise<number | null> {
   try {
-    const ugorMint = new PublicKey(CONFIG.UGOR_MINT);
-    const accounts = await connection.getParsedTokenAccountsByOwner(owner, { mint: ugorMint });
+    const tokenMint = new PublicKey(mintAddress);
+    const accounts = await connection.getParsedTokenAccountsByOwner(owner, { mint: tokenMint });
     if (accounts.value.length === 0) return 0;
     const amount = accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount as number;
     return amount ?? 0;
   } catch {
-    return null; // Mint existiert nicht auf diesem Netzwerk (z.B. UGOR auf Devnet)
+    return null; // Mint existiert nicht auf diesem Netzwerk
   }
 }
 
+/**
+ * Test-Skript für Wallet-Funktionen
+ * usage: npx tsx src/wallet.ts
+ */
 async function main(): Promise<void> {
   const keypair = loadOrCreateKeypair();
   const connection = new Connection(CONFIG.RPC_URL, 'confirmed');
@@ -69,15 +80,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // UGOR Balance
-  const ugor = await getUgorBalance(connection, keypair.publicKey);
-  if (ugor === null) {
-    console.log('[Wallet] UGOR Balance: Mint nicht auf diesem Netzwerk (UGOR ist Mainnet-Token)');
-  } else if (ugor === 0) {
-    console.log('[Wallet] UGOR Balance: 0 (kein Token-Account)');
-  } else {
-    console.log(`[Wallet] UGOR Balance: ${ugor.toLocaleString()} UGOR`);
-  }
+  console.log('[Wallet] Hinweis: Token-Balance wird bot-spezifisch im Trader-Modul geprüft');
 }
 
 main().catch(console.error);

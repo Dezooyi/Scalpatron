@@ -2,6 +2,7 @@ import { BotInstance, BotState } from './botInstance.js';
 import { db, wipeLiveFeed, setBotStrategy, getStrategy, getBotStrategyId } from './db.js';
 import { DEFAULT_SETTINGS, PatternSettings } from './patternDetector.js';
 import { randomUUID } from 'crypto';
+import { loadOrCreateKeypair } from './wallet.js';
 
 interface BotConfig {
   id?: string;
@@ -30,9 +31,14 @@ export class BotManager {
 
     for (const row of rows) {
       const settings = JSON.parse(row.settings);
+      let walletAddress = row.walletAddress ?? '';
+      if (row.paperMode === 0 && !walletAddress) {
+        walletAddress = loadOrCreateKeypair().publicKey.toBase58();
+      }
+
       const bot = new BotInstance(
         row.id, row.name, row.mintAddress, row.initialSOL, row.paperMode === 1,
-        row.walletAddress ?? '', row.tradeSize ?? 1, row.aggressiveness ?? 10,
+        walletAddress, row.tradeSize ?? 1, row.aggressiveness ?? 10,
         (row.tradingMode ?? 'fixed') as 'fixed' | 'aggressive',
       );
       bot.updateSettings(settings);
@@ -57,7 +63,12 @@ export class BotManager {
   public createBot(config: BotConfig): BotInstance {
     const id = config.id || randomUUID();
     const settings = config.settings || DEFAULT_SETTINGS;
-    const walletAddress = config.walletAddress ?? '';
+    let walletAddress = config.walletAddress ?? '';
+    
+    // Auto-fill wallet address if live mode and empty
+    if (!config.paperMode && !walletAddress) {
+      walletAddress = loadOrCreateKeypair().publicKey.toBase58();
+    }
     const tradeSize = config.tradeSize ?? 1;
     const aggressiveness = config.aggressiveness ?? 10;
     const tradingMode = config.tradingMode ?? 'fixed';
@@ -163,7 +174,15 @@ export class BotManager {
     if (!bot) return;
 
     bot.setPaperMode(paperMode);
-    db.prepare('UPDATE bots SET paperMode = ? WHERE id = ?').run(paperMode ? 1 : 0, id);
+
+    // If switching to live mode and wallet is empty, auto-fill with global PK
+    if (!paperMode && !bot.walletAddress) {
+      const globalAddr = loadOrCreateKeypair().publicKey.toBase58();
+      bot.walletAddress = globalAddr;
+    }
+
+    db.prepare('UPDATE bots SET paperMode = ?, walletAddress = ? WHERE id = ?')
+      .run(paperMode ? 1 : 0, bot.walletAddress, id);
   }
 
   public updateAllBotSettings(settings: Partial<PatternSettings>) {

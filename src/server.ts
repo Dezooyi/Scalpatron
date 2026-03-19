@@ -3,7 +3,7 @@ import type { BotManager } from './botManager.js';
 import { PriceRecorder } from './priceRecorder.js';
 import { logger } from './appLogger.js';
 import { TokenService, isValidMintAddress } from './tokenService.js';
-import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy } from './db.js';
+import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder } from './db.js';
 import { loadBuiltinTemplates } from './strategyEngine.js';
 import { PriceFeed } from './priceFeed.js';
 import type { OllamaAgent } from './ollamaAgent.js';
@@ -19,6 +19,8 @@ const DEFAULT_GLOBAL_SETTINGS = {
   cooldownTicks: DEFAULT_SETTINGS.cooldownTicks,
   initialSOL: 10,
   tradeSize: 1,
+  aggressiveness: 10,
+  tradingMode: "fixed" as "fixed" | "aggressive",
   paperMode: true,
 };
 
@@ -120,7 +122,7 @@ export class BotServer {
    */
   private setupSSEThrottling(): void {
     let lastBroadcastTime = 0;
-    const SSE_THROTTLE_MS = Math.max(500, CONFIG.PRICE_FEED_TICKRATE_MS / 2);
+    const SSE_THROTTLE_MS = 200; // Lower throttle for faster UI responsiveness
     
     const originalBroadcast = this.broadcast.bind(this);
     this.broadcast = (eventName: string, data: any): void => {
@@ -243,6 +245,42 @@ export class BotServer {
       return;
     }
 
+    // GET /api/bots/order - Bot-Reihenfolge aus Datenbank laden
+    if (url === '/api/bots/order' && req.method === 'GET') {
+      try {
+        const order = getBotOrder();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ order }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // POST /api/bots/reorder - Bot-Reihenfolge in Datenbank speichern
+    if (url === '/api/bots/reorder' && req.method === 'POST') {
+      parseBody(req).then(({ botIds }: { botIds: string[] }) => {
+        try {
+          if (!Array.isArray(botIds)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'botIds must be an array' }));
+            return;
+          }
+          saveBotOrder(botIds);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      }).catch((e: any) => {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      });
+      return;
+    }
+
     // GET /api/bot/:id/livefeed - Live Feed Statistiken für einen Bot (mit Caching)
     if (url.startsWith('/api/bot/') && url.endsWith('/livefeed') && req.method === 'GET') {
       const botId = url.split('/')[3];
@@ -356,6 +394,7 @@ export class BotServer {
 
       if (req.method === 'DELETE' && !action) {
         this.botManager.deleteBot(id);
+        deleteBotOrder(id); // Auch Bot-Reihenfolge aus Datenbank löschen
         this.broadcast('state', this.botManager.getAllStates());
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
@@ -522,6 +561,87 @@ export class BotServer {
         });
         return;
       }
+
+      // POST /api/bots/:id/trade - Manual BUY/SELL trading
+      if (req.method === 'POST' && action === 'trade') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+          try {
+            const { action: tradeAction, price } = JSON.parse(body) as { action: 'BUY' | 'SELL', price: number };
+            
+            if (!tradeAction || !price) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Missing action or price' }));
+              return;
+            }
+
+            const tradeResult = await bot.executeManualTrade(tradeAction, price);
+
+            if (tradeResult) {
+              this.broadcast('state', this.botManager.getAllStates());
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: true, trade: tradeResult }));
+            } else {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Trade failed - check balance or positions' }));
+            }
+          } catch (e: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
+        return;
+      }
+
+      // POST /api/bots/:id/config - Update bot trading config
+      if (req.method === 'POST' && action === 'config') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+          try {
+            const { tradeSize, aggressiveness, tradingMode } = JSON.parse(body) as {
+              tradeSize?: number;
+              aggressiveness?: number;
+              tradingMode?: 'fixed' | 'aggressive'
+            };
+            
+            if (tradingMode === undefined && tradeSize === undefined && aggressiveness === undefined) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Missing config parameters' }));
+              return;
+            }
+
+            // Get current config from trader
+            const currentConfig = bot.getTrader().getTradeConfig();
+
+            // Update with new values
+            const newTradeSize = tradeSize ?? currentConfig.tradeSize;
+            const newAggressiveness = aggressiveness ?? currentConfig.aggressiveness;
+            const newTradingMode = tradingMode ?? currentConfig.tradingMode;
+
+            // Apply config update
+            bot.updateTradeConfig(newTradeSize, newAggressiveness, newTradingMode);
+            
+            // Broadcast state update
+            this.broadcast('state', this.botManager.getAllStates());
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              ok: true,
+              config: {
+                tradeSize: newTradeSize,
+                aggressiveness: newAggressiveness,
+                tradingMode: newTradingMode,
+              }
+            }));
+          } catch (e: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
+        return;
+      }
     }
 
     // ==================== PRICE HISTORY API ====================
@@ -678,6 +798,25 @@ export class BotServer {
       return;
     }
 
+    // POST /api/tokens/clear-all - Alle Token explizit löschen (nur über API)
+    if (url === '/api/tokens/clear-all' && req.method === 'POST') {
+      try {
+        // Hole alle Token und lösche sie einzeln
+        const allTokens = this.tokenService.getAllTokens();
+        let deletedCount = 0;
+        for (const token of allTokens) {
+          const result = this.tokenService.removeToken(token.mintAddress);
+          if (result.success) deletedCount++;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, deletedCount, total: allTokens.length }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
     // ==================== OLLAMA AGENT API ====================
     
     // GET /api/agent/status - Agent Status abrufen
@@ -792,10 +931,15 @@ export class BotServer {
     if (url === '/api/settings' && req.method === 'GET') {
       try {
         const raw = getSetting('globalSettings', JSON.stringify(DEFAULT_GLOBAL_SETTINGS));
+        console.log('[Server] GET /api/settings - Raw from DB:', raw);
         const settings = JSON.parse(raw);
+        // Merge with defaults to ensure all fields are present (backward compatibility)
+        const merged = { ...DEFAULT_GLOBAL_SETTINGS, ...settings };
+        console.log('[Server] GET /api/settings - Merged:', merged);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(settings));
+        res.end(JSON.stringify(merged));
       } catch (e: any) {
+        console.error('[Server] GET /api/settings - Error:', e.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));
       }
@@ -809,9 +953,12 @@ export class BotServer {
       req.on('end', () => {
         try {
           const incoming = JSON.parse(body);
+          console.log('[Server] PUT /api/settings - Incoming:', incoming);
           const { applyToAll, ...settingsOnly } = incoming;
           const merged = { ...DEFAULT_GLOBAL_SETTINGS, ...settingsOnly };
+          console.log('[Server] PUT /api/settings - Merged:', merged);
           setSetting('globalSettings', JSON.stringify(merged));
+          console.log('[Server] PUT /api/settings - Saved to DB');
 
           if (applyToAll) {
             const { floorWindow, spikeThreshold, sellDropThreshold, cooldownTicks } = merged;
@@ -823,6 +970,7 @@ export class BotServer {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ...merged, appliedToBots: applyToAll ? this.botManager.getAllBots().length : 0 }));
         } catch (e: any) {
+          console.error('[Server] PUT /api/settings - Error:', e.message);
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: e.message }));
         }

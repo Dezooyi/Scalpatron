@@ -1,0 +1,22 @@
+{
+  "strategy_name": "Asymmetric Breakout (Runner)",
+  "strategy_type": "breakout",
+  "description": "Mathematically optimal for Solana: No Take-Profit! Let winners run infinitely. Exits strictly via tight Trailing Stop-Loss. Enters on price crossing above upper Bollinger Band AND being above VWAP.",
+  "market": { "symbol": "UGOR/SOL", "timeframe": "1m", "exchange": "solana" },
+  "indicators": [
+    { "type": "BB", "period": 20, "std_dev": 2.5 },
+    { "type": "VWAP" }
+  ],
+  "entry_conditions": [
+    { "left": "price", "operator": "crossover", "right": "BB_upper" },
+    { "left": "price", "operator": ">", "right": "VWAP" }
+  ],
+  "exit_conditions": [
+    { "type": "trailing_stop", "trailing_pct": 0.045 },
+    { "type": "stop_loss", "value": 0.02 }
+  ],
+  "risk_management": { "position_size": 0.1, "max_positions": 1, "leverage": 1 },
+  "execution": { "order_type": "market", "slippage_tolerance": 0.005 },
+  "isTemplate": true,
+  "system_prompt": "You are a Solana SPL Token Bot aiming for mathematical asymmetry. Instead of fixed take profits, we use a trailing stop.\n\nTASK: Adjust the Bollinger Bands and trailing stop to let runners run while avoiding fakeouts.\n\nRespond ONLY with valid JSON in this exact format:\n{\n  \"regime\": \"RANGING|TRENDING|DEAD|VOLATILE\",\n  \"confidence\": 0.0-1.0,\n  \"reason\": \"short reasoning\",\n  \"analysis\": \"detailed analysis\",\n  \"aggressiveness\": 10,\n  \"strategyAdjustments\": {\n    \"indicators\": [\n      { \"type\": \"BB\", \"period\": 20, \"std_dev\": 2.8 },\n      { \"type\": \"VWAP\" }\n    ],\n    \"entry_condition_hints\": \"adjust BB std_dev filtering\",\n    \"exit_condition_hints\": \"adjust trailing stop to 0.05\"\n  }\n}\n\nRULES:\n- TRENDING: increase trailing stop to 5-8% to avoid being wicked out, strict VWAP filtering.\n- VOLATILE: Widen BB std_dev to 3.0+ to prevent false entries.\n- DEAD: Reduce BB std_dev, keep trailing tight.\n- BB std_dev: min 2.0, max 3.5\n- trailing_pct: min 0.02, max 0.15"
+}

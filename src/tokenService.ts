@@ -329,11 +329,74 @@ export class TokenService {
   }
 
   /**
-   * Refresht die Preisdaten aller Whitelist-Token von DexScreener und speichert sie.
+   * Entfernt alle Token aus der Datenbank, die keinem Bot zugeordnet sind.
+   * Dies verhindert unnötige API-Aufrufe für verwaiste Token.
+   */
+  public cleanupOrphanTokens(): { removed: number; kept: number } {
+    // Hole alle Mint-Adressen der konfigurierten Bots
+    const botRows = db.prepare(`
+      SELECT DISTINCT mintAddress FROM bots
+    `).all() as { mintAddress: string }[];
+    
+    const botMintAddresses = botRows.map(row => row.mintAddress);
+    
+    if (botMintAddresses.length === 0) {
+      // Keine Bots vorhanden - alle Token entfernen
+      const result = db.prepare('SELECT COUNT(*) as count FROM tokens').get() as { count: number };
+      if (result.count > 0) {
+        db.prepare('DELETE FROM tokens').run();
+        console.log(`[TokenService] Cleanup: Removed ${result.count} orphan tokens (no bots configured)`);
+      }
+      return { removed: result.count, kept: 0 };
+    }
+    
+    // Lösche alle Token, die nicht in der Bot-Liste sind
+    const placeholders = botMintAddresses.map(() => '?').join(',');
+    const deleteStmt = db.prepare(`
+      DELETE FROM tokens WHERE mintAddress NOT IN (${placeholders})
+    `);
+    
+    // Hole Anzahl der zu löschenden Token vor dem Löschen
+    const beforeCount = db.prepare(`
+      SELECT COUNT(*) as count FROM tokens WHERE mintAddress NOT IN (${placeholders})
+    `).get(...botMintAddresses) as { count: number };
+    
+    if (beforeCount.count > 0) {
+      deleteStmt.run(...botMintAddresses);
+      console.log(`[TokenService] Cleanup: Removed ${beforeCount.count} orphan tokens`);
+    }
+    
+    // Hole Anzahl der verbleibenden Token
+    const afterCount = db.prepare(`
+      SELECT COUNT(*) as count FROM tokens WHERE mintAddress IN (${placeholders})
+    `).get(...botMintAddresses) as { count: number };
+    
+    return { removed: beforeCount.count, kept: afterCount.count };
+  }
+
+  /**
+   * Refresht die Preisdaten aller Token von konfigurierten Bots von DexScreener und speichert sie.
    * Wird periodisch aufgerufen (z.B. alle 60 Sekunden).
    */
   public async refreshAllTokenPrices(): Promise<void> {
-    const tokens = getAllTokensFromDb();
+    // Hole nur die Mint-Adressen der konfigurierten Bots (alle, auch gestoppte)
+    const botRows = db.prepare(`
+      SELECT DISTINCT mintAddress FROM bots
+    `).all() as { mintAddress: string }[];
+    
+    // Wenn keine Bots existieren, nichts tun
+    if (botRows.length === 0) {
+      return;
+    }
+    
+    const botMintAddresses = botRows.map(row => row.mintAddress);
+    
+    // Hole nur die Token-Infos der Bots
+    const placeholders = botMintAddresses.map(() => '?').join(',');
+    const tokens = db.prepare(`
+      SELECT * FROM tokens WHERE mintAddress IN (${placeholders})
+    `).all(...botMintAddresses) as any[];
+    
     for (const token of tokens) {
       try {
         const info = await fetchTokenInfoFromDexScreener(token.mintAddress);

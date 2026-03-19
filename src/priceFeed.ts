@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { CONFIG } from './config.js';
+import { getTokenInfo } from './db.js';
 
 export interface PricePoint {
   timestamp: number;
@@ -176,9 +177,18 @@ export class PriceFeed extends EventEmitter {
   private intervalIds: Map<string, ReturnType<typeof setInterval>> = new Map();
   private subscriberCounts: Map<string, number> = new Map();
   private lastPollMap: Map<string, number> = new Map();
+  private getBotNamesForToken: ((mintAddress: string) => string[]) | null = null;
 
   private constructor() {
     super();
+  }
+
+  /**
+   * Setzt eine Callback-Funktion um Bot-Namen für ein Token zu erhalten.
+   * Wird für gruppierte Log-Ausgabe verwendet.
+   */
+  public setBotNamesCallback(callback: (mintAddress: string) => string[]): void {
+    this.getBotNamesForToken = callback;
   }
 
   public static getInstance(): PriceFeed {
@@ -264,7 +274,13 @@ export class PriceFeed extends EventEmitter {
         return;
       }
       
-      console.log(`[PriceFeed] ✅ Preis für ${mintAddress}: $${price}`);
+      // Gruppierte Log-Ausgabe mit Token-Symbol und Bot-Namen
+      const tokenInfo = getTokenInfo(mintAddress);
+      const tokenSymbol = tokenInfo?.symbol ?? mintAddress.slice(0, 8);
+      const botNames = this.getBotNamesForToken?.(mintAddress) ?? [];
+      const botList = botNames.length > 0 ? ` → [${botNames.join(', ')}]` : '';
+      
+      console.log(`[PriceFeed] ✅ ${tokenSymbol}: $${price}${botList}`);
       const point: PricePoint = { timestamp: Date.now(), price };
       const history = this.historyMap.get(mintAddress) || [];
       history.push(point);

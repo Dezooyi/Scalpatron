@@ -306,9 +306,20 @@ export class StrategyEngine {
 
     // Handle crossover/crossunder operators (need full series)
     if (cond.operator === 'crossover' || cond.operator === 'crossunder') {
-      const leftSeries = indicators[cond.left] ?? [];
+      const getSeries = (ref: string) => {
+        if (indicators[ref]) return indicators[ref];
+        const base = ref.split('_')[0] + '_';
+        const fallbackKeys = Object.keys(indicators).filter(k => k.startsWith(base));
+        if (fallbackKeys.length > 0) {
+          const fallback = this.resolveFallback(ref, fallbackKeys);
+          return fallback ? indicators[fallback] : [];
+        }
+        return [];
+      };
+
+      const leftSeries = getSeries(cond.left);
       const rightSeries = typeof cond.right === 'string'
-        ? (indicators[cond.right] ?? [])
+        ? getSeries(cond.right)
         : new Array(leftSeries.length).fill(cond.right);
 
       return cond.operator === 'crossover'
@@ -333,9 +344,43 @@ export class StrategyEngine {
     }
   }
 
+  private resolveFallback(ref: string, availableKeys: string[]): string | undefined {
+    const parts = ref.split('_');
+    if (parts.length < 2) return availableKeys[0];
+    
+    const reqPeriod = parseInt(parts[1], 10);
+    const available = availableKeys.sort((a,b) => parseInt(a.split('_')[1]||'0') - parseInt(b.split('_')[1]||'0'));
+    
+    if (available.length === 1 || isNaN(reqPeriod)) return available[0];
+    
+    // Sort all original references to find rank (is this the fast or slow indicator?)
+    const baseType = parts[0] + '_';
+    const allRefs = new Set<number>();
+    const addRef = (r: any) => { if (typeof r === 'string' && r.startsWith(baseType)) allRefs.add(parseInt(r.split('_')[1]||'0')); };
+    
+    this.config.entry_conditions.forEach(c => { addRef(c.left); addRef(c.right); });
+    this.config.exit_conditions.forEach(c => { if (c.condition) { addRef(c.condition.left); addRef(c.condition.right); } });
+    
+    const sortedRefs = Array.from(allRefs).filter(n => !isNaN(n)).sort((a,b) => a - b);
+    const rank = sortedRefs.indexOf(reqPeriod);
+    
+    if (rank >= 0 && rank < available.length) return available[rank];
+    return available[0];
+  }
+
   private resolveValue(ref: string, price: number, latest: Record<string, number>): number {
     if (ref === 'price') return price;
-    return latest[ref] ?? NaN;
+    if (latest[ref] !== undefined) return latest[ref];
+    
+    const baseType = ref.split('_')[0] + '_';
+    const fallbackKeys = Object.keys(latest).filter(k => k.startsWith(baseType));
+    
+    if (fallbackKeys.length > 0) {
+      const fallback = this.resolveFallback(ref, fallbackKeys);
+      return fallback ? latest[fallback] : NaN;
+    }
+    
+    return NaN;
   }
 
   /** Get pattern settings if this is a scalping strategy */

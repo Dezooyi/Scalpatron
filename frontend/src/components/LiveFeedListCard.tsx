@@ -34,7 +34,7 @@
  * Wipe button: DELETE /api/bots/:id/livefeed — clears only price ticks (DB),
  * resets local entries state. Agent history and trades are unaffected.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { Trash2 } from "lucide-react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import type { LogFeedRowData, BadgeVariant } from "@/components/LogFeedList";
@@ -47,6 +47,8 @@ interface PriceTick {
   price: number;
   deltaPercent?: number | null;
 }
+
+type AggregatedTick = PriceTick & { delta: number; count: number; firstTimestamp: number };
 
 interface LiveFeedListCardProps {
   bot: BotState;
@@ -91,16 +93,18 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
       } else {
         const hist = bot.priceHistory;
         if (hist && hist.length > 0) {
+          // If live feed DB is empty, use the SSE memory buffer but shift timestamps
+          // into the past so they don't hide real trades that happened earlier.
           const now = Date.now();
           const seeded = [...hist].reverse().map((price, idx) => ({
-            timestamp: now - idx * 5000,
+            timestamp: now - (idx + 1) * 2000, 
             price,
           }));
           setEntries(seeded);
           lastPriceRef.current = hist[hist.length - 1];
         }
       }
-      // Agent history — parse adjustedSettings if stored as JSON string
+      // Agent history
       if (Array.isArray(histData)) {
         setLocalHistory(histData.map((e: { adjustedSettings: string | object; [k: string]: unknown }) => ({
           ...e,
@@ -137,36 +141,32 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
     }
   };
 
-  // Reverse to chronological to calculate deltas and aggregate identical ticks
-  const chronological = [...entries].reverse();
-  
-  type AggregatedTick = PriceTick & { delta: number; count: number; firstTimestamp: number };
-  const aggregatedTicks: AggregatedTick[] = [];
-  let currentGroup: AggregatedTick | null = null;
+  // Memoize aggregated ticks to avoid recalculating on every render
+  const aggregatedTicks = useMemo(() => {
+    const chronological = [...entries].reverse();
+    const result: AggregatedTick[] = [];
+    let currentGroup: AggregatedTick | null = null;
 
-  for (let i = 0; i < chronological.length; i++) {
-    const entry = chronological[i];
-    const prev = i > 0 ? chronological[i - 1] : null;
-    const delta = entry.deltaPercent != null
-      ? entry.deltaPercent
-      : prev ? ((entry.price - prev.price) / prev.price) * 100 : 0;
-      
-    if (currentGroup && currentGroup.price === entry.price && currentGroup.delta === delta) {
-      currentGroup.count += 1;
-      // update timestamp so the aggregate sorts as the newest tick of this run
-      currentGroup.timestamp = entry.timestamp; 
-    } else {
-      if (currentGroup) {
-        aggregatedTicks.push(currentGroup);
+    for (let i = 0; i < chronological.length; i++) {
+      const entry = chronological[i];
+      const prev = i > 0 ? chronological[i - 1] : null;
+      const delta = entry.deltaPercent != null
+        ? entry.deltaPercent
+        : prev ? ((entry.price - prev.price) / prev.price) * 100 : 0;
+        
+      if (currentGroup && currentGroup.price === entry.price && currentGroup.delta === delta) {
+        currentGroup.count += 1;
+        currentGroup.timestamp = entry.timestamp; 
+      } else {
+        if (currentGroup) result.push(currentGroup);
+        currentGroup = { ...entry, delta, count: 1, firstTimestamp: entry.timestamp };
       }
-      currentGroup = { ...entry, delta, count: 1, firstTimestamp: entry.timestamp };
     }
-  }
-  if (currentGroup) {
-    aggregatedTicks.push(currentGroup);
-  }
+    if (currentGroup) result.push(currentGroup);
+    return result;
+  }, [entries]);
 
-  // Combine ticks, trades, AI advice updates and AI_AGENT log messages
+  // Combined feed data structure
   type FeedItem =
     | (AggregatedTick & { type: 'tick' })
     | (Trade & { type: 'trade' })
@@ -174,36 +174,37 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
     | { type: 'advice', botId: string, advice: NonNullable<AgentAdviceEntry['advice']> }
     | { type: 'log', timestamp: number, message: string, level: string };
 
-  const allItems: FeedItem[] = [];
+  // Memoize the merged and sorted feed items
+  const allItems = useMemo(() => {
+    const items: FeedItem[] = [];
 
-  aggregatedTicks.forEach(t => allItems.push({ type: 'tick', ...t }));
+    // 1. Ticks
+    aggregatedTicks.forEach(t => items.push({ type: 'tick', ...t }));
 
-  // BUY / SELL trades
-  (bot.recentTrades ?? []).forEach(t => allItems.push({ type: 'trade', ...t }));
-  
-  const seenAdviceTimestamps = new Set<number>();
+    // 2. Trades
+    (bot.recentTrades ?? []).forEach(t => items.push({ type: 'trade', ...t }));
+    
+    // 3. AI Advice
+    const seenAdviceTimestamps = new Set<number>();
+    if (agentAdvice) {
+      agentAdvice.forEach(a => {
+        if (a.advice?.adjustedSettings && Object.keys(a.advice.adjustedSettings).length > 0) {
+          seenAdviceTimestamps.add(a.advice.timestamp || Date.now());
+          items.push({ type: 'advice', ...a });
+        }
+      });
+    }
 
-  if (agentAdvice) {
-    agentAdvice.forEach(a => {
-      if (a.advice && a.advice.adjustedSettings && Object.keys(a.advice.adjustedSettings).length > 0) {
-        const ts = a.advice.timestamp || Date.now();
-        seenAdviceTimestamps.add(ts);
-        allItems.push({ type: 'advice', ...a });
-      }
+    // 4. Merge historical AI data
+    const mergedHistory = [...(agentHistory ?? [])];
+    localHistory.forEach(h => {
+      if (!mergedHistory.some(e => e.timestamp === h.timestamp)) mergedHistory.push(h);
     });
-  }
 
-  // Merge prop history (real-time SSE updates) with locally-fetched history (loaded on bot select)
-  const mergedHistory = [...(agentHistory ?? [])];
-  localHistory.forEach(h => {
-    if (!mergedHistory.some(e => e.timestamp === h.timestamp)) mergedHistory.push(h);
-  });
-
-  if (mergedHistory.length > 0) {
     mergedHistory.forEach(h => {
       const adj = typeof h.adjustedSettings === "string" ? JSON.parse(h.adjustedSettings) : (h.adjustedSettings ?? {});
       if (Object.keys(adj).length > 0 && !seenAdviceTimestamps.has(h.timestamp)) {
-        allItems.push({
+        items.push({
           type: 'advice',
           botId: h.botId,
           advice: {
@@ -215,210 +216,160 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
         });
       }
     });
-  }
 
-  // Add AI_AGENT log events (source === 'AI_AGENT'), limited to recent 20 items
-  if (terminalLogs) {
-    const aiLogs = terminalLogs
-      .filter(l => l.source === 'AI_AGENT')
-      .slice(-40); // newest-last from SSE buffer
-    aiLogs.forEach(l => {
-      allItems.push({ type: 'log', timestamp: l.timestamp, message: l.message, level: l.level });
+    // 5. AI Agent Logs
+    if (terminalLogs) {
+      const aiLogs = terminalLogs
+        .filter(l => l.source === 'AI_AGENT')
+        .slice(-40);
+      aiLogs.forEach(l => {
+        items.push({ type: 'log', timestamp: l.timestamp, message: l.message, level: l.level });
+      });
+    }
+    
+    // Sort descending by timestamp
+    return items.sort((a, b) => {
+      const tA = a.type === 'advice' ? (a.advice?.timestamp || (a as any).timestamp || 0) : (a as any).timestamp || 0;
+      const tB = b.type === 'advice' ? (b.advice?.timestamp || (b as any).timestamp || 0) : (b as any).timestamp || 0;
+      return tB - tA;
     });
-  }
-  
-  // Sort descending by timestamp
-  allItems.sort((a, b) => {
-    const tA = a.type === 'advice' ? (a.advice?.timestamp || Date.now()) : a.type === 'log' ? a.timestamp : a.timestamp;
-    const tB = b.type === 'advice' ? (b.advice?.timestamp || Date.now()) : b.type === 'log' ? b.timestamp : b.timestamp;
-    return tB - tA;
-  });
+  }, [aggregatedTicks, bot.recentTrades, agentAdvice, agentHistory, localHistory, terminalLogs]);
 
-  // Build display rows — newest-first, cap at 60 for render perf
-  const displayItems = allItems.slice(0, 60);
-
-  const rows: LogFeedRowData[] = displayItems.map((item, idx) => {
-    if (item.type === 'advice') {
-      const adv = item.advice!;
-      const ts = adv.timestamp || Date.now();
-      const timestampStr = new Date(ts).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      
-      const getRegimeBadge = (r: string) => {
-        const c = r === "RANGING" ? "bg-blue-500/20 text-blue-300 border-blue-500/30" : r === "TRENDING" ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30" : r === "VOLATILE" ? "bg-amber-500/20 text-amber-300 border-amber-500/30" : "bg-red-500/20 text-red-300 border-red-500/30";
-        return <span className={`text-[8px] font-black uppercase tracking-wider px-1 py-0.5 rounded border ${c}`}>{r}</span>;
-      };
-
-      const displayNames: Record<string, string> = { spikeThreshold: "Spike", sellDropThreshold: "Sell Drop", floorWindow: "Floor Win", cooldownTicks: "Cooldown" };
-
-      // Compute changes — only scalar (non-object) settings keys
-      const changes = Object.keys(adv.adjustedSettings || {}).map(key => {
-        const rawNew = (adv.adjustedSettings as any)[key];
-        const rawOld = adv.previousSettings ? (adv.previousSettings as any)[key] : rawNew;
-        // Skip nested objects (e.g. strategyAdjustments) — they can't be rendered as strings
-        if (typeof rawNew === 'object' && rawNew !== null) return null;
-        const newValue = rawNew;
-        const oldValue = rawOld;
-        const nV = Number(newValue);
-        const oV = Number(oldValue);
-        let changePercent = 0;
-        if (!isNaN(nV) && !isNaN(oV) && oV !== 0) {
-          changePercent = ((nV - oV) / oV) * 100;
-        }
-        return { key, oldValue, newValue, changePercent };
-      }).filter(Boolean) as { key: string; oldValue: unknown; newValue: unknown; changePercent: number }[];
+  // Memoize rows mapping for LogFeedList
+  const rows = useMemo(() => {
+    const displayItems = allItems.slice(0, 100);
+    return displayItems.map((item, idx) => {
+      if (item.type === 'advice') {
+        const adv = item.advice!;
+        const ts = adv.timestamp || Date.now();
+        const timestampStr = new Date(ts).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
         
-      return {
-        id: `advice-${ts}-${idx}`,
-        timestamp: timestampStr,
-        badge: { text: "AI", variant: "purple" as BadgeVariant },
-        accent: "purple" as const,
-        mainContent: <span className="font-bold text-purple-400">Strategy Config Updated</span>,
-        expandedContent: (
-          <div className="bg-purple-500/10 border border-purple-500/30 rounded px-2 py-1.5 mt-1 animate-in fade-in slide-in-from-top-2 duration-300 -ml-16 mb-1">
-            <div className="text-[9px] font-bold uppercase tracking-wider mb-1.5 flex items-center justify-between text-purple-400">
-              <span className="flex items-center gap-1"><BrainCircuit className="h-3 w-3" /> AI Updated</span>
-              <div className="flex items-center gap-1.5">
-                {adv.regime && getRegimeBadge(adv.regime)}
-                {adv.confidence !== undefined && <span className="text-[8px] font-mono text-purple-300">{(adv.confidence * 100).toFixed(0)}%</span>}
+        const getRegimeBadge = (r: string) => {
+          const c = r === "RANGING" ? "bg-blue-500/20 text-blue-300 border-blue-500/30" : r === "TRENDING" ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30" : r === "VOLATILE" ? "bg-amber-500/20 text-amber-300 border-amber-500/30" : "bg-red-500/20 text-red-300 border-red-500/30";
+          return <span className={`text-[8px] font-black uppercase tracking-wider px-1 py-0.5 rounded border ${c}`}>{r}</span>;
+        };
+
+        const displayNames: Record<string, string> = { spikeThreshold: "Spike", sellDropThreshold: "Sell Drop", floorWindow: "Floor Win", cooldownTicks: "Cooldown" };
+
+        const changes = Object.keys(adv.adjustedSettings || {}).map(key => {
+          const rawNew = (adv.adjustedSettings as any)[key];
+          const rawOld = adv.previousSettings ? (adv.previousSettings as any)[key] : rawNew;
+          if (typeof rawNew === 'object' && rawNew !== null) return null;
+          const nV = Number(rawNew);
+          const oV = Number(rawOld);
+          let changePercent = 0;
+          if (!isNaN(nV) && !isNaN(oV) && oV !== 0) {
+            changePercent = ((nV - oV) / oV) * 100;
+          }
+          return { key, oldValue: rawOld, newValue: rawNew, changePercent };
+        }).filter(Boolean) as { key: string; oldValue: unknown; newValue: unknown; changePercent: number }[];
+          
+        return {
+          id: `advice-${ts}-${idx}`,
+          timestamp: timestampStr,
+          badge: { text: "AI", variant: "purple" as BadgeVariant },
+          accent: "purple" as const,
+          mainContent: <span className="font-bold text-purple-400">Strategy Config Updated</span>,
+          expandedContent: (
+            <div className="bg-purple-500/10 border border-purple-500/30 rounded px-2 py-1.5 mt-1 animate-in fade-in slide-in-from-top-2 duration-300 -ml-16 mb-1">
+              <div className="text-[9px] font-bold uppercase tracking-wider mb-1.5 flex items-center justify-between text-purple-400">
+                <span className="flex items-center gap-1"><BrainCircuit className="h-3 w-3" /> AI Updated</span>
+                <div className="flex items-center gap-1.5">
+                  {adv.regime && getRegimeBadge(adv.regime)}
+                  {adv.confidence !== undefined && <span className="text-[8px] font-mono text-purple-300">{(adv.confidence * 100).toFixed(0)}%</span>}
+                </div>
+              </div>
+              <div className="space-y-1">
+                {changes.length > 0 ? changes.map((change, i) => {
+                  const isUnchanged = change.oldValue === change.newValue && change.changePercent === 0;
+                  return (
+                    <div key={i} className="flex items-center gap-1.5 text-[10px] font-mono">
+                      <span className="text-muted-foreground w-14 shrink-0 truncate font-semibold">{displayNames[change.key] ?? change.key}</span>
+                      {!isUnchanged ? (
+                        <>
+                          <span className="text-foreground/80 tabular-nums">{String(change.oldValue)}</span>
+                          <span className="text-muted-foreground text-[9px] mx-0.5">→</span>
+                          <span className="text-cyan-400 font-bold tabular-nums">{String(change.newValue)}</span>
+                          <span className={`${change.changePercent > 0 ? "text-green-400" : "text-red-400"} ml-auto text-[9px]`}>
+                            {change.changePercent > 0 ? "+" : ""}{change.changePercent.toFixed(1)}%
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-cyan-400/90 font-bold tabular-nums ml-auto">{String(change.newValue)}</span>
+                      )}
+                    </div>
+                  );
+                }) : <span className="text-[10px] text-purple-300/60 italic">Strategy analyzed</span>}
               </div>
             </div>
-            <div className="space-y-1">
-              {changes.length > 0 ? changes.map((change, i) => {
-                const isUnchanged = change.oldValue === change.newValue && change.changePercent === 0;
-                return (
-                  <div key={i} className="flex items-center gap-1.5 text-[10px] font-mono">
-                    <span className="text-muted-foreground w-14 shrink-0 truncate font-semibold">{displayNames[change.key] ?? change.key}</span>
-                    {!isUnchanged ? (
-                      <>
-                        <span className="text-foreground/80 tabular-nums">{String(change.oldValue)}</span>
-                        <span className="text-muted-foreground text-[9px] mx-0.5">→</span>
-                        <span className="text-cyan-400 font-bold tabular-nums">{String(change.newValue)}</span>
-                        <span className={`ml-auto text-[9px] font-bold px-1 rounded ${change.changePercent > 0 ? "text-green-400 bg-green-500/15" : change.changePercent < 0 ? "text-red-400 bg-red-500/15" : "text-zinc-300 bg-zinc-500/25"}`}>
-                          {change.changePercent > 0 ? "+" : ""}{change.changePercent.toFixed(1)}%
-                        </span>
-                      </>
-                    ) : (
-                      <span className="text-cyan-400/90 font-bold tabular-nums">{String(change.newValue)}</span>
-                    )}
-                  </div>
-                );
-              }) : (
-                <span className="text-[10px] text-purple-300/60 italic">Strategy analyzed — no setting changes</span>
-              )}
-            </div>
+          ),
+        };
+      }
+
+      if (item.type === 'log') {
+        const ts = item.timestamp;
+        const msg = item.message
+          .replace(/^Analysis cycle started /, '🔍 Analysis ')
+          .replace(/^Optimized! /, '✅ ')
+          .replace(/^Cycle completed\./, '✓ Cycle done');
+        return {
+          id: `log-${ts}-${idx}`,
+          timestamp: new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+          badge: { text: "🤖", variant: "purple" as BadgeVariant },
+          accent: "purple" as const,
+          mainContent: <span className="text-[10px] font-mono text-purple-300/80 truncate">{msg}</span>,
+        };
+      }
+
+      if (item.type === 'trade') {
+        const isBuy = item.action === 'BUY';
+        return {
+          id: `trade-${item.timestamp}-${idx}`,
+          timestamp: new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+          badge: { text: isBuy ? 'BUY' : 'SELL', variant: isBuy ? 'green' : 'red' as BadgeVariant },
+          accent: isBuy ? 'green' : 'red' as const,
+          mainContent: (
+            <span className={`font-mono font-bold ${isBuy ? 'text-green-400' : 'text-red-400'}`}>
+              ${item.price.toFixed(item.price < 0.001 ? 8 : 6)}
+            </span>
+          ),
+          rightContent: item.pnlPercent != null && (
+            <span className={`text-[10px] font-bold ${item.pnlPercent >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {item.pnlPercent >= 0 ? '+' : ''}{item.pnlPercent.toFixed(2)}%
+            </span>
+          ),
+        };
+      }
+
+      const delta = item.delta;
+      const isUp = delta > 0;
+      const isDown = delta < 0;
+      const durationSec = Math.round((item.timestamp - item.firstTimestamp) / 1000);
+
+      return {
+        id: `tick-${item.timestamp}-${idx}`,
+        timestamp: new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+        badge: isUp ? { text: "UP", variant: "green" } : isDown ? { text: "DN", variant: "red" } : { text: "──", variant: "cyan" },
+        mainContent: (
+          <span className="font-mono text-foreground/90 tabular-nums">
+            ${item.price.toFixed(item.price < 0.001 ? 8 : 6)}
+          </span>
+        ),
+        rightContent: (
+          <div className="flex items-center gap-1.5">
+            {item.count > 1 && durationSec > 0 && (
+              <span className="text-[9px] font-mono text-cyan-500/80 bg-cyan-500/10 px-1 rounded">{durationSec}s</span>
+            )}
+            {(item.deltaPercent != null || delta !== 0) && (
+              <span className={`text-[10px] font-mono font-bold ${isUp ? "text-green-400" : isDown ? "text-red-400" : "text-zinc-500"}`}>
+                {delta > 0 ? "+" : ""}{delta.toFixed(3)}%
+              </span>
+            )}
           </div>
         ),
-        opacity: 1,
-      } as LogFeedRowData;
-    }
-
-    // AI_AGENT log item
-    if (item.type === 'log') {
-      const ts = item.timestamp;
-      const timestampStr = new Date(ts).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      // Shorten common verbose prefixes
-      const msg = item.message
-        .replace(/^Analysis cycle started /, '🔍 Analysis ')
-        .replace(/^Optimized! /, '✅ ')
-        .replace(/^Cycle completed\./, '✓ Cycle done')
-        .replace(/^Analysis saved \(not applied.*?\)/, '⏸ Saved (conf too low)');
-      return {
-        id: `log-${ts}-${idx}`,
-        timestamp: timestampStr,
-        badge: { text: "🤖", variant: "purple" as BadgeVariant },
-        accent: "purple" as const,
-        mainContent: (
-          <span className="text-[10px] font-mono text-purple-300/80 truncate">{msg}</span>
-        ),
-        opacity: 1,
-      } as LogFeedRowData;
-    }
-
-    // BUY / SELL trade
-    if (item.type === 'trade') {
-      const t = item;
-      const isBuy = t.action === 'BUY';
-      const ts = new Date(t.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      const pnl = t.pnlPercent != null ? t.pnlPercent : undefined;
-      const pnlLabel = pnl !== undefined
-        ? `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`
-        : null;
-      return {
-        id: `trade-${t.timestamp}-${idx}`,
-        timestamp: ts,
-        badge: { text: isBuy ? 'BUY' : 'SELL', variant: isBuy ? 'green' : 'red' as BadgeVariant },
-        accent: isBuy ? 'green' : 'red' as const,
-        mainContent: (
-          <span className={`font-mono font-bold tabular-nums ${isBuy ? 'text-green-400' : 'text-red-400'}`}>
-            ${t.price.toFixed(t.price < 0.001 ? 8 : 6)}
-          </span>
-        ),
-        rightContent: pnlLabel ? (
-          <span className={`text-[10px] font-mono font-bold tabular-nums ${pnl! >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {pnlLabel}
-          </span>
-        ) : undefined,
-        opacity: 1,
-      } as LogFeedRowData;
-    }
-
-    // Processing Price Ticks
-    const entry = item;
-    const delta = entry.delta;
-    const isUp = delta > 0;
-    const isDown = delta < 0;
-
-    const timestampStr = new Date(entry.timestamp).toLocaleTimeString([], {
-      hour12: false,
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-
-    const badge: LogFeedRowData["badge"] = isUp
-      ? { text: "UP", variant: "green" as BadgeVariant }
-      : isDown
-      ? { text: "DN", variant: "red" as BadgeVariant }
-      : { text: "──", variant: "cyan" as BadgeVariant };
-
-    const deltaLabel =
-      entry.deltaPercent != null || delta !== 0
-        ? `${delta > 0 ? "+" : ""}${delta.toFixed(3)}%`
-        : null;
-
-    const durationSec = Math.round((entry.timestamp - entry.firstTimestamp) / 1000);
-    const durationLabel = entry.count > 1 && durationSec > 0 ? `${durationSec}s` : null;
-
-    return {
-      id: `tick-${entry.timestamp}-${idx}`,
-      timestamp: timestampStr,
-      badge,
-      mainContent: (
-        <span className="font-mono text-foreground/90 tabular-nums">
-          ${entry.price.toFixed(entry.price < 0.001 ? 8 : 6)}
-        </span>
-      ),
-      rightContent: (deltaLabel || durationLabel) ? (
-        <div className="flex items-center gap-1.5">
-          {durationLabel && (
-            <span className="text-[9px] font-mono text-cyan-500/80 bg-cyan-500/10 px-1 rounded">
-              {durationLabel}
-            </span>
-          )}
-          {deltaLabel && (
-            <span
-              className={`text-[10px] font-mono tabular-nums font-bold ${
-                isUp ? "text-green-400" : isDown ? "text-red-400" : "text-zinc-500"
-              }`}
-            >
-              {deltaLabel}
-            </span>
-          )}
-        </div>
-      ) : undefined,
-      opacity: 1,
-    } as LogFeedRowData;
-  });
+      };
+    }) as LogFeedRowData[];
+  }, [allItems]);
 
   const emptyMessage =
     bot.status === "running" ? "Collecting data…" : "Start bot to record price data.";

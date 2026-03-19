@@ -25,20 +25,19 @@ function formatDateTime(timestamp?: number): string {
 }
 
 export function LastActivityCard({ bot }: LastActivityCardProps) {
-  const lastTrade = bot.recentTrades?.slice(-1)[0];
+  const lastTrade = bot.recentTrades?.[0];
   
-  // Korrekte Positionsermittlung: Prüfe ob ein BUY ohne entsprechendes SELL existiert
-  // Finde den letzten Trade der nicht geschlossen wurde (kein exitPrice)
-  const openPosition = bot.recentTrades?.findLast(
-    trade => trade.action === "BUY" && !trade.exitPrice
-  );
-  const inPosition = !!openPosition;
+  // Korrekte Positionsermittlung über Trader-Stats
+  const inPosition = (bot.stats?.openPositionsCount ?? 0) > 0;
 
   // Signal bestimmen basierend auf tatsächlichem Positionsstatus
   // BUY = Keine Position offen und Bot läuft (bereit zu kaufen)
   // SELL = Position offen (bereit zu verkaufen)
   // HOLD = Bot pausiert oder gestoppt
   const signal: SignalType = bot.status !== "running" ? "HOLD" : inPosition ? "SELL" : "BUY";
+  
+  // UX: Show signal as "Target" to clarify it's the NEXT action, not the LAST one.
+  const signalLabel = signal === "HOLD" ? "IDLE" : `NEXT: ${signal}`;
 
   const tooltip = useTooltip();
   const lastActivityTime = lastTrade?.timestamp || bot.priceHistory?.[bot.priceHistory.length - 1];
@@ -51,7 +50,7 @@ export function LastActivityCard({ bot }: LastActivityCardProps) {
             <Clock className="h-4 w-4 text-blue-400" />
             <h4 className="text-xs font-bold text-foreground uppercase">Last Activity</h4>
           </div>
-          <SignalBadge signal={signal} />
+          <SignalBadge signal={signal} labelOverride={signalLabel} />
         </div>
       </CardHeader>
       <CardContent className="p-3 pt-0">

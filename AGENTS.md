@@ -6,93 +6,121 @@ This file provides guidance to agents when working with code in this repository.
 Node.js TypeScript Trading Bot für Solana SPL Tokens (UGOR). Pattern: Range Spike Scalper.
 
 ## Commands (Backend)
+
 ```bash
-npx tsx src/index.ts          # Bot mit Dashboard starten
+# Bot starten
+npx tsx src/index.ts
+
+# Utilities
 npx tsx src/wallet.ts         # Wallet testen (Balance, Airdrop)
 npx tsx src/priceFeed.ts      # Preis-Feed testen (10 Ticks)
+
+# TypeScript
+npx tsc --noEmit              # Type-Check ohne Ausgabe
+npx tsc -b                    # Bauen (Output in dist/)
 ```
 
 ## Commands (Frontend)
+
 ```bash
-cd frontend && npm run dev    # Vite Dev Server
-cd frontend && npm run build  # Production Build
-cd frontend && npm run lint   # ESLint
+cd frontend
+
+# Development & Build
+npm run dev                   # Vite Dev Server
+npm run build                # Production Build
+npm run preview              # Preview Production Build
+
+# Linting & Type Checking
+npm run lint                 # ESLint
+npx tsc --noEmit             # TypeScript Check
+
+# Einen einzelnen Test ausführen (falls vorhanden)
+npm test                     # npm test
+# Oder mit tsx direkt:
+npx tsx tests/my-test.ts
 ```
 
 ## Code Style
-- TypeScript mit NodeNext-Modulsystem (tsconfig.json)
-- Strict mode aktiv, skipLibCheck: true
-- ESM syntax (`"type": "module"` in package.json)
-- Frontend: React 19 + Vite + Tailwind v4 + Radix UI
 
-## Architektur
-- [`index.ts`](src/index.ts:1) - Event-Loop, orchestriert alle Module
-- [`priceFeed.ts`](src/priceFeed.ts:1) - DexScreener Polling (alle 2s)
-- [`patternDetector.ts`](src/patternDetector.ts:1) - Floor-Median + Spike-Erkennung
-- [`trader.ts`](src/trader.ts:1) - Paper/Live-Trading mit PnL
-- [`ollamaAgent.ts`](src/ollamaAgent.ts:1) - KI-Agent (Ollama, 21-Min-Zyklus)
-- [`server.ts`](src/server.ts:1) - HTTP + SSE + REST API
-- [`dashboard.ts`](src/dashboard.ts:1) - Terminal-UI
-- [`botInstance.ts`](src/botInstance.ts:1) - Einzelne Bot-Instanz mit eigenem PatternDetector + Trader
+### TypeScript Konfiguration
+- **Modulsystem**: NodeNext (`"module": "NodeNext"` in tsconfig.json)
+- **Target**: ES2022
+- **Strict**: true (strikte Typisierung)
+- **skipLibCheck**: true (schnellere Kompilierung)
+- **ESM**: `"type": "module"` in package.json
 
-## Strategy Assistant (Ollama KI-Agent)
-Der Strategy Assistant ist ein lokaler LLM-Agent (Ollama), der zyklisch den Markt analysiert und die Pattern Detection Settings dynamisch anpasst.
+### Imports & Exporte
+- Immer `.js` Extension bei lokalen Imports (z.B. `import { X } from './file.js'`)
+- Relative Imports für lokale Module, absolute für npm-Pakete
+- `import type` für reine Typ-Importe verwenden
+- Exports: Named exports bevorzugen, nur bei Singleton-Klassen Default
 
-### Features
-- **Ein Agent für alle Bots**: Ein zentraler OllamaAgent bedient alle Trading-Bots
-- **Zyklische Analyse**: Standardmäßig alle 21 Minuten (konfigurierbar)
-- **Markt-Regime-Erkennung**: RANGING, TRENDING, DEAD, VOLATILE
-- **Confidence-Scoring**: 0-100% Confidence für jede Empfehlung
-- **Auto-Apply**: Settings werden automatisch angewendet bei ausreichender Confidence
-- **History**: Alle Analysen werden in SQLite gespeichert (`agent_history` Tabelle)
+### Benennung
+- **Dateien**: kebab-case (z.B. `priceFeed.ts`, `botInstance.ts`)
+- **Klassen**: PascalCase (z.B. `class BotManager`)
+- **Variablen/Funktionen**: camelCase
+- **Konstanten**: UPPER_SNAKE_CASE für echte Konstanten, sonst camelCase
+- **Interfaces**: PascalCase mit `I` Prefix nur wenn nicht anders möglich (bevorzugen: `interface TraderStats` statt `interface ITraderStats`)
+- **Types**: PascalCase (z.B. `type Position`)
 
-### UI-Sektionen (Frontend)
-1. **Konfiguration**: Modell, Zyklus, Temperature, Max Tokens, Min Confidence, Auto-Apply
-2. **System Prompt**: Anpassbarer Prompt für den LLM-Agent
-3. **Analyse-Historie**: Liste aller vergangenen Analysen mit Bot-Zuordnung, Regime, Confidence
+### Typisierung
+- Explizite Return-Typen bei Funktionen verwenden
+- `any` vermeiden - spezifische Typen bevorzugen
+- Optionale Properties mit `?` markieren
+- Interfaces für strukturierte Objekte, Types für Unions/Primitives
 
-### API-Endpoints
-```
-GET  /api/agent/status   - Agent-Status (running, analyzing, config, historyCount)
-GET  /api/agent/models   - Verfügbare Ollama-Modelle
-GET  /api/agent/history?botId=xxx&limit=50 - Analyse-Historie
-POST /api/agent/config   - Agent-Konfiguration aktualisieren
-POST /api/agent/start    - Agent starten
-POST /api/agent/stop     - Agent stoppen
-POST /api/agent/trigger  - Analyse sofort auslösen (ohne Wartezeit)
-```
+### Error Handling
+- `try/catch` mit spezifischen Fehlermeldungen
+- `catch (e: any)` mit `e.message` für Fehlerdetails
+- Console-Logging mit Prefix: `[Modul] Nachricht`
+- Nie sensible Daten in Fehlermeldungen ausgeben
 
-### SSE-Events
-- `agent_advice`: Neue Analyse-Empfehlung (botId, advice)
-- `agent_status`: Status-Update alle 5 Sekunden (running, analyzing, config)
+### Code Formatierung
+- 2 Spaces Einrückung
+- Einzeilige Kontrollstrukturen erlaubt: `if (cond) return x;`
+- Maximal 120 Zeichen pro Zeile
+- Trailing commas in Objekten/Arrays
+- Semikolons am Zeilenende
 
-### Datenbank
-Tabelle `agent_history`:
-```sql
-CREATE TABLE agent_history (
-  id INTEGER PRIMARY KEY,
-  botId TEXT,
-  timestamp INTEGER,
-  regime TEXT,
-  confidence REAL,
-  reason TEXT,
-  analysis TEXT,
-  adjustedSettings TEXT,  -- JSON
-  applied INTEGER
-);
-```
+### Frontend (React 19 + Tailwind v4 + Radix UI)
+- **Komponenten**: Function Components mit Hooks
+- **Styling**: Tailwind CSS, Komponenten in `components/ui/` (Radix-basiert)
+- **State**: `useState`, `useEffect`, `useCallback` für Callbacks
+- **Imports**: Path-Alias `@/` für src-Root (konfiguriert in tsconfig.json)
+- **UI-Komponenten**: `Button`, `Card`, `Dialog`, `Input` etc. aus `components/ui/`
+- **Icons**: lucide-react
+- **Charts**: Recharts für Datenvisualisierung
 
-## Wichtige Pfade
-- `data/prices.jsonl` - Aufgezeichnete Preisdaten
+### Backend Architektur
+- `src/index.ts` - Main Entry, orchestriert alle Module
+- `src/priceFeed.ts` - DexScreener Polling (alle 2s)
+- `src/patternDetector.ts` - Floor-Median + Spike-Erkennung
+- `src/trader.ts` - Paper/Live-Trading mit PnL
+- `src/ollamaAgent.ts` - KI-Agent (Ollama, 21-Min-Zyklus)
+- `src/server.ts` - HTTP + SSE + REST API
+- `src/botManager.ts` - Mehrere Bot-Instanzen verwalten
+- `src/db.ts` - SQLite Datenbank (better-sqlite3)
+
+### Wichtige Pfade
+- `data/prices.jsonl` - Preisdaten
 - `logs/paper-trades.jsonl` - Trade-Logs
 - `logs/backtest-*.jsonl` - Backtest-Protokolle
-- `docs/index.html` - Web-Dashboard (nicht im frontend-Ordner!)
+- `docs/index.html` - Web-Dashboard
+- `db.sqlite` - SQLite DB
 
-## Environment (.env)
+### Environment (.env)
 - `SOLANA_RPC_URL` - Devnet oder Mainnet
 - `WALLET_PRIVATE_KEY` - Base58 encoded
 - `OLLAMA_URL` - Standard: http://localhost:11434
 - `OLLAMA_MODEL` - Standard: qwen3.5:4b
 
-## CLAUDE.md Context
-Siehe [`CLAUDE.md`](CLAUDE.md:1) für zusätzlichen Projektkontext.
+## Strategy Assistant (Ollama KI-Agent)
+- Ein zentraler Agent bedient alle Trading-Bots
+- Zyklische Analyse alle 21 Minuten (konfigurierbar)
+- Markt-Regime-Erkennung: RANGING, TRENDING, DEAD, VOLATILE
+- Confidence-Scoring: 0-100%
+- Auto-Apply bei ausreichender Confidence
+- SSE-Events: `agent_advice`, `agent_status`
+
+## Siehe auch
+- [`CLAUDE.md`](CLAUDE.md:1) - Zusätzlicher Projektkontext
