@@ -26,7 +26,7 @@ export interface BotState {
   aiAggressiveness: number;     // current AI-set effective value
   tradingMode: 'fixed' | 'aggressive';
   recentTrades: any[];
-  priceHistory: number[];
+  // priceHistory removed for SSE performance - fetch via /api/bots/:id/history instead
   lastPoll?: number;
   totalTicks?: number;
   startTime?: number;
@@ -444,7 +444,7 @@ export class BotInstance {
       aiAggressiveness: tradeConfig.aggressiveness,   // current AI-set effective value
       tradingMode: tradeConfig.tradingMode,
       recentTrades,
-      priceHistory: history.slice(-100).map(p => p.price),
+      // priceHistory removed for SSE performance - fetch via /api/bots/:id/history instead
       lastPoll: feed.getLastPoll(this.mintAddress),
       totalTicks: this.cumulativeTicks,
       startTime: this.startTime,
@@ -460,6 +460,13 @@ export class BotInstance {
     }
 
     return state;
+  }
+
+  /** Get price history separately for API endpoint (avoids sending large arrays over SSE) */
+  public getPriceHistory(limit = 100): number[] {
+    const feed = PriceFeed.getInstance();
+    const history = feed.getHistory(this.mintAddress);
+    return history.slice(-limit).map(p => p.price);
   }
 
   private getWarmupProgress(): number {

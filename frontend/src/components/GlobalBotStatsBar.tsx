@@ -54,12 +54,14 @@ interface GlobalBotStatsBarProps {
   bots: BotState[];
   agentHistoryCount: number;
   agentRunning?: boolean;
+  agentCycleMinutes?: number;
   nextAnalysisTime?: number | null;
   onToggleAll?: (targetStatus: "running" | "stopped") => void;
   isAllActionLoading?: boolean;
 }
 
-export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, nextAnalysisTime, onToggleAll, isAllActionLoading }: GlobalBotStatsBarProps) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agentCycleMinutes, nextAnalysisTime, onToggleAll, isAllActionLoading }: GlobalBotStatsBarProps) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {

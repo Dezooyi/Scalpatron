@@ -417,6 +417,15 @@ export class BotServer {
         return;
       }
 
+      // GET /api/bots/:id/history — price history for charts (memory optimization: not sent over SSE)
+      if (req.method === 'GET' && action === 'history') {
+        const limit = urlObj.searchParams.get('limit') ? parseInt(urlObj.searchParams.get('limit')!, 10) : 100;
+        const history = bot.getPriceHistory(limit);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ mintAddress: bot.mintAddress, limit, history }));
+        return;
+      }
+
       // GET /api/bots/:id/system-prompt — returns effective prompt + source + auto-preview
       if (req.method === 'GET' && action === 'system-prompt') {
         res.writeHead(200, { 'Content-Type': 'application/json' });

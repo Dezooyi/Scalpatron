@@ -28,6 +28,7 @@
 | **Backtesting** | Historisches Replay mit Speed-Control und Markdown-Reports |
 | **Web-Dashboard** | React 19 + Tailwind v4 + Radix UI + SSE Live-Streaming |
 | **Persistenz** | SQLite DB + JSONL Trade-Logs |
+| **Memory-Optimiert** | SSE-Payloads minimiert, Browser-stabil auch nach Stunden |
 
 ## Quick Start
 
@@ -293,6 +294,7 @@ OLLAMA_MODEL=qwen3.5:4b
 | `docs/configuration.md` | .env, PatternSettings, Aggressiveness |
 | `docs/operations.md` | Starten, Dashboard, Logs |
 | `docs/TRADING_ENGINE.md` | Generic Token Architecture |
+| `docs/memory-optimization.md` | Memory-Leak Fix, SSE-Optimierung |
 
 ## Lizenz
 

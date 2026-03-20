@@ -246,6 +246,7 @@ export type BotState = {
   aiAggressiveness?: number;     // current AI-set effective value
   tradingMode?: "fixed" | "aggressive";
   recentTrades?: Trade[];
+  // priceHistory is now optional and fetched separately to reduce SSE payload size
   priceHistory?: number[];
   lastPoll?: number;
   totalTicks?: number;
@@ -344,6 +345,9 @@ export default function App() {
     "connected" | "disconnected"
   >("disconnected");
   const [isConnecting, setIsConnecting] = useState(true);
+
+  // Separate state for price histories to avoid memory bloat via SSE
+  const [botPriceHistories, setBotPriceHistories] = useState<Record<string, number[]>>({});
 
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [agentAdvice, setAgentAdvice] = useState<AgentAdviceEntry[]>([]);
@@ -553,8 +557,7 @@ export default function App() {
       try {
         const data = JSON.parse(e.data);
         console.log(
-          `[SSE] State received: ${data.length} bots. First bot price history:`,
-          data[0]?.priceHistory?.length,
+          `[SSE] State received: ${data.length} bots.`,
         );
         throttledSetBots(data);
       } catch (err) {
@@ -739,6 +742,35 @@ export default function App() {
     };
     fetchBotsAndOrder();
   }, []);
+
+  // Load price history for each bot when bots change (memory optimization: fetch separately instead of via SSE)
+  useEffect(() => {
+    const fetchAllHistories = async () => {
+      const histories: Record<string, number[]> = {};
+      await Promise.all(
+        bots.map(async (bot) => {
+          try {
+            const res = await fetch(`${getApiBase()}/api/bots/${bot.id}/history?limit=100`);
+            const data = await res.json();
+            histories[bot.id] = data.history || [];
+          } catch (err) {
+            console.error(`[Init] Price History Fetch error for bot ${bot.id}:`, err);
+            histories[bot.id] = [];
+          }
+        })
+      );
+      setBotPriceHistories(histories);
+      // Update bots with their price histories
+      setBots(prev => prev.map(bot => ({
+        ...bot,
+        priceHistory: histories[bot.id] || []
+      })));
+      console.log("[Init] Price histories loaded for", Object.keys(histories).length, "bots");
+    };
+    if (bots.length > 0) {
+      fetchAllHistories();
+    }
+  }, [bots.length]); // Only re-fetch when bot count changes
 
   // Fetch Global Settings on mount
   useEffect(() => {

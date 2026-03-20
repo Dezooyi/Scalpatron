@@ -14,6 +14,7 @@ Phase 1–6: Range Spike Scalper. Phase 7: Multi-Strategy Architecture mit JSON-
 - [x] Phase 6: agent.ts (Correction Agent, Auto-Optimierung der Thresholds)
 - [x] Web-Interface: server.ts + frontend/src/App.tsx (React, SSE, REST API)
 - [x] BotManager + BotInstance + SQLite (db.ts) + Backtester
+- [x] Memory-Optimierung: PriceHistory aus SSE entfernt, separate REST API
 - [x] Phase 7 (2026-03-16): Multi-Strategy Architecture
   - strategyTypes.ts — TypeScript-Interfaces für JSON Strategy Schema
   - indicatorEngine.ts — EMA/SMA/RSI/MACD/BB/ATR/STOCH/VWAP (zero external deps)
@@ -53,7 +54,7 @@ src/strategyEngine.ts · src/strategyTemplates/*.json
 
 ## Dokumentation
 docs/README.md · docs/architecture.md · docs/modules.md · docs/configuration.md
-docs/strategy.md · docs/multi-strategy.md · docs/operations.md
+docs/strategy.md · docs/multi-strategy.md · docs/operations.md · docs/memory-optimization.md
 
 ## Stack
 Node.js v22.22.0 · TypeScript · npx tsx · Windows 11 / Linux (Nobara)
