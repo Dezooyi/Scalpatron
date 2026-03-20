@@ -1,5 +1,9 @@
 import type { PricePoint } from './priceFeed.js';
 import type { PatternSettings } from './patternDetector.js';
+import type { BotInstance } from './botInstance.js';
+import type { BotState } from './botInstance.js';
+import type { IndicatorConfig } from './strategyTypes.js';
+import type { TradeLogEntry } from './trader.js';
 import { exec, spawn } from 'child_process';
 import os from 'os';
 import path from 'path';
@@ -21,6 +25,48 @@ import { PriceFeed } from './priceFeed.js';
 
 // --- Types ---
 
+interface OllamaModelRaw {
+  name: string;
+  size: number;
+  details?: {
+    parameter_size?: string;
+    family?: string;
+  };
+}
+
+interface OllamaModel {
+  name: string;
+  size: number;
+  parameter_size?: string;
+  family?: string;
+}
+
+interface TradeSummary {
+  action: 'BUY' | 'SELL';
+  price: number;
+  spikePercent: number;
+  pnlPercent?: number;
+}
+
+interface RegimePerformance {
+  regime: string;
+  winRate: number | null;
+  avgPnl: number | null;
+  totalTrades: number;
+}
+
+interface RecentAdvice {
+  timestamp: number;
+  regime: string;
+  confidence: number;
+  reason: string;
+  adjustedSettings?: string;
+  aggressivenessAdvice?: number | null;
+  outcomeTradeCount?: number;
+  outcomeTotalPnl?: number;
+  outcomeWins?: number;
+}
+
 export interface OllamaAdvice {
   adjustedSettings: Partial<PatternSettings>;
   previousSettings: Partial<PatternSettings>;
@@ -31,7 +77,7 @@ export interface OllamaAdvice {
   timestamp: number;
   aggressiveness?: number;        // AI-recommended position_size % (1–80)
   strategyAdjustments?: {         // generic strategy parameter hints
-    indicators?: any[];
+    indicators?: IndicatorConfig[];
     scalping_settings?: Partial<PatternSettings>;
     risk_management?: { position_size?: number };
     entry_condition_hints?: string;
@@ -403,12 +449,12 @@ export class OllamaAgent {
     }
   }
 
-  async listModels(): Promise<any[]> {
+  async listModels(): Promise<OllamaModel[]> {
     try {
       const res = await fetch(`${OLLAMA_URL}/api/tags`);
       if (!res.ok) return [];
-      const data = await res.json() as { models: any[] };
-      return data.models.map((m: any) => ({
+      const data = await res.json() as { models: OllamaModelRaw[] };
+      return data.models.map((m: OllamaModelRaw) => ({
         name: m.name,
         size: m.size,
         parameter_size: m.details?.parameter_size,
@@ -475,7 +521,7 @@ export class OllamaAgent {
     }
   }
 
-  private async analyzeBot(bot: any): Promise<void> {
+  private async analyzeBot(bot: BotInstance): Promise<void> {
     const state = bot.getState();
     const botTokenMint = state.mintAddress;
     const settings = bot.getSettings();
@@ -501,7 +547,7 @@ export class OllamaAgent {
       }
     }
 
-    const recentPrices = allHistory.filter((p: any) => p.timestamp >= cutoff);
+    const recentPrices = allHistory.filter((p: PricePoint) => p.timestamp >= cutoff);
 
     if (recentPrices.length < 10) {
       const msg = `Skipped: Not enough data (${recentPrices.length}/10)`;
@@ -517,7 +563,7 @@ export class OllamaAgent {
         null,
         false,
         undefined,
-        (state as any).strategyId ?? undefined
+        state.strategyId ?? undefined
       );
       return;
     }
@@ -527,11 +573,11 @@ export class OllamaAgent {
       ? calcMarketStats(allHistory, settings)
       : null;
 
-    let recentTrades: any[] = [];
+    let recentTrades: TradeSummary[] = [];
     try {
       const rows = db.prepare(
         'SELECT * FROM trades WHERE botId = ? AND timestamp >= ?'
-      ).all(state.id, cutoff) as any[];
+      ).all(state.id, cutoff) as TradeLogEntry[];
       recentTrades = rows.map(r => ({
         action: r.action,
         price: typeof r.price === 'number' ? r.price : 0,
@@ -631,13 +677,13 @@ export class OllamaAgent {
   private async buildPrompt(
     stats: MarketStats,
     longTermStats: MarketStats | null,
-    trades: any[],
+    trades: TradeSummary[],
     settings: PatternSettings,
     recentPrices: PricePoint[],
     allPrices: PricePoint[],
-    regimePerf: any[],
-    recentAdvices: any[],
-    state: any,
+    regimePerf: RegimePerformance[],
+    recentAdvices: RecentAdvice[],
+    state: BotState,
     tokenMint?: string
   ): Promise<string> {
     const samples = recentPrices
@@ -663,7 +709,7 @@ export class OllamaAgent {
     let regimePerfBlock = 'No historical data available yet.';
     if (regimePerf.length > 0) {
       regimePerfBlock = regimePerf.map(r =>
-        `- ${r.regime}: ${r.winRate}% win rate, avg PnL ${r.avgPnl.toFixed(3)}%, ${r.totalTrades} trades`
+        `- ${r.regime}: ${r.winRate}% win rate, avg PnL ${(r.avgPnl ?? 0).toFixed(3)}%, ${r.totalTrades} trades`
       ).join('\n');
     }
 
@@ -671,8 +717,8 @@ export class OllamaAgent {
     if (recentAdvices.length > 0) {
       recentAdvicesBlock = recentAdvices.map(a => {
         const dt = new Date(a.timestamp).toISOString().slice(0, 16).replace('T', ' ');
-        const outcome = a.outcomeTradeCount > 0
-          ? `${a.outcomeTradeCount} trades, avg PnL ${(a.outcomeTotalPnl / a.outcomeTradeCount).toFixed(3)}%`
+        const outcome = (a.outcomeTradeCount ?? 0) > 0 && (a.outcomeTotalPnl ?? 0) !== 0
+          ? `${a.outcomeTradeCount ?? 0} trades, avg PnL ${((a.outcomeTotalPnl ?? 0) / (a.outcomeTradeCount ?? 1)).toFixed(3)}%`
           : 'no trade outcome';
         return `- ${dt} | ${a.regime} conf:${(a.confidence * 100).toFixed(0)}% aggr:${a.aggressivenessAdvice ?? '-'}% → ${outcome}`;
       }).join('\n');
@@ -975,7 +1021,12 @@ ${JSON.stringify(m5HistoryLite, null, 2)}`;
         analysis?: string;
         aggressiveness?: number;
         settings?: Partial<PatternSettings>;
-        strategyAdjustments?: any;
+        strategyAdjustments?: {
+          indicators?: IndicatorConfig[];
+          scalping_settings?: Partial<PatternSettings>;
+          risk_management?: { position_size?: number };
+          entry_condition_hints?: string;
+        };
       };
 
       const regime = (['RANGING', 'TRENDING', 'DEAD', 'VOLATILE'].includes(parsed.regime ?? ''))
@@ -1037,8 +1088,8 @@ ${JSON.stringify(m5HistoryLite, null, 2)}`;
 
 
 
-  getHistory(botId?: string, limit = 50): any[] {
-    return getAgentHistoryFromDb(botId, limit);
+  getHistory(botId?: string, limit = 50): RecentAdvice[] {
+    return getAgentHistoryFromDb(botId, limit) as RecentAdvice[];
   }
 
   getStatus(): { running: boolean; analyzing: boolean; config: AgentConfig; historyCount: number; lastAnalysisTime: number | null; nextAnalysisTime: number | null } {

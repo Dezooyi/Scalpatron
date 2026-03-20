@@ -359,10 +359,10 @@ export class BotServer {
             paperMode: validatedStrategy.paperMode ?? true,
             settings: {
               ...DEFAULT_SETTINGS,
-              floorWindow: validatedStrategy.parameters.floorWindow ?? DEFAULT_SETTINGS.floorWindow,
-              spikeThreshold: validatedStrategy.parameters.spikeThreshold ?? DEFAULT_SETTINGS.spikeThreshold,
-              sellDropThreshold: validatedStrategy.parameters.sellDropThreshold ?? DEFAULT_SETTINGS.sellDropThreshold,
-              cooldownTicks: validatedStrategy.parameters.cooldownTicks ?? DEFAULT_SETTINGS.cooldownTicks
+              floorWindow: validatedStrategy.parameters.floorWindow as number ?? DEFAULT_SETTINGS.floorWindow,
+              spikeThreshold: validatedStrategy.parameters.spikeThreshold as number ?? DEFAULT_SETTINGS.spikeThreshold,
+              sellDropThreshold: validatedStrategy.parameters.sellDropThreshold as number ?? DEFAULT_SETTINGS.sellDropThreshold,
+              cooldownTicks: validatedStrategy.parameters.cooldownTicks as number ?? DEFAULT_SETTINGS.cooldownTicks
             }
           });
 

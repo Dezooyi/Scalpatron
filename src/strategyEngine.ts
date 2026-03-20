@@ -356,7 +356,7 @@ export class StrategyEngine {
     // Sort all original references to find rank (is this the fast or slow indicator?)
     const baseType = parts[0] + '_';
     const allRefs = new Set<number>();
-    const addRef = (r: any) => { if (typeof r === 'string' && r.startsWith(baseType)) allRefs.add(parseInt(r.split('_')[1]||'0')); };
+    const addRef = (r: string | number) => { if (typeof r === 'string' && r.startsWith(baseType)) allRefs.add(parseInt(r.split('_')[1]||'0')); };
     
     this.config.entry_conditions.forEach(c => { addRef(c.left); addRef(c.right); });
     this.config.exit_conditions.forEach(c => { if (c.condition) { addRef(c.condition.left); addRef(c.condition.right); } });

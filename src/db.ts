@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import type { StrategyConfig } from './strategyTypes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_DIR = path.resolve(__dirname, '..', 'data');
@@ -152,7 +153,7 @@ export function saveAgentHistory(
   confidence: number,
   reason: string,
   analysis: string | undefined,
-  adjustedSettings: any,
+  adjustedSettings: unknown,
   applied: boolean,
   aggressivenessAdvice?: number,
   strategyId?: string,
@@ -164,9 +165,26 @@ export function saveAgentHistory(
   stmt.run(botId, Date.now(), regime, confidence, reason, analysis ?? '', JSON.stringify(adjustedSettings), applied ? 1 : 0, aggressivenessAdvice ?? null, strategyId ?? null);
 }
 
-export function getAgentHistory(botId?: string, limit = 50): any[] {
+interface AgentHistoryEntry {
+  id: number;
+  botId: string;
+  timestamp: number;
+  regime: string;
+  confidence: number;
+  reason: string;
+  analysis: string;
+  adjustedSettings: string;
+  applied: number;
+  aggressivenessAdvice: number | null;
+  outcomeTradeCount: number;
+  outcomeTotalPnl: number;
+  outcomeWins: number;
+  strategyId: string | null;
+}
+
+export function getAgentHistory(botId?: string, limit = 50): AgentHistoryEntry[] {
   let query = 'SELECT * FROM agent_history';
-  const params: any[] = [];
+  const params: (string | number)[] = [];
   
   if (botId) {
     query += ' WHERE botId = ?';
@@ -177,12 +195,12 @@ export function getAgentHistory(botId?: string, limit = 50): any[] {
   params.push(limit);
   
   const stmt = db.prepare(query);
-  return stmt.all(...params) as any[];
+  return stmt.all(...params) as AgentHistoryEntry[];
 }
 
 export function getAgentHistoryCount(botId?: string): number {
   let query = 'SELECT COUNT(*) as count FROM agent_history';
-  const params: any[] = [];
+  const params: (string | number)[] = [];
 
   if (botId) {
     query += ' WHERE botId = ?';
@@ -271,7 +289,7 @@ export function getLatestLiveFeedPrice(mintAddress: string): LiveFeedEntry | nul
 
 export function getLiveFeedStats(mintAddress?: string): { count: number; earliest?: number; latest?: number } {
   let query = 'SELECT COUNT(*) as count, MIN(timestamp) as earliest, MAX(timestamp) as latest FROM live_feed';
-  const params: any[] = [];
+  const params: (string | number)[] = [];
   
   if (mintAddress) {
     query += ' WHERE mintAddress = ?';
@@ -494,7 +512,7 @@ export function getRegimePerformance(botId?: string): RegimePerformance[] {
     FROM agent_history
     WHERE outcomeTradeCount > 0
   `;
-  const params: any[] = [];
+  const params: (string | number)[] = [];
   if (botId) {
     query += ' AND botId = ?';
     params.push(botId);
@@ -516,13 +534,13 @@ export function getRegimePerformance(botId?: string): RegimePerformance[] {
 /**
  * Returns last N agent_history entries with their outcome fields.
  */
-export function getRecentAdvicesWithOutcomes(botId: string, limit = 5): any[] {
+export function getRecentAdvicesWithOutcomes(botId: string, limit = 5): AgentHistoryEntry[] {
   return db.prepare(
     `SELECT regime, confidence, reason, adjustedSettings, aggressivenessAdvice,
             outcomeTradeCount, outcomeTotalPnl, outcomeWins, timestamp
      FROM agent_history WHERE botId = ?
      ORDER BY timestamp DESC LIMIT ?`
-  ).all(botId, limit) as any[];
+  ).all(botId, limit) as AgentHistoryEntry[];
 }
 
 // --- Bot-Strategy Persistence ---
@@ -540,7 +558,7 @@ export function getBotStrategyId(botId: string): string | null {
 
 import { randomUUID } from 'crypto';
 
-export function saveStrategy(config: any, isTemplate = false): string {
+export function saveStrategy(config: StrategyConfig, isTemplate = false): string {
   const id = config.id ?? randomUUID();
   db.prepare(
     `INSERT OR REPLACE INTO strategies (id, name, type, config, isTemplate, createdAt)
@@ -549,15 +567,15 @@ export function saveStrategy(config: any, isTemplate = false): string {
   return id;
 }
 
-export function getStrategy(id: string): any | null {
+export function getStrategy(id: string): StrategyConfig | null {
   const row = db.prepare('SELECT config FROM strategies WHERE id = ?').get(id) as { config: string } | undefined;
   if (!row) return null;
-  try { return { ...JSON.parse(row.config), id }; } catch { return null; }
+  try { return { ...JSON.parse(row.config), id } as StrategyConfig; } catch { return null; }
 }
 
-export function listStrategies(type?: string): any[] {
+export function listStrategies(type?: string): StrategyConfig[] {
   let query = 'SELECT id, config FROM strategies';
-  const params: any[] = [];
+  const params: (string | number)[] = [];
   if (type) {
     query += ' WHERE type = ?';
     params.push(type);
@@ -565,8 +583,8 @@ export function listStrategies(type?: string): any[] {
   query += ' ORDER BY isTemplate DESC, createdAt DESC';
   const rows = db.prepare(query).all(...params) as { id: string; config: string }[];
   return rows.map(r => {
-    try { return { ...JSON.parse(r.config), id: r.id }; } catch { return null; }
-  }).filter(Boolean);
+    try { return { ...JSON.parse(r.config), id: r.id } as StrategyConfig; } catch { return null; }
+  }).filter((r): r is StrategyConfig => r !== null);
 }
 
 export function deleteStrategy(id: string): void {

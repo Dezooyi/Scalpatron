@@ -5,7 +5,7 @@ import { logger } from './appLogger.js';
 import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt } from './db.js';
 import { PriceRecorder } from './priceRecorder.js';
 import { StrategyEngine } from './strategyEngine.js';
-import type { StrategyConfig } from './strategyTypes.js';
+import type { StrategyConfig, IndicatorConfig } from './strategyTypes.js';
 import { TIMEFRAME_MS } from './candleAggregator.js';
 
 const PRICE_FEED_TICKRATE_MS = process.env.PRICE_FEED_TICKRATE_MS
@@ -25,7 +25,7 @@ export interface BotState {
   aggressiveness: number;       // user-set max (ceiling)
   aiAggressiveness: number;     // current AI-set effective value
   tradingMode: 'fixed' | 'aggressive';
-  recentTrades: any[];
+  recentTrades: TradeLogEntry[];
   // priceHistory removed for SSE performance - fetch via /api/bots/:id/history instead
   lastPoll?: number;
   totalTicks?: number;
@@ -34,6 +34,12 @@ export interface BotState {
   strategyType?: string;
   strategyConfig?: StrategyConfig;
   warmupProgress?: number; // 0.0 to 1.0
+}
+
+interface OpenPosition {
+  entryPrice: number;
+  entryTime: number;
+  amount: number;
 }
 
 export class BotInstance {
@@ -100,7 +106,7 @@ export class BotInstance {
     let currentBalanceSOL = this.trader.getStats().balanceSOL;
     let currentBalanceToken = 0;
 
-    let openPositions: any[] = [];
+    let openPositions: OpenPosition[] = [];
 
     for (const row of rows) {
       if (row.action === 'BUY' && row.amount) {
@@ -262,7 +268,7 @@ export class BotInstance {
 
   /** Apply strategy parameter adjustments from AI agent */
   public applyStrategyAdjustments(adjustments: {
-    indicators?: any[];
+    indicators?: IndicatorConfig[];
     risk_management?: Partial<{ position_size: number; max_positions: number; leverage: number }>;
     scalping_settings?: Partial<PatternSettings>;
   }): void {
@@ -428,7 +434,7 @@ export class BotInstance {
     const history = feed.getHistory(this.mintAddress);
 
     // Get last 50 trades from DB
-    const recentTrades = db.prepare('SELECT * FROM trades WHERE botId = ? ORDER BY timestamp DESC LIMIT 50').all(this.id);
+    const recentTrades = db.prepare('SELECT * FROM trades WHERE botId = ? ORDER BY timestamp DESC LIMIT 50').all(this.id) as TradeLogEntry[];
     const tradeConfig = this.trader.getTradeConfig();
     const state: BotState = {
       id: this.id,

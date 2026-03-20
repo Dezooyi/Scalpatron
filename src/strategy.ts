@@ -10,27 +10,30 @@ export interface StrategyConfig {
     floorWindow?: number;
     spikeThreshold?: number;
     sellDropThreshold?: number;
-    [key: string]: any;
+    [key: string]: number | string | boolean | undefined;
   };
   agentPrompt?: string; // Optional custom instruction for the OllamaAgent
 }
 
-export function validateStrategy(data: any): StrategyConfig {
+export function validateStrategy(data: unknown): StrategyConfig {
   if (!data || typeof data !== 'object') {
     throw new Error('Invalid strategy format. Must be a JSON object.');
   }
-  if (!data.name || typeof data.name !== 'string') {
+
+  const obj = data as Record<string, unknown>;
+
+  if (!obj.name || typeof obj.name !== 'string') {
     throw new Error('Strategy "name" is missing or invalid.');
   }
-  if (!data.version || typeof data.version !== 'string') {
+  if (!obj.version || typeof obj.version !== 'string') {
     throw new Error('Strategy "version" is missing or invalid.');
   }
-  if (!data.mintAddress || typeof data.mintAddress !== 'string') {
+  if (!obj.mintAddress || typeof obj.mintAddress !== 'string') {
     throw new Error('Strategy "mintAddress" is missing or invalid.');
   }
-  if (!data.parameters || typeof data.parameters !== 'object') {
+  if (!obj.parameters || typeof obj.parameters !== 'object') {
     throw new Error('Strategy "parameters" missing or invalid.');
   }
 
-  return data as StrategyConfig;
+  return obj as unknown as StrategyConfig;
 }
