@@ -380,10 +380,10 @@ export class BotServer {
     }
 
     // Dynamic routes /api/bots/:id/*
-    const botMatch = url.match(/^\/api\/bots\/([^/]+)(\/(.*))?$/);
+    const botMatch = url.match(/^\/api\/bots\/([^/]+)(\/([^?]*))?/);
     if (botMatch) {
       const id = botMatch[1];
-      const action = botMatch[3];
+      const action = botMatch[3]; // Path without query string
       const bot = this.botManager.getBot(id);
 
       if (!bot) {

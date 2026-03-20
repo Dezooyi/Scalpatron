@@ -6,7 +6,6 @@ gsap.registerPlugin(CSSPlugin);
 import {
   loadAnimationConfig,
   type AnimationConfig,
-  getBoxShadowValues,
 } from "@/lib/animationConfig";
 import { configureGSAP } from "@/lib/gsapConfig";
 import { useAnimationVisibility } from "@/hooks/useAnimationVisibility";
@@ -284,6 +283,10 @@ type BotSettingsChanges = Record<string, SettingsChange[]>;
 const getApiBase = () =>
   localStorage.getItem('scalpatron_api_url') ?? 'http://localhost:3000';
 
+// EMA-Perioden-Konstanten für Trend-Strategie-Anzeige
+const EMA_PERIOD_THRESHOLD = 30;
+const DEFAULT_FAST_EMA = 20;
+const DEFAULT_SLOW_EMA = 50;
 
 const GHOST_BOTS = [
   { name: "UGOR-α", pnl: "+12.4%", trades: 38, status: "running", color: "text-green-400" },
@@ -3052,13 +3055,43 @@ export default function App() {
                                         );
                                       }
 
+                                      // Helper-Funktion für typsicheres Finden von Indikatoren und Konfigurationswerten
+                                      const findIndicator = (
+                                        indicators: StrategyConfig['indicators'] | undefined,
+                                        type: string,
+                                        periodCheck?: (p: number) => boolean
+                                      ) => {
+                                        return indicators?.find(
+                                          (i) => i.type === type && typeof i.period === 'number' && (!periodCheck || periodCheck(i.period))
+                                        );
+                                      };
+                                      
+                                      const findEntryCondition = (
+                                        conditions: StrategyConfig['entry_conditions'] | undefined,
+                                        left: string
+                                      ) => {
+                                        return conditions?.find((e) => e.left === left && typeof e.right === 'number');
+                                      };
+                                      
+                                      const findExitCondition = (
+                                        conditions: StrategyConfig['exit_conditions'] | undefined,
+                                        type: string
+                                      ) => {
+                                        return conditions?.find((e) => e.type === type && typeof e.value === 'number');
+                                      };
+
                                       if (sType === 'trend') {
                                         const cfg = selectedBot.strategyConfig;
-                                        const fast = cfg?.indicators?.find((i: any) => i.type === 'EMA' && i.period < 30)?.period ?? 20;
-                                        const slow = cfg?.indicators?.find((i: any) => i.type === 'EMA' && i.period >= 30)?.period ?? 50;
-                                        const rsi = cfg?.indicators?.find((i: any) => i.type === 'RSI')?.period ?? 14;
-                                        const rsiMax = cfg?.entry_conditions?.find((e: any) => e.left === 'RSI_14')?.right ?? 65;
-                                        const tp = cfg?.exit_conditions?.find((e: any) => e.type === 'take_profit')?.value ?? 0.04;
+                                        
+                                        // EMA-Perioden extrahieren (Fast: < 30, Slow: >= 30)
+                                        const fastEmaIndicator = findIndicator(cfg?.indicators, 'EMA', (p) => p < EMA_PERIOD_THRESHOLD);
+                                        const slowEmaIndicator = findIndicator(cfg?.indicators, 'EMA', (p) => p >= EMA_PERIOD_THRESHOLD);
+                                        
+                                        const fast = fastEmaIndicator?.period ?? DEFAULT_FAST_EMA;
+                                        const slow = slowEmaIndicator?.period ?? DEFAULT_SLOW_EMA;
+                                        const rsi = findIndicator(cfg?.indicators, 'RSI')?.period ?? 14;
+                                        const rsiMax = findEntryCondition(cfg?.entry_conditions, 'RSI_14')?.right ?? 65;
+                                        const tp = findExitCondition(cfg?.exit_conditions, 'take_profit')?.value ?? 0.04;
 
                                         return (
                                           <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 mt-1">
@@ -3199,7 +3232,6 @@ export default function App() {
 
                                       if (sType === 'grid') {
                                         const cfg = selectedBot.strategyConfig;
-                                        // @ts-ignore
                                         const levels = cfg?.grid_levels ?? cfg?.risk_management?.max_positions ?? '–';
                                         const posSize = cfg?.risk_management?.position_size ?? 0.05;
                                         const maxPos = cfg?.risk_management?.max_positions ?? '–';
