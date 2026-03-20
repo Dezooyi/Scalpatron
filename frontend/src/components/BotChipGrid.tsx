@@ -468,9 +468,9 @@ const BotChip = memo(({
               border: '1px solid transparent',
               background: `conic-gradient(from var(--beam-angle, 0deg), transparent 0deg, rgba(${flashColor}, 1) 40deg, transparent 80deg) border-box`,
               WebkitMask: 'linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0)',
-              WebkitMaskComposite: 'destination-out',
-              maskComposite: 'exclude',
-            } as any}
+              WebkitMaskComposite: 'destination-out' as unknown as string,
+              maskComposite: 'exclude' as unknown as string,
+            }}
           />
         </>
       )}
@@ -497,9 +497,9 @@ const BotChip = memo(({
               border: '1px solid transparent',
               background: `conic-gradient(from var(--beam-angle, 0deg), transparent 0deg, rgba(255,255,255,0.8) 40deg, transparent 80deg) border-box`,
               WebkitMask: 'linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0)',
-              WebkitMaskComposite: 'destination-out',
-              maskComposite: 'exclude',
-            } as any}
+              WebkitMaskComposite: 'destination-out' as unknown as string,
+              maskComposite: 'exclude' as unknown as string,
+            }}
           />
         </>
       )}

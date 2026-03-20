@@ -18,45 +18,68 @@ const formatUptimeMs = (ms: number) => {
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 };
 
+// Base styled wrapper component for stat cards (defined outside to avoid re-creation on each render)
+interface StatBadgeProps {
+  icon: React.ReactNode;
+  title: string;
+  value: string | React.ReactNode;
+  valueColor?: string;
+  secondaryContent?: React.ReactNode;
+  containerClass?: string;
+  onClick?: () => void;
+}
+
+function StatBadge({ icon, title, value, valueColor = "text-zinc-900 dark:text-zinc-100", secondaryContent, containerClass = "shadow-sm border-zinc-200/20 dark:border-white/5", onClick }: StatBadgeProps) {
+  return (
+    <div
+      onClick={onClick}
+      className={`flex-1 min-w-[110px] flex flex-col justify-center gap-0.5 px-2.5 py-1.5 rounded-md bg-white/80 dark:bg-zinc-800/40 border transition-all leading-none ${onClick ? 'cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-800/60 active:scale-95' : ''} ${containerClass}`}
+      role={onClick ? "button" : undefined}
+    >
+      <div className="flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400 opacity-80">
+        {icon}
+        <span className="text-[8px] font-bold uppercase tracking-widest">{title}</span>
+      </div>
+      <div className="flex items-center justify-between w-full">
+        <span className={`text-sm font-black tracking-tight ${valueColor}`}>{value}</span>
+        {secondaryContent && (
+          <div className="flex items-center scale-90 origin-right">{secondaryContent}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface GlobalBotStatsBarProps {
   bots: BotState[];
   agentHistoryCount: number;
   agentRunning?: boolean;
-  agentCycleMinutes?: number;
   nextAnalysisTime?: number | null;
   onToggleAll?: (targetStatus: "running" | "stopped") => void;
   isAllActionLoading?: boolean;
 }
 
-export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agentCycleMinutes, nextAnalysisTime, onToggleAll, isAllActionLoading }: GlobalBotStatsBarProps) {
-  const [now, setNow] = useState(Date.now());
+export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, nextAnalysisTime, onToggleAll, isAllActionLoading }: GlobalBotStatsBarProps) {
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     const interval = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(interval);
   }, []);
 
-  // Countdown timer for next AI analysis
-  const [countdown, setCountdown] = useState<string>('--:--');
-  useEffect(() => {
+  // Countdown timer for next AI analysis - calculated directly from state, not stored
+  const countdown = (() => {
     if (!agentRunning || !nextAnalysisTime) {
-      setCountdown('--:--');
-      return;
+      return '--:--';
     }
-    const updateCountdown = () => {
-      const diff = nextAnalysisTime - Date.now();
-      if (diff <= 0) {
-        setCountdown('00:00');
-        return;
-      }
-      const mins = Math.floor(diff / 60000);
-      const secs = Math.floor((diff % 60000) / 1000);
-      setCountdown(`${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`);
-    };
-    updateCountdown();
-    const interval = setInterval(updateCountdown, 1000);
-    return () => clearInterval(interval);
-  }, [agentRunning, nextAnalysisTime]);
+    const diff = nextAnalysisTime - now;
+    if (diff <= 0) {
+      return '00:00';
+    }
+    const mins = Math.floor(diff / 60000);
+    const secs = Math.floor((diff % 60000) / 1000);
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  })();
 
   // Aggregated Stats
   const totalTrades = bots.reduce((acc, bot) => acc + (bot.stats?.totalTrades || 0), 0);
@@ -98,33 +121,12 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
     });
   });
 
-  // Base styled wrapper component for stat cards
-  const StatBadge = ({ icon, title, value, valueColor = "text-zinc-900 dark:text-zinc-100", secondaryContent, containerClass = "shadow-sm border-zinc-200/20 dark:border-white/5", onClick }: { icon: React.ReactNode, title: string, value: string | React.ReactNode, valueColor?: string, secondaryContent?: React.ReactNode, containerClass?: string, onClick?: () => void }) => (
-    <div
-      onClick={onClick}
-      className={`flex-1 min-w-[110px] flex flex-col justify-center gap-0.5 px-2.5 py-1.5 rounded-md bg-white/80 dark:bg-zinc-800/40 border transition-all leading-none ${onClick ? 'cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-800/60 active:scale-95' : ''} ${containerClass}`}
-      role={onClick ? "button" : undefined}
-    >
-      <div className="flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400 opacity-80">
-        {icon}
-        <span className="text-[8px] font-bold uppercase tracking-widest">{title}</span>
-      </div>
-      <div className="flex items-center justify-between w-full">
-        <span className={`text-sm font-black tracking-tight ${valueColor}`}>{value}</span>
-        {secondaryContent && (
-          <div className="flex items-center scale-90 origin-right">{secondaryContent}</div>
-        )}
-      </div>
-    </div>
-  );
-
   const [showTrendDetails, setShowTrendDetails] = useState(false);
   const [selectedTrendTimeframe, setSelectedTrendTimeframe] = useState<number>(30); // Default 30 min
 
   const trendLabels: Record<number, string> = { 5: "5m", 15: "15m", 30: "30m", 60: "1h", 1440: "1d" };
   const trendKeys = [5, 15, 30, 60, 1440];
 
-  const allRunning = bots.length > 0 && bots.every(b => b.status === "running");
   const someRunning = bots.some(b => b.status === "running");
   const targetStatus = someRunning ? "stopped" : "running";
 
