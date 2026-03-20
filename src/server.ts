@@ -420,7 +420,12 @@ export class BotServer {
       // GET /api/bots/:id/history — price history for charts (memory optimization: not sent over SSE)
       if (req.method === 'GET' && action === 'history') {
         const limit = urlObj.searchParams.get('limit') ? parseInt(urlObj.searchParams.get('limit')!, 10) : 100;
-        const history = bot.getPriceHistory(limit);
+        const feed = PriceFeed.getInstance();
+        const fullHistory = feed.getHistory(bot.mintAddress);
+        const history = fullHistory.slice(-limit).map((p: { timestamp: number; price: number }) => ({
+          timestamp: p.timestamp,
+          price: p.price
+        }));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ mintAddress: bot.mintAddress, limit, history }));
         return;
