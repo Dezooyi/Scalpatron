@@ -27,6 +27,9 @@ Phase 1–6: Range Spike Scalper. Phase 7: Multi-Strategy Architecture mit JSON-
   - server.ts: Strategy CRUD Endpoints + Regime-Performance Endpoint
   - frontend/App.tsx: Strategy Picker, AI Aggr. Anzeige, Regime Performance Tabelle
 - [x] Dokumentation: docs/ — architecture, modules, configuration, strategy, multi-strategy, operations
+- [x] Frontend-Bugfixes (2026-03-20):
+  - LiveClusterPricePanel: priceHistory lokal verwaltet (PricePoint[]), live via lastPrice aus SSE erweitert (max 300), an ScannerPulse als number[] übergeben — ScannerPulse zeigt jetzt echte Preisbars
+  - LiveFeedListCard: price-Werte aus API-Response + SSE-Append + seeded Fallback explizit zu Number() konvertiert (SQLite gibt numerische Felder als String zurück → toFixed-Crash behoben)
 
 ## Token
 - UGOR Mint: UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW
@@ -50,7 +53,8 @@ src/priceRecorder.ts · src/backtester.ts · src/ollamaAgent.ts
 **Phase 7 (Multi-Strategy):** src/strategyTypes.ts · src/indicatorEngine.ts · src/candleAggregator.ts
 src/strategyEngine.ts · src/strategyTemplates/*.json
 
-**Frontend:** frontend/src/App.tsx
+**Frontend:** frontend/src/App.tsx · frontend/src/components/LiveClusterPricePanel.tsx
+frontend/src/components/ScannerPulse.tsx · frontend/src/components/LiveFeedListCard.tsx
 
 ## Dokumentation
 docs/README.md · docs/architecture.md · docs/modules.md · docs/configuration.md

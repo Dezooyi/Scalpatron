@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ScannerPulse } from "./ScannerPulse";
 import type { BotState } from "../App";
 
@@ -28,12 +28,14 @@ export function LiveClusterPricePanel({ selectedBot, setBots }: LiveClusterPrice
 
   // Local price history state - fetched separately to reduce SSE payload size
   const [priceHistory, setPriceHistory] = useState<PricePoint[]>([]);
+  const lastAppendedPrice = useRef<number | null>(null);
 
   const getApiBase = () => localStorage.getItem('scalpatron_api_url') ?? 'http://localhost:3000';
 
-  // Fetch price history from API endpoint
+  // Fetch price history from API endpoint on bot change
   useEffect(() => {
     if (!selectedBot?.id) return;
+    lastAppendedPrice.current = null;
 
     const fetchPriceHistory = async () => {
       try {
@@ -49,6 +51,20 @@ export function LiveClusterPricePanel({ selectedBot, setBots }: LiveClusterPrice
 
     fetchPriceHistory();
   }, [selectedBot?.id]);
+
+  // Append new live price ticks from SSE feed into local history
+  const livePrice = stats?.lastPrice ?? null;
+  useEffect(() => {
+    if (livePrice == null || livePrice === lastAppendedPrice.current) return;
+    lastAppendedPrice.current = livePrice;
+    const raf = requestAnimationFrame(() => {
+      setPriceHistory(prev => {
+        const next = [...prev, { timestamp: Date.now(), price: livePrice }];
+        return next.length > 300 ? next.slice(-300) : next;
+      });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [livePrice]);
 
   return (
     <div className="bg-primary/5 rounded-lg border-0 shadow-lg relative overflow-hidden trade-flash-target-${selectedBot?.id} ai-flash-target-${selectedBot?.id}">
@@ -241,7 +257,7 @@ export function LiveClusterPricePanel({ selectedBot, setBots }: LiveClusterPrice
         <div className="flex flex-col h-full min-h-[450px]">
           {/* Scanner Pulse - fills available room */}
           <div className="flex-1 min-h-0 relative">
-            <ScannerPulse bot={selectedBot} tickDuration={2000} className="h-full w-full" />
+            <ScannerPulse bot={{ ...selectedBot, priceHistory: priceHistory.map(p => p.price) }} tickDuration={2000} className="h-full w-full" />
           </div>
 
           {/* Trading Statistics Section */}

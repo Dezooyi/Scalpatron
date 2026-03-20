@@ -139,7 +139,7 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
   return (
     <div ref={containerRef} className={`flex flex-col h-full w-full ${className || ''}`}>
       <div className="flex items-center justify-between shrink-0 pb-1">
-        <div className="text-xs font-light text-primary/30 font-bold ml-0">Cluster Tick Tracker</div>
+        <div className="text-xs font-light text-primary/30 font-bold ml-0">Scanner Pulse</div>
         <div className="flex items-center gap-1 text-[10px] text-primary/50">
           <span className="font-mono" title="Floor Window">F:{floorWindow}</span>
           <span className="text-primary/20">|</span>

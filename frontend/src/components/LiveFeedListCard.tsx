@@ -88,8 +88,9 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
     ]).then(([priceData, histData]: [unknown, unknown]) => {
       // Price ticks
       if (Array.isArray(priceData) && priceData.length > 0) {
-        setEntries(priceData as PriceTick[]);
-        lastPriceRef.current = (priceData as PriceTick[])[0].price;
+        const typed = (priceData as PriceTick[]).map(p => ({ ...p, price: Number(p.price) }));
+        setEntries(typed);
+        lastPriceRef.current = typed[0].price;
       } else {
         const hist = bot.priceHistory;
         if (hist && hist.length > 0) {
@@ -97,8 +98,8 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
           // into the past so they don't hide real trades that happened earlier.
           const now = Date.now();
           const seeded = [...hist].reverse().map((price, idx) => ({
-            timestamp: now - (idx + 1) * 2000, 
-            price,
+            timestamp: now - (idx + 1) * 2000,
+            price: Number(price),
           }));
           setEntries(seeded);
           lastPriceRef.current = hist[hist.length - 1];
@@ -120,8 +121,10 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
   // Prepend new live ticks when priceHistory tail changes
   useEffect(() => {
     if (isLoading) return;
-    const latestPrice = bot.priceHistory?.[bot.priceHistory.length - 1];
-    if (latestPrice === undefined) return;
+    const rawLatest = bot.priceHistory?.[bot.priceHistory.length - 1];
+    if (rawLatest === undefined) return;
+    const latestPrice = Number(rawLatest);
+    if (!isFinite(latestPrice)) return;
     if (latestPrice === lastPriceRef.current) return;
     const prevPrice = lastPriceRef.current;
     const deltaPercent = prevPrice ? ((latestPrice - prevPrice) / prevPrice) * 100 : null;
