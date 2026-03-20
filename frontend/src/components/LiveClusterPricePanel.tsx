@@ -1,5 +1,11 @@
+import { useEffect, useState } from "react";
 import { ScannerPulse } from "./ScannerPulse";
 import type { BotState } from "../App";
+
+interface PricePoint {
+  timestamp: number;
+  price: number;
+}
 
 interface LiveClusterPricePanelProps {
   selectedBot: BotState;
@@ -20,7 +26,29 @@ export function LiveClusterPricePanel({ selectedBot, setBots }: LiveClusterPrice
   // Total PnL percentage
   const totalPnlPercent = stats?.totalPnlPercent ?? 0;
 
+  // Local price history state - fetched separately to reduce SSE payload size
+  const [priceHistory, setPriceHistory] = useState<PricePoint[]>([]);
+
   const getApiBase = () => localStorage.getItem('scalpatron_api_url') ?? 'http://localhost:3000';
+
+  // Fetch price history from API endpoint
+  useEffect(() => {
+    if (!selectedBot?.id) return;
+
+    const fetchPriceHistory = async () => {
+      try {
+        const response = await fetch(`${getApiBase()}/api/bots/${selectedBot.id}/history?limit=100`);
+        if (response.ok) {
+          const data = await response.json();
+          setPriceHistory(data.history ?? []);
+        }
+      } catch (err) {
+        console.error('[LiveClusterPricePanel] Failed to fetch price history:', err);
+      }
+    };
+
+    fetchPriceHistory();
+  }, [selectedBot?.id]);
 
   return (
     <div className="bg-primary/5 rounded-lg border-0 shadow-lg relative overflow-hidden trade-flash-target-${selectedBot?.id} ai-flash-target-${selectedBot?.id}">
@@ -40,9 +68,10 @@ export function LiveClusterPricePanel({ selectedBot, setBots }: LiveClusterPrice
             <div className="flex items-center gap-2 mt-3 text-micro">
               <span className="text-muted-foreground opacity-40">PREVIOUS:</span>
               <span className="text-primary/60 font-bold">
-                ${selectedBot.priceHistory && selectedBot.priceHistory.length > 1
-                  ? selectedBot.priceHistory[selectedBot.priceHistory.length - 2].toFixed(6)
-                  : "---"}
+                ${(() => {
+                  const prevPrice = priceHistory?.[priceHistory.length - 2]?.price;
+                  return prevPrice != null ? prevPrice.toFixed(6) : "---";
+                })()}
               </span>
             </div>
           </div>
