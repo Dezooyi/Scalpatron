@@ -9,7 +9,8 @@ import os from 'os';
 import path from 'path';
 import fs from 'fs';
 import { logger } from './appLogger.js';
-import { buildVirtualCandles, calculatePreProcessedIndicators } from './utils/mathUtils.js';
+import { buildVirtualCandles, calculatePreProcessedIndicators, buildAsciiSparkline } from './utils/mathUtils.js';
+import { geckoTerminalFeed } from './geckoTerminalFeed.js';
 import { macroFeed } from './macroFeed.js';
 import {
   saveAgentHistory,
@@ -252,7 +253,14 @@ AGGRESSIVENESS RULES (position_size % of balance per trade, AI recommended):
 
 DATA LIMITATION:
 DexScreener provides no actual volume (Volume = 0 in all candles).
-VWAP-based conditions and volume-dependent signals are therefore unreliable.`;
+VWAP-based conditions and volume-dependent signals are therefore unreliable.
+GeckoTerminal provides real USD volume when available (falls back to 0 if not).
+
+INDICATOR FORMAT: "VALUE (LABEL) ARROW [prev→prev→last]"
+Arrow: ↑=rising >1.5%, ↓=falling >1.5%, →=stable
+BB %B: 0.0=at lower band, 1.0=at upper band, >1.0=breakout above upper
+STOCH: K/D >80=overbought, <20=oversold; K>D=bullish crossover signal
+SPARKLINE: ▁▂▃▄▅▆▇█ = low→high price, left=older, right=newer`;
 
 export function buildSystemPrompt(strategyType: string, customGuidance?: string): string {
   const typeGuidance = STRATEGY_TYPE_GUIDANCE[strategyType] ?? STRATEGY_TYPE_GUIDANCE['scalping'];
@@ -591,6 +599,30 @@ export class OllamaAgent {
     const regimePerf = getRegimePerformance(state.id);
     const recentAdvices = getRecentAdvicesWithOutcomes(state.id, 5);
 
+    // Open position state for the prompt
+    let openPositionBlock: string | undefined;
+    try {
+      const traderStats = bot.getTrader().getStats();
+      const pos = traderStats.currentPosition;
+      if (pos) {
+        const ageMin = Math.round((Date.now() - pos.entryTime) / 60000);
+        const currentPrice = recentPrices.length > 0 ? recentPrices[recentPrices.length - 1].price : 0;
+        const unrealizedPnl = pos.entryPrice > 0 && currentPrice > 0
+          ? ((currentPrice - pos.entryPrice) / pos.entryPrice * 100).toFixed(2)
+          : null;
+        openPositionBlock = `OPEN POSITION:
+- Entry: $${pos.entryPrice.toFixed(6)} at ${new Date(pos.entryTime).toISOString().slice(11, 16)} (${ageMin} min ago)
+- Unrealized PnL: ${unrealizedPnl !== null ? `${Number(unrealizedPnl) >= 0 ? '+' : ''}${unrealizedPnl}%` : 'n/a'}`;
+      } else {
+        openPositionBlock = 'OPEN POSITION: None';
+      }
+    } catch {
+      // Non-critical — skip if trader not accessible
+    }
+
+    // Trigger GeckoTerminal background refresh for this token (non-blocking, cached)
+    if (botTokenMint) geckoTerminalFeed.getLatest(botTokenMint);
+
     const prompt = await this.buildPrompt(
       recentStats,
       longTermStats,
@@ -601,7 +633,8 @@ export class OllamaAgent {
       regimePerf,
       recentAdvices,
       state,
-      botTokenMint
+      botTokenMint,
+      openPositionBlock,
     );
 
     const activeStrategyType = (state as any).strategyType ?? 'scalping';
@@ -684,20 +717,12 @@ export class OllamaAgent {
     regimePerf: RegimePerformance[],
     recentAdvices: RecentAdvice[],
     state: BotState,
-    tokenMint?: string
+    tokenMint?: string,
+    openPositionBlock?: string,
   ): Promise<string> {
-    const samples = recentPrices
-      .filter((_, i) => i % 10 === 0 || i === recentPrices.length - 1)
-      .map(p => ({ t: new Date(p.timestamp).toISOString().slice(11, 19), p: p.price.toFixed(8) }));
-
-    const tradesSummary = trades.length > 0
-      ? trades.map(t => ({
-          action: t.action ?? 'UNKNOWN',
-          price: (t.price ?? 0).toFixed(8),
-          spike: (t.spikePercent ?? 0).toFixed(3) + '%',
-          pnl: t.pnlPercent !== undefined ? t.pnlPercent.toFixed(3) + '%' : '-',
-        }))
-      : 'No trades in this period';
+    // ASCII sparkline replaces verbose raw price samples (~310 token savings)
+    const priceValues = recentPrices.map(p => p.price);
+    const sparkline = buildAsciiSparkline(priceValues, 30);
 
     const sells = trades.filter(t => t.action === 'SELL');
     const wins = sells.filter(t => (t.pnlPercent ?? 0) > 0).length;
@@ -705,6 +730,36 @@ export class OllamaAgent {
     const avgPnl = sells.length > 0
       ? (sells.reduce((s, t) => s + (t.pnlPercent ?? 0), 0) / sells.length).toFixed(3)
       : null;
+
+    // Trade pattern stats: profit factor + consecutive wins/losses
+    let tradePatternBlock = '';
+    if (sells.length >= 2) {
+      const sellPnls = sells.map(t => t.pnlPercent ?? 0);
+      const winPnls = sellPnls.filter(p => p > 0);
+      const lossPnls = sellPnls.filter(p => p <= 0);
+      const avgWin = winPnls.length > 0 ? winPnls.reduce((a, b) => a + b, 0) / winPnls.length : 0;
+      const avgLoss = lossPnls.length > 0 ? Math.abs(lossPnls.reduce((a, b) => a + b, 0) / lossPnls.length) : 0;
+      const profitFactor = avgLoss > 0 ? (avgWin / avgLoss).toFixed(2) : '∞';
+      let maxConsecWins = 0, maxConsecLosses = 0, curW = 0, curL = 0;
+      for (const p of sellPnls) {
+        if (p > 0) { curW++; curL = 0; maxConsecWins = Math.max(maxConsecWins, curW); }
+        else { curL++; curW = 0; maxConsecLosses = Math.max(maxConsecLosses, curL); }
+      }
+      tradePatternBlock = `\nTRADE PATTERN STATS:
+- Profit Factor: ${profitFactor}  (avgWin:+${avgWin.toFixed(3)}% / avgLoss:-${avgLoss.toFixed(3)}%)
+- Max Consecutive Wins: ${maxConsecWins} | Max Consecutive Losses: ${maxConsecLosses}`;
+    }
+
+    // Compact trade list (one line per trade)
+    let tradesBlock: string;
+    if (trades.length === 0) {
+      tradesBlock = 'No trades in this period';
+    } else {
+      tradesBlock = trades.map(t => {
+        const pnlStr = t.pnlPercent !== undefined ? `  pnl:${t.pnlPercent > 0 ? '+' : ''}${t.pnlPercent.toFixed(3)}%` : '';
+        return `${t.action}  $${(t.price ?? 0).toFixed(6)}  spike:${(t.spikePercent ?? 0).toFixed(2)}%${pnlStr}`;
+      }).join('\n');
+    }
 
     let regimePerfBlock = 'No historical data available yet.';
     if (regimePerf.length > 0) {
@@ -728,18 +783,20 @@ export class OllamaAgent {
       ? `Active Strategy: ${state.strategyType} (ID: ${state.strategyId ?? 'legacy'})`
       : 'Active Strategy: scalping (PatternDetector, Legacy Mode)';
 
-    // Pre-calculated Technical Indicators (V2 Context)
-    const m5Candles = buildVirtualCandles(allPrices, 5 * 60000); // 5 minute candles
-    const m15Candles = buildVirtualCandles(allPrices, 15 * 60000); // 15 minute candles
-    
-    // We pass the last 10 candles to show trend evolution
-    const m5HistoryLite = m5Candles.slice(-10).map(c => ({
-       t: new Date(c.timestamp).toISOString().split('T')[1].slice(0, 5), // 'HH:mm'
-       o: c.open.toFixed(8),
-       h: c.high.toFixed(8),
-       l: c.low.toFixed(8),
-       c: c.close.toFixed(8)
-    }));
+    // Pre-calculated Technical Indicators
+    const m5Candles = buildVirtualCandles(allPrices, 5 * 60000);
+    const m15Candles = buildVirtualCandles(allPrices, 15 * 60000);
+
+    // Compact candle table helper
+    const formatCandleRows = (candles: typeof m5Candles, count: number): string => {
+      const slice = candles.slice(-count);
+      if (slice.length === 0) return '(no data)';
+      return slice.map(c => {
+        const t = new Date(c.timestamp).toISOString().split('T')[1].slice(0, 5);
+        const dir = c.close >= c.open ? '↑' : '↓';
+        return `${t}|${c.open.toFixed(6)}|${c.high.toFixed(6)}|${c.low.toFixed(6)}|${c.close.toFixed(6)}${dir}`;
+      }).join('\n');
+    };
 
     const indicators5m = calculatePreProcessedIndicators(m5Candles);
     const indicators15m = calculatePreProcessedIndicators(m15Candles);
@@ -752,23 +809,31 @@ export class OllamaAgent {
 - SOL: $${macro.solPrice.toFixed(2)}`;
     }
 
-    // Attempt to fetch DexScreener On-Chain Sentiment (Volume, TXNs)
+    // Fetch DexScreener On-Chain Sentiment — extended with multi-window price changes + buy/sell ratio
     let tokenContextBlock = 'ON-CHAIN SENTIMENT: Not available';
     if (tokenMint) {
       try {
         const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`);
         const dexJson = await res.json();
         if (dexJson.pairs && dexJson.pairs.length > 0) {
-          // Take the primary pair
           const pair = dexJson.pairs[0];
           const vol1h = pair.volume?.h1 ?? 0;
+          const vol24h = pair.volume?.h24 ?? 0;
           const liqUsd = pair.liquidity?.usd ?? 0;
           const buys1h = pair.txns?.h1?.buys ?? 0;
           const sells1h = pair.txns?.h1?.sells ?? 0;
-          tokenContextBlock = `ON-CHAIN SENTIMENT (Primary Pair, 1h):
-- Liquidity: $${liqUsd.toLocaleString(undefined, {maximumFractionDigits: 0})}
-- Volume (1h): $${vol1h.toLocaleString(undefined, {maximumFractionDigits: 0})}
-- Transactions (1h): ${buys1h} Buys / ${sells1h} Sells`;
+          const buys24h = pair.txns?.h24?.buys ?? 0;
+          const sells24h = pair.txns?.h24?.sells ?? 0;
+          const pc5m = pair.priceChange?.m5 ?? null;
+          const pc1h = pair.priceChange?.h1 ?? null;
+          const pc6h = pair.priceChange?.h6 ?? null;
+          const pc24h = pair.priceChange?.h24 ?? null;
+          const ratio1h = sells1h > 0 ? (buys1h / sells1h).toFixed(2) : '∞';
+          const pcFmt = (v: number | null) => v !== null ? `${v > 0 ? '+' : ''}${v.toFixed(1)}%` : 'n/a';
+          tokenContextBlock = `ON-CHAIN SENTIMENT (DexScreener):
+- Liquidity: $${liqUsd.toLocaleString(undefined, {maximumFractionDigits: 0})} | Vol 1h: $${vol1h.toLocaleString(undefined, {maximumFractionDigits: 0})} | Vol 24h: $${vol24h.toLocaleString(undefined, {maximumFractionDigits: 0})}
+- Price Change: 5m:${pcFmt(pc5m)} 1h:${pcFmt(pc1h)} 6h:${pcFmt(pc6h)} 24h:${pcFmt(pc24h)}
+- Txns 1h: ${buys1h} buys / ${sells1h} sells (ratio: ${ratio1h}) | 24h: ${buys24h} buys / ${sells24h} sells`;
         }
       } catch (err: any) {
         logger.warn(state.id, 'AI_AGENT', `[OllamaAgent] Failed to fetch DexScreener REST data: ${err.message}`);
@@ -777,61 +842,66 @@ export class OllamaAgent {
 
     let currentSettingsBlock = '';
     if (state.strategyType === 'scalping' || !state.strategyType) {
-      currentSettingsBlock = `
-CURRENT SETTINGS:
+      currentSettingsBlock = `CURRENT SETTINGS:
 - floorWindow: ${settings.floorWindow}
 - spikeThreshold: ${settings.spikeThreshold}%
 - sellDropThreshold: ${settings.sellDropThreshold}%
 - cooldownTicks: ${settings.cooldownTicks}`;
     } else if (state.strategyConfig) {
       const config = state.strategyConfig;
-      currentSettingsBlock = `
-CURRENT STRATEGY PARAMETERS (${state.strategyType}):
-- Risk: position_size=${((config.risk_management?.position_size ?? 0) * 100).toFixed(1)}% 
+      currentSettingsBlock = `CURRENT STRATEGY PARAMETERS (${state.strategyType}):
+- Risk: position_size=${((config.risk_management?.position_size ?? 0) * 100).toFixed(1)}%
 - Max Positions: ${config.risk_management?.max_positions ?? 1}
 - Indicators: ${JSON.stringify(config.indicators ?? [])}`;
-      
       if (state.strategyType === 'dca' && config.scalping_settings) {
         currentSettingsBlock += `\n- DCA Dip Thresholds: ${JSON.stringify(config.scalping_settings)}`;
       }
     }
 
-    const dataBlock = `
-${currentSettingsBlock}
+    // GeckoTerminal real volume block (non-blocking cached, graceful fallback)
+    const geckoBlock = tokenMint ? geckoTerminalFeed.formatPromptBlock(tokenMint) : '';
+
+    const dataBlock = `${currentSettingsBlock}
 
 CURRENT AGGRESSIVENESS:
 - Current (AI): ${state.aiAggressiveness ?? 10}%
 - Maximum (User): ${state.aggressiveness ?? 10}%
 
 ${strategyInfo}
-
+${openPositionBlock ? `\n${openPositionBlock}` : ''}
 ${macroBlock}
 ${tokenContextBlock}
+${geckoBlock ? `\n${geckoBlock}` : ''}
 
-PRE-CALCULATED INDICATORS (Saves LLM Math):
+PRICE ACTION (last ${recentPrices.length} ticks, ${this.config.cycleMinutes} min):
+${sparkline}
+
+PRE-CALCULATED INDICATORS:
 [5-Minute Data]
 - RSI (14): ${indicators5m.rsi}
 - MACD: ${indicators5m.macd}
 - BB (20,2): ${indicators5m.bb}
 - ATR (14): ${indicators5m.atr}
+- STOCH (14,3): ${indicators5m.stoch}
 
 [15-Minute Data]
 - RSI (14): ${indicators15m.rsi}
 - MACD: ${indicators15m.macd}
 - BB (20,2): ${indicators15m.bb}
+- STOCH (14,3): ${indicators15m.stoch}
 
-MARKET STATS (last ${this.config.cycleMinutes} min, ${recentPrices.length} ticks):
+MARKET STATS (last ${this.config.cycleMinutes} min):
 - Price: Min=$${stats.priceMin.toFixed(8)}, Max=$${stats.priceMax.toFixed(8)}, Mean=$${stats.priceMean.toFixed(8)}
 - Spread: ${stats.spreadPercent.toFixed(4)}%  Volatility: ${stats.volatilityRatio.toFixed(4)}%
 - Spikes Detected: ${stats.spikeCount} (Avg: ${stats.avgSpikeHeight.toFixed(3)}%, Max: ${stats.maxSpikeHeight.toFixed(3)}%)
 - Trend: ${stats.trendDirection} (Strength: ${(stats.trendStrength * 100).toFixed(0)}%)
-${longTermStats ? `
-LONG-TERM STATS (all ${allPrices.length} ticks):
+${longTermStats ? `LONG-TERM STATS (all ${allPrices.length} ticks):
 - Spread: ${longTermStats.spreadPercent.toFixed(4)}%  Volatility: ${longTermStats.volatilityRatio.toFixed(4)}%
 - Trend: ${longTermStats.trendDirection} (Strength: ${(longTermStats.trendStrength * 100).toFixed(0)}%)` : ''}
 
-TRADES IN PERIOD (${sells.length} completed${winRate !== null ? `, Win rate: ${winRate}%, avg PnL: ${avgPnl}%` : ''}):
-${JSON.stringify(tradesSummary, null, 2)}
+TRADES IN PERIOD (${sells.length} completed${winRate !== null ? `, WR:${winRate}%, avgPnL:${avgPnl}%` : ''}):\
+${tradePatternBlock}
+${tradesBlock}
 
 REGIME PERFORMANCE (historical):
 ${regimePerfBlock}
@@ -839,8 +909,11 @@ ${regimePerfBlock}
 RECENT ANALYSES + OUTCOMES:
 ${recentAdvicesBlock}
 
-5-MINUTE OHLC CANDLES (Last 10):
-${JSON.stringify(m5HistoryLite, null, 2)}`;
+5-MINUTE OHLC (last 10, time|open|high|low|close):
+${formatCandleRows(m5Candles, 10)}
+
+15-MINUTE OHLC (last 5):
+${formatCandleRows(m15Candles, 5)}`;
 
     return dataBlock;
   }

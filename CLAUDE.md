@@ -27,6 +27,11 @@ Phase 1–6: Range Spike Scalper. Phase 7: Multi-Strategy Architecture mit JSON-
   - server.ts: Strategy CRUD Endpoints + Regime-Performance Endpoint
   - frontend/App.tsx: Strategy Picker, AI Aggr. Anzeige, Regime Performance Tabelle
 - [x] Dokumentation: docs/ — architecture, modules, configuration, strategy, multi-strategy, operations
+- [x] AI Prompt Enrichment (2026-03-20): Tier 1+2 vollständig implementiert
+  - mathUtils.ts: `calculatePreProcessedIndicators` — Stochastic K/D, Richtungspfeile (↑↓→), BB %B + Band-Breite, ATR expanding/contracting, 3-Wert-Serien-Snippets; `buildAsciiSparkline` (Unicode ▁▂▃▄▅▆▇█)
+  - mathUtils.ts: Import von `technicalindicators` ersetzt durch eigenes `indicatorEngine.ts` (zero external deps)
+  - ollamaAgent.ts: Sparkline statt roher Preis-Samples (~310 Token gespart), kompakte Candle-Tabellen (5m last 10 + 15m last 5), Trade Pattern Stats (Profit Factor, Max Consecutive Wins/Losses), DexScreener multi-window (priceChange 5m/1h/6h/24h, buy/sell ratio 1h+24h), Open Position State (Entry-Preis, Alter, unrealisierter PnL), GeckoTerminal real volume block (geckt cached, graceful fallback), System Prompt mit Indikator-Format-Erklärungen
+  - geckoTerminalFeed.ts: Neues Modul — GeckoTerminal OHLCV (free API, kein Key), Pool-Auflösung, 5m/15m Candles mit echtem USD Volume, gecachter Singleton nach macroFeed.ts Muster
 - [x] Frontend-Bugfixes (2026-03-20):
   - LiveClusterPricePanel: priceHistory lokal verwaltet (PricePoint[]), live via lastPrice aus SSE erweitert (max 300), an ScannerPulse als number[] übergeben — ScannerPulse zeigt jetzt echte Preisbars
   - LiveFeedListCard: price-Werte aus API-Response + SSE-Append + seeded Fallback explizit zu Number() konvertiert (SQLite gibt numerische Felder als String zurück → toFixed-Crash behoben)
@@ -52,6 +57,8 @@ src/priceRecorder.ts · src/backtester.ts · src/ollamaAgent.ts
 
 **Phase 7 (Multi-Strategy):** src/strategyTypes.ts · src/indicatorEngine.ts · src/candleAggregator.ts
 src/strategyEngine.ts · src/strategyTemplates/*.json
+
+**AI Prompt Infrastructure:** src/geckoTerminalFeed.ts · src/utils/mathUtils.ts
 
 **Frontend:** frontend/src/App.tsx · frontend/src/components/LiveClusterPricePanel.tsx
 frontend/src/components/ScannerPulse.tsx · frontend/src/components/LiveFeedListCard.tsx
