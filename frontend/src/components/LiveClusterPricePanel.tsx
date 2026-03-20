@@ -12,31 +12,10 @@ export function LiveClusterPricePanel({ selectedBot, setBots }: LiveClusterPrice
   const losses = stats?.losses ?? 0;
   const totalTrades = stats?.totalTrades ?? 0;
   const balanceSOL = stats?.balanceSOL ?? 0;
-  const tradeSize = selectedBot.tradeSize ?? 1;
-  const aggressiveness = selectedBot.aiAggressiveness ?? selectedBot.aggressiveness ?? 10;
-  const tradingMode = selectedBot.tradingMode ?? "fixed";
-
-  // PnL sums from recent trades
-  const trades = selectedBot.recentTrades ?? [];
-  const winPnlSum = trades.filter(t => (t.pnl ?? 0) > 0).reduce((a, t) => a + (t.pnl ?? 0), 0);
-  const lossPnlSum = trades.filter(t => (t.pnl ?? 0) < 0).reduce((a, t) => a + (t.pnl ?? 0), 0);
-
-  // Possible trades with current balance & settings
-  const effectiveSize = tradingMode === "aggressive"
-    ? balanceSOL * (aggressiveness / 100)
-    : tradeSize;
-  const possibleTrades = effectiveSize > 0 ? Math.floor(balanceSOL / effectiveSize) : 0;
 
   // Win rate calculation
   const winRate = totalTrades > 0 ? wins / totalTrades : 0;
   const winRatePercentage = winRate * 100;
-
-  // Recent trade analysis
-  const recentWins = trades.filter(t => (t.pnl ?? 0) > 0).length;
-  const avgWinPnl = recentWins > 0 ? winPnlSum / recentWins : 0;
-
-  // Possible profit
-  const possibleProfit = possibleTrades * winRate * avgWinPnl;
 
   // Total PnL percentage
   const totalPnlPercent = stats?.totalPnlPercent ?? 0;
