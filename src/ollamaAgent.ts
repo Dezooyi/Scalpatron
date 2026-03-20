@@ -297,7 +297,7 @@ export class OllamaAgent {
   private timer: ReturnType<typeof setInterval> | null = null;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
-  analyzing = false; 
+  analyzing = false;
 
   private analysisQueue: string[] = [];
   private drainingQueue = false;
@@ -307,6 +307,10 @@ export class OllamaAgent {
 
   private adviceHistory: OllamaAdvice[] = [];
   private maxHistoryLength = 100;
+
+  // Timer tracking for next analysis countdown
+  private lastAnalysisTime: number | null = null;
+  private nextAnalysisTime: number | null = null;
 
   constructor(config?: Partial<AgentConfig>) {
     const saved = loadAgentConfig() as Partial<AgentConfig> | null;
@@ -344,7 +348,15 @@ export class OllamaAgent {
       this.startupTimer = null;
       if (!this.running) return;
       this.runCycle();
-      this.timer = setInterval(() => this.runCycle(), this.config.cycleMinutes * 60_000);
+      // Set next analysis time after first run
+      this.lastAnalysisTime = Date.now();
+      this.nextAnalysisTime = Date.now() + this.config.cycleMinutes * 60_000;
+      this.timer = setInterval(() => {
+        this.runCycle();
+        // Update times after each cycle
+        this.lastAnalysisTime = Date.now();
+        this.nextAnalysisTime = Date.now() + this.config.cycleMinutes * 60_000;
+      }, this.config.cycleMinutes * 60_000);
     }, 5000);
   }
 
@@ -353,23 +365,42 @@ export class OllamaAgent {
     this.config.enabled = false;
     if (this.startupTimer) { clearTimeout(this.startupTimer); this.startupTimer = null; }
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    this.lastAnalysisTime = null;
+    this.nextAnalysisTime = null;
     console.log('[OllamaAgent] Gestoppt');
     logger.system('Ollama AI Agent gestoppt.');
   }
 
   updateConfig(updates: Partial<AgentConfig>): void {
-    const restartNeeded =
-      (updates.cycleMinutes !== undefined && updates.cycleMinutes !== this.config.cycleMinutes) ||
-      (updates.enabled !== undefined && updates.enabled !== this.config.enabled);
+    const cycleMinutesChanged =
+      updates.cycleMinutes !== undefined && updates.cycleMinutes !== this.config.cycleMinutes;
 
     Object.assign(this.config, updates);
-
-    if (restartNeeded && this.running) {
-      this.stop();
-      if (this.config.enabled) this.start();
-    }
     saveAgentConfig(this.config);
     console.log('[OllamaAgent] Config aktualisiert:', JSON.stringify(updates));
+
+    // Wenn cycleMinutes geändert wurde und der Agent läuft, Timer sofort aktualisieren
+    if (cycleMinutesChanged && this.running) {
+      if (this.timer) {
+        clearInterval(this.timer);
+        this.timer = null;
+      }
+      // Recalculate next analysis time based on new cycle
+      const now = Date.now();
+      if (this.lastAnalysisTime) {
+        // Use last analysis time as reference
+        this.nextAnalysisTime = this.lastAnalysisTime + this.config.cycleMinutes * 60_000;
+      } else {
+        // No previous analysis yet - schedule from now
+        this.nextAnalysisTime = now + this.config.cycleMinutes * 60_000;
+      }
+      this.timer = setInterval(() => {
+        this.runCycle();
+        this.lastAnalysisTime = Date.now();
+        this.nextAnalysisTime = Date.now() + this.config.cycleMinutes * 60_000;
+      }, this.config.cycleMinutes * 60_000);
+      console.log(`[OllamaAgent] Timer aktualisiert: Zyklus jetzt ${this.config.cycleMinutes} Min, nächste Analyse um ${new Date(this.nextAnalysisTime).toLocaleTimeString()}`);
+    }
   }
 
   async listModels(): Promise<any[]> {
@@ -1010,12 +1041,14 @@ ${JSON.stringify(m5HistoryLite, null, 2)}`;
     return getAgentHistoryFromDb(botId, limit);
   }
 
-  getStatus(): { running: boolean; analyzing: boolean; config: AgentConfig; historyCount: number } {
+  getStatus(): { running: boolean; analyzing: boolean; config: AgentConfig; historyCount: number; lastAnalysisTime: number | null; nextAnalysisTime: number | null } {
     return {
       running: this.running,
       analyzing: this.analyzing,
       config: { ...this.config },
       historyCount: this.adviceHistory.length,
+      lastAnalysisTime: this.lastAnalysisTime,
+      nextAnalysisTime: this.nextAnalysisTime,
     };
   }
 

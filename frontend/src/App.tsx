@@ -8,6 +8,8 @@ import {
   type AnimationConfig,
   getBoxShadowValues,
 } from "@/lib/animationConfig";
+import { configureGSAP } from "@/lib/gsapConfig";
+import { useAnimationVisibility } from "@/hooks/useAnimationVisibility";
 import {
   Play,
   Square,
@@ -325,6 +327,15 @@ function GhostBotGrid() {
 export default function App() {
   const confirm = useConfirm();
   const tooltip = useTooltip();
+  
+  // Initialize GSAP configuration for background tab optimization
+  useEffect(() => {
+    configureGSAP();
+  }, []);
+  
+  // Hook for managing animations based on tab visibility
+  useAnimationVisibility();
+  
   const [bots, setBots] = useState<BotState[]>([]);
   const [activeTab, setActiveTab] = useState("dashboard");
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
@@ -342,7 +353,7 @@ export default function App() {
   const [botSettingsChanges, setBotSettingsChanges] = useState<BotSettingsChanges>({});
 
   // Strategy Assistant States
-  const [agentStatus, setAgentStatus] = useState<{ status: string; model: string; regime: string; cycle: number; running: boolean; analyzing: boolean } | null>(null);
+  const [agentStatus, setAgentStatus] = useState<{ status: string; model: string; regime: string; cycle: number; running: boolean; analyzing: boolean; lastAnalysisTime: number | null; nextAnalysisTime: number | null } | null>(null);
   const [agentConfig, setAgentConfig] = useState<AgentConfigType | null>(null);
   const [agentHistory, setAgentHistory] = useState<AgentHistoryEntry[]>([]);
   const [agentModels, setAgentModels] = useState<string[]>([]);
@@ -629,6 +640,8 @@ export default function App() {
           cycle: data.config?.cycleMinutes ?? 0,
           regime: '-',
           status: data.running ? 'running' : 'stopped',
+          lastAnalysisTime: data.lastAnalysisTime ?? null,
+          nextAnalysisTime: data.nextAnalysisTime ?? null,
         });
         // Config auch aktualisieren
         if (data.config) {
@@ -1077,6 +1090,8 @@ export default function App() {
         cycle: data.config?.cycleMinutes ?? 0,
         regime: '-',
         status: data.running ? 'running' : 'stopped',
+        lastAnalysisTime: data.lastAnalysisTime ?? null,
+        nextAnalysisTime: data.nextAnalysisTime ?? null,
       });
       if (data.config) {
         // Backend sendet Dezimalwerte (0.3, 0.4), Frontend erwartet Integer (30, 40)
@@ -1862,6 +1877,9 @@ export default function App() {
                   <GlobalBotStatsBar
                     bots={bots}
                     agentHistoryCount={agentHistory.length}
+                    agentRunning={agentStatus?.running}
+                    agentCycleMinutes={agentConfig?.cycleMinutes}
+                    nextAnalysisTime={agentStatus?.nextAnalysisTime}
                     onToggleAll={handleToggleAll}
                     isAllActionLoading={isAllActionLoading}
                   />

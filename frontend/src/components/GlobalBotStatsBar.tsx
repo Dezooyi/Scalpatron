@@ -21,17 +21,42 @@ const formatUptimeMs = (ms: number) => {
 interface GlobalBotStatsBarProps {
   bots: BotState[];
   agentHistoryCount: number;
+  agentRunning?: boolean;
+  agentCycleMinutes?: number;
+  nextAnalysisTime?: number | null;
   onToggleAll?: (targetStatus: "running" | "stopped") => void;
   isAllActionLoading?: boolean;
 }
 
-export function GlobalBotStatsBar({ bots, agentHistoryCount, onToggleAll, isAllActionLoading }: GlobalBotStatsBarProps) {
+export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agentCycleMinutes, nextAnalysisTime, onToggleAll, isAllActionLoading }: GlobalBotStatsBarProps) {
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
     const interval = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(interval);
   }, []);
+
+  // Countdown timer for next AI analysis
+  const [countdown, setCountdown] = useState<string>('--:--');
+  useEffect(() => {
+    if (!agentRunning || !nextAnalysisTime) {
+      setCountdown('--:--');
+      return;
+    }
+    const updateCountdown = () => {
+      const diff = nextAnalysisTime - Date.now();
+      if (diff <= 0) {
+        setCountdown('00:00');
+        return;
+      }
+      const mins = Math.floor(diff / 60000);
+      const secs = Math.floor((diff % 60000) / 1000);
+      setCountdown(`${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`);
+    };
+    updateCountdown();
+    const interval = setInterval(updateCountdown, 1000);
+    return () => clearInterval(interval);
+  }, [agentRunning, nextAnalysisTime]);
 
   // Aggregated Stats
   const totalTrades = bots.reduce((acc, bot) => acc + (bot.stats?.totalTrades || 0), 0);
@@ -222,9 +247,23 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, onToggleAll, isAllA
         <StatBadge
           icon={<BrainCircuit className="h-3 w-3 text-purple-400" />}
           title="AI Opts"
-          value={agentHistoryCount.toString()}
+          value={
+            <div className="flex items-center gap-1">
+              <span>{agentHistoryCount.toString()}</span>
+              {agentRunning && (
+                <span className="text-[9px] font-mono text-purple-300/70">+{countdown}</span>
+              )}
+            </div>
+          }
           valueColor="text-purple-300"
-          secondaryContent={<span className="relative flex h-2 w-2 mr-1"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500"></span></span>}
+          secondaryContent={
+            <div className="flex items-center gap-1 mr-1">
+              {agentRunning && (
+                <span className="text-[8px] font-bold text-purple-400/60 uppercase">Next:</span>
+              )}
+              <span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500"></span></span>
+            </div>
+          }
         />
 
         {/* Play/Stop All Button */}

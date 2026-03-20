@@ -41,10 +41,16 @@ data/prices.jsonl
 # --- IDE & Editor ---
 .vscode/
 .idea/
+.agent/
+.agents/
+.claude/
+.kilocode/
+.qwen/
 *.swp
 *.swo
 *~
 .DS_Store
+
 
 # --- Build Outputs ---
 dist/
@@ -76,7 +82,10 @@ coverage/
 *.bak
 
 # --- User Notes (persönliche Notizen, nicht syncen) ---
-"User Notes"/
+User Notes/
 .gitignore
 data/scalpatron.db-shm
 data/scalpatron.db-wal
+screenshots/
+tests/
+plans/

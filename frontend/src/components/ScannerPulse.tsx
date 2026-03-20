@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo } from "react";
+import { useRef, useMemo } from "react";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import type { BotState } from "../App";
@@ -73,6 +73,8 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
   }, [priceHistory, minPrice, priceRange, floorLevel, thresholdLevel, sellDropLevel]);
 
   // GSAP: Animate adding new bars and the progress bar timer
+  // Note: Global pause/resume is handled by useAnimationVisibility in App.tsx
+  // All animations use overwrite: true to prevent queue buildup when tab is in background
   useGSAP(() => {
     if (!barsContainerRef.current || !progressbarRef.current) return;
 
@@ -87,6 +89,7 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
         duration: tickDuration / 1000,
         ease: "linear",
         force3D: true,
+        overwrite: true,
       });
 
       // 2. Bar Animation Logic
@@ -104,6 +107,7 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
             stagger: 0.05,
             ease: "back.out(1.4)",
             force3D: true,
+            overwrite: true,
           }
         );
       }
@@ -114,6 +118,7 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
         duration: tickDuration / 1000,
         ease: "linear",
         force3D: true,
+        overwrite: true,
       });
     }
 

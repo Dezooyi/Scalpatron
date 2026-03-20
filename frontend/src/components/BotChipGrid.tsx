@@ -146,12 +146,15 @@ const StatusButton = memo(({ isRunning, status, size }: StatusButtonProps) => {
   const s = STATUS_SIZES[size];
 
   // GSAP animation for play icon pulse
+  // Note: Global pause/resume is handled by useAnimationVisibility in App.tsx
+  // This animation uses overwrite: true to prevent queue buildup
   useGSAP(() => {
     if (!isRunning || !iconRef.current) return;
 
     gsap.killTweensOf(iconRef.current);
 
     // Continuous pulse animation for play icon
+    // Uses overwrite: true to prevent animation queue buildup
     gsap.to(iconRef.current, {
       scale: 1.1,
       opacity: 0.8,
@@ -160,6 +163,7 @@ const StatusButton = memo(({ isRunning, status, size }: StatusButtonProps) => {
       repeat: -1,
       yoyo: true,
       force3D: true,
+      overwrite: true,
     });
 
     return () => {
@@ -274,7 +278,7 @@ const BotChip = memo(({
   const prevTradeFlash = useRef<"buy" | "sell" | null>(tradeFlash);
   const prevPrice = useRef<number>(bot.stats?.lastPrice ?? 0);
 
-  // Tick pulse animation
+  // Tick pulse animation (Pulse + Beam)
   useEffect(() => {
     const currentPrice = bot.stats?.lastPrice ?? 0;
     if (currentPrice !== prevPrice.current && prevPrice.current > 0 && animEnabled && chipRef.current) {
@@ -295,6 +299,17 @@ const BotChip = memo(({
         gsap.set([inner, outer], { opacity: 0.2, scale: 1 });
         gsap.to(inner, { opacity: 0, scale: 1.1, duration: 0.8, ease: "power2.out" });
         gsap.to(outer, { opacity: 0, scale: 1.2, duration: 1.2, ease: "power2.out" });
+      }
+
+      // Tick Border Beam Animation
+      if (tickBorderBeamRef.current) {
+        const beam = tickBorderBeamRef.current;
+        gsap.killTweensOf(beam);
+        gsap.timeline()
+          .set(beam, { opacity: 0, "--beam-angle": "0deg" })
+          .to(beam, { opacity: 1, duration: 0.2 })
+          .to(beam, { "--beam-angle": "360deg", duration: 1.0, ease: "power2.inOut" }, "<")
+          .to(beam, { opacity: 0, duration: 0.4 }, "-=0.3");
       }
     }
     prevPrice.current = currentPrice;
