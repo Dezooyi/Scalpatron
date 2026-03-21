@@ -31,7 +31,7 @@ interface StatBadgeProps {
   onClick?: () => void;
 }
 
-function StatBadge({ icon, title, value, valueColor = "text-zinc-900 dark:text-zinc-100", secondaryContent, containerClass = "shadow-sm border-zinc-200/20 dark:border-white/5", onClick }: StatBadgeProps) {
+function StatBadge({ icon, title, value, valueColor = "text-zinc-900 dark:text-zinc-100", secondaryContent, containerClass = "border-zinc-200/20 dark:border-white/5", onClick }: StatBadgeProps) {
   const cardRef = useRef<HTMLDivElement>(null);
 
   // Cleanup GSAP animations on unmount to prevent memory leaks
@@ -209,27 +209,27 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
         {/* Trend Popover Menu (First Item) */}
         <Popover>
           <PopoverTrigger asChild>
-            <button className="relative flex-1 min-w-[100px] w-full flex cursor-pointer backdrop-blur-md overflow-hidden active:scale-95 items-center px-2 py-1.5 rounded-md border bg-white/80 dark:bg-zinc-800/40 border-zinc-200/30 dark:border-white/10 hover:border-zinc-300 dark:hover:border-white/20 hover:bg-zinc-50 dark:hover:bg-zinc-900/40 transition-all duration-300 text-left">
+            <button className="relative min-w-25 w-full flex cursor-pointer backdrop-blur-md overflow-hidden active:scale-95 items-center px-2 py-1.5 rounded-md border bg-white/80 dark:bg-zinc-800/40 border-zinc-200/30 dark:border-white/10 hover:border-zinc-300 dark:hover:border-white/20 hover:bg-zinc-50 dark:hover:bg-zinc-900/40 transition-all duration-300 text-left">
               {/* Animated Background Pulse */}
               <div className="absolute inset-0 pointer-events-none opacity-10 bg-gradient-to-r from-transparent via-primary to-transparent -translate-x-full animate-[shimmer_5s_infinite]" />
 
               {/* Left side: Label */}
               <div className="flex flex-col gap-0.5 justify-center flex-1 relative z-10">
-                <div className="flex items-center gap-1.5 text-zinc-900 dark:text-zinc-100">
+                <div className="flex items-center gap-0.5 text-zinc-900 dark:text-zinc-100">
                   {trendBuckets[selectedTrendTimeframe] >= 0 ? (
                     <TrendingUp className="h-3 w-3 shrink-0 text-emerald-500/70" />
                   ) : (
                     <TrendingDown className="h-3 w-3 shrink-0 text-red-500/70" />
                   )}
-                  <span className="text-xs font-bold uppercase tracking-widest whitespace-nowrap opacity-70">Trend {trendLabels[selectedTrendTimeframe]}</span>
+                  <span className="text-[8px] font-bold uppercase tracking-widest whitespace-nowrap opacity-70">Trend {trendLabels[selectedTrendTimeframe]}</span>
                 </div>
                 <div className="flex items-center">
-                  <span className={`text-xs font-bold uppercase tracking-wider ${trendBuckets[selectedTrendTimeframe] >= 0 ? "text-emerald-400" : "text-red-400"}`}>TOTAL PNL</span>
+                  <span className={`text-[8px] font-bold uppercase tracking-wider ${trendBuckets[selectedTrendTimeframe] >= 0 ? "text-emerald-400" : "text-red-400"}`}>TOTAL PNL</span>
                 </div>
               </div>
 
               {/* Subtle Divider */}
-              <div className="w-px h-6 bg-zinc-300/50 dark:bg-white/10 mx-3 relative z-10" />
+              <div className="w-px h-6 bg-zinc-300/50 dark:bg-white/10 mx-1 relative z-10" />
 
               {/* Right side: Value */}
               <div className="flex flex-col justify-center items-end relative z-10">
@@ -269,7 +269,7 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
         {/* Global Wallet Card */}
         <Popover>
           <PopoverTrigger asChild>
-            <button className="relative flex-1 min-w-[100px] w-full flex cursor-pointer backdrop-blur-md overflow-hidden active:scale-95 items-center px-2 py-1.5 rounded-md border bg-white/80 dark:bg-zinc-800/40 border-zinc-200/30 dark:border-white/10 hover:border-zinc-300 dark:hover:border-white/20 hover:bg-zinc-50 dark:hover:bg-zinc-900/40 transition-all duration-300 text-left">
+            <button className="relative flex-1 min-w-[120px] w-full flex cursor-pointer backdrop-blur-md overflow-hidden active:scale-95 items-center px-2 py-1.5 rounded-md border bg-white/80 dark:bg-zinc-800/40 border-zinc-200/30 dark:border-white/10 hover:border-zinc-300 dark:hover:border-white/20 hover:bg-zinc-50 dark:hover:bg-zinc-900/40 transition-all duration-300 text-left">
               {/* Animated Background Pulse */}
               <div className="absolute inset-0 pointer-events-none opacity-10 bg-gradient-to-r from-transparent via-emerald-500 to-transparent -translate-x-full animate-[shimmer_5s_infinite]" />
 
@@ -277,10 +277,10 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
               <div className="flex flex-col gap-0.5 justify-center flex-1 relative z-10">
                 <div className="flex items-center gap-1.5 text-zinc-900 dark:text-zinc-100">
                   <Wallet className="h-3 w-3 shrink-0 text-emerald-500/70" />
-                  <span className="text-xs font-bold uppercase tracking-widest whitespace-nowrap opacity-70">Global Wallet</span>
+                  <span className="text-[8px] font-bold uppercase tracking-widest opacity-50">Global Wallet</span>
                 </div>
                 <div className="flex items-center gap-1">
-                  <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">TOTAL</span>
+                  <span className="text-[8px] font-bold uppercase tracking-wider text-emerald-400">TOTAL</span>
                 </div>
               </div>
 
@@ -289,7 +289,7 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
 
               {/* Right side: Value */}
               <div className="flex flex-col justify-center items-end relative z-10">
-                <span className="text-sm font-black tabular-nums tracking-tighter text-emerald-400">
+                <span className="text-xs font-black tabular-nums tracking-tighter text-emerald-400">
                   {totalBalanceSOL.toFixed(2)} SOL
                 </span>
               </div>
