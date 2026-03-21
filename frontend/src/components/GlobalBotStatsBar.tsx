@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
-import { Clock, Activity, TrendingUp, TrendingDown, Target, Skull, BrainCircuit, BarChart3, LineChart, Square, Play, RefreshCw } from "lucide-react";
+import { useEffect, useState, useRef, useMemo } from "react";
+import { Clock, Activity, TrendingUp, TrendingDown, Target, Skull, BrainCircuit, BarChart3, LineChart, Square, Play, RefreshCw, Wallet, Coins } from "lucide-react";
 import type { BotState } from "@/App";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import gsap from "gsap";
 
 // We'll define a quick local formatter for the time
 const formatTimeLocal = (date: Date) => {
@@ -30,11 +32,48 @@ interface StatBadgeProps {
 }
 
 function StatBadge({ icon, title, value, valueColor = "text-zinc-900 dark:text-zinc-100", secondaryContent, containerClass = "shadow-sm border-zinc-200/20 dark:border-white/5", onClick }: StatBadgeProps) {
+  const cardRef = useRef<HTMLDivElement>(null);
+
+  // Cleanup GSAP animations on unmount to prevent memory leaks
+  useEffect(() => {
+    const currentRef = cardRef.current;
+    return () => {
+      if (currentRef) {
+        gsap.killTweensOf(currentRef);
+      }
+    };
+  }, []);
+
+  const handleMouseEnter = () => {
+    if (!cardRef.current) return;
+    gsap.to(cardRef.current, {
+      scale: 1.15,
+      zIndex: 50,
+      duration: 0.1,
+      ease: "power2.out"
+    });
+  };
+
+  const handleMouseLeave = () => {
+    if (!cardRef.current) return;
+    gsap.to(cardRef.current, {
+      scale: 1,
+      zIndex: 1,
+      duration: 0.2,
+      ease: "power2.out"
+    });
+  };
+
   return (
     <div
+      ref={cardRef}
       onClick={onClick}
-      className={`flex-1 min-w-[110px] flex flex-col justify-center gap-0.5 px-2.5 py-1.5 rounded-md bg-white/80 dark:bg-zinc-800/40 border transition-all leading-none ${onClick ? 'cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-800/60 active:scale-95' : ''} ${containerClass}`}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+      className={`flex-1 min-w-[100px] w-full flex flex-col justify-center gap-0.5 px-2 py-1.5 rounded-md bg-white/80 dark:bg-zinc-800/40 border backdrop-blur-md transition-all leading-none ${onClick ? 'cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-800/60' : ''} ${containerClass}`}
       role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={onClick ? (e) => (e.key === 'Enter' || e.key === ' ') && onClick() : undefined}
     >
       <div className="flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400 opacity-80">
         {icon}
@@ -123,11 +162,40 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
     });
   });
 
-  const [showTrendDetails, setShowTrendDetails] = useState(false);
   const [selectedTrendTimeframe, setSelectedTrendTimeframe] = useState<number>(30); // Default 30 min
 
   const trendLabels: Record<number, string> = { 5: "5m", 15: "15m", 30: "30m", 60: "1h", 1440: "1d" };
   const trendKeys = [5, 15, 30, 60, 1440];
+
+  // Global Wallet aggregation - memoized for performance
+  const totalBalanceSOL = useMemo(
+    () => bots.reduce((acc, bot) => acc + (bot.stats?.balanceSOL || 0), 0),
+    [bots]
+  );
+  const totalBalanceToken = useMemo(
+    () => bots.reduce((acc, bot) => acc + (bot.stats?.balanceToken || 0), 0),
+    [bots]
+  );
+  
+  // Get unique wallet addresses from bots - memoized
+  const walletAddresses = useMemo(
+    () => [...new Set(bots.filter(b => b.walletAddress).map(b => b.walletAddress))],
+    [bots]
+  );
+  const primaryWalletAddress = walletAddresses[0] || null;
+
+  // Group bots by wallet for detail view - memoized
+  const botsByWallet = useMemo(
+    () => bots.reduce((acc, bot) => {
+      const addr = bot.walletAddress || 'unknown';
+      if (!acc[addr]) {
+        acc[addr] = [];
+      }
+      acc[addr].push(bot);
+      return acc;
+    }, {} as Record<string, BotState[]>),
+    [bots]
+  );
 
   const someRunning = bots.some(b => b.status === "running");
   const targetStatus = someRunning ? "stopped" : "running";
@@ -136,46 +204,43 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
     <div className="w-full flex flex-col gap-3 mb-4">
 
       {/* ── Main Global Stats Row ── */}
-      <div className="flex flex-wrap gap-2 w-full">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 xl:grid-cols-[repeat(auto-fit,minmax(100px,1fr))] gap-2 w-full">
 
-        {/* Trend Dropdown Button (First Item) */}
-        <div className="relative flex-none w-[200px] flex">
-          <div
-            onClick={() => setShowTrendDetails(!showTrendDetails)}
-            className={`w-full relative flex cursor-pointer backdrop-blur-md overflow-hidden active:scale-95 items-center px-3 py-1.5 rounded-md border transition-all duration-300 ${showTrendDetails ? "bg-zinc-100 dark:bg-zinc-800/10 border-primary/100 shadow-[0_0_15px_rgba(var(--primary-rgb),0.2)]" : "bg-white/80 dark:bg-zinc-800/40 border-zinc-200/30 dark:border-white/10 hover:border-zinc-300 dark:hover:border-white/20 hover:bg-zinc-50 dark:hover:bg-zinc-900/40"}`}
-            role="button"
-          >
-            {/* Animated Background Pulse */}
-            <div className="absolute inset-0 pointer-events-none opacity-10 bg-gradient-to-r from-transparent via-primary to-transparent -translate-x-full animate-[shimmer_5s_infinite]" />
+        {/* Trend Popover Menu (First Item) */}
+        <Popover>
+          <PopoverTrigger asChild>
+            <button className="relative flex-1 min-w-[100px] w-full flex cursor-pointer backdrop-blur-md overflow-hidden active:scale-95 items-center px-2 py-1.5 rounded-md border bg-white/80 dark:bg-zinc-800/40 border-zinc-200/30 dark:border-white/10 hover:border-zinc-300 dark:hover:border-white/20 hover:bg-zinc-50 dark:hover:bg-zinc-900/40 transition-all duration-300 text-left">
+              {/* Animated Background Pulse */}
+              <div className="absolute inset-0 pointer-events-none opacity-10 bg-gradient-to-r from-transparent via-primary to-transparent -translate-x-full animate-[shimmer_5s_infinite]" />
 
-            {/* Left side: Label */}
-            <div className="flex flex-col gap-0.5 justify-center flex-1 relative z-10">
-              <div className="flex items-center gap-1.5 text-zinc-900 dark:text-zinc-100">
-                {trendBuckets[selectedTrendTimeframe] >= 0 ? (
-                  <TrendingUp className={`h-3 w-3 shrink-0 ${showTrendDetails ? "text-emerald-400" : "text-emerald-500/70"}`} />
-                ) : (
-                  <TrendingDown className={`h-3 w-3 shrink-0 ${showTrendDetails ? "text-red-400" : "text-red-500/70"}`} />
-                )}
-                <span className="text-xs font-bold uppercase tracking-widest whitespace-nowrap opacity-70">Trend {trendLabels[selectedTrendTimeframe]}</span>
+              {/* Left side: Label */}
+              <div className="flex flex-col gap-0.5 justify-center flex-1 relative z-10">
+                <div className="flex items-center gap-1.5 text-zinc-900 dark:text-zinc-100">
+                  {trendBuckets[selectedTrendTimeframe] >= 0 ? (
+                    <TrendingUp className="h-3 w-3 shrink-0 text-emerald-500/70" />
+                  ) : (
+                    <TrendingDown className="h-3 w-3 shrink-0 text-red-500/70" />
+                  )}
+                  <span className="text-xs font-bold uppercase tracking-widest whitespace-nowrap opacity-70">Trend {trendLabels[selectedTrendTimeframe]}</span>
+                </div>
+                <div className="flex items-center">
+                  <span className={`text-xs font-bold uppercase tracking-wider ${trendBuckets[selectedTrendTimeframe] >= 0 ? "text-emerald-400" : "text-red-400"}`}>TOTAL PNL</span>
+                </div>
               </div>
-              <div className="flex items-center">
-                <span className={`text-xs font-bold uppercase tracking-wider ${trendBuckets[selectedTrendTimeframe] >= 0 ? "text-emerald-400" : "text-red-400"}`}>TOTAL PNL</span>
+
+              {/* Subtle Divider */}
+              <div className="w-px h-6 bg-zinc-300/50 dark:bg-white/10 mx-3 relative z-10" />
+
+              {/* Right side: Value */}
+              <div className="flex flex-col justify-center items-end relative z-10">
+                <span className={`text-sm font-black tabular-nums tracking-tighter ${trendBuckets[selectedTrendTimeframe] >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {trendBuckets[selectedTrendTimeframe] > 0 ? '+' : ''}{trendBuckets[selectedTrendTimeframe].toFixed(2)}%
+                </span>
               </div>
-            </div>
-
-            {/* Subtle Divider */}
-            <div className="w-px h-6 bg-zinc-300/50 dark:bg-white/10 mx-3 relative z-10" />
-
-            {/* Right side: Value */}
-            <div className="flex flex-col justify-center items-end relative z-10">
-              <span className={`text-sm font-black tabular-nums tracking-tighter ${trendBuckets[selectedTrendTimeframe] >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                {trendBuckets[selectedTrendTimeframe] > 0 ? '+' : ''}{trendBuckets[selectedTrendTimeframe].toFixed(2)}%
-              </span>
-            </div>
-          </div>
-
-          {showTrendDetails && (
-            <div className="absolute top-full left-0 mt-2 z-50 p-2 rounded-lg bg-white dark:bg-zinc-900/95 backdrop-blur-md border border-zinc-200 dark:border-white/10 shadow-2xl flex gap-2 min-w-[350px]">
+            </button>
+          </PopoverTrigger>
+          <PopoverContent className="p-0 w-full" align="start" sideOffset={8}>
+            <div className="p-2 flex gap-2 min-w-[350px] w-full bg-white dark:bg-zinc-900/95 backdrop-blur-md rounded-md">
               {trendKeys.map((tk) => {
                 const bucketVal = trendBuckets[tk];
                 const pos = bucketVal >= 0;
@@ -184,11 +249,10 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
                 return (
                   <div
                     key={tk}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSelectedTrendTimeframe(tk);
-                      setShowTrendDetails(false);
-                    }}
+                    onClick={() => setSelectedTrendTimeframe(tk)}
+                    onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && setSelectedTrendTimeframe(tk)}
+                    role="button"
+                    tabIndex={0}
                     className={`flex-1 flex flex-col items-center justify-center p-2 rounded border cursor-pointer hover:bg-zinc-100 dark:hover:bg-black/50 transition-all ${isSel ? 'bg-primary/10 border-primary shadow-[0_0_8px_rgba(var(--primary-rgb),0.1)]' : (pos ? 'bg-zinc-50 dark:bg-black/30 border-emerald-500/20 text-emerald-500/80' : 'bg-zinc-50 dark:bg-black/30 border-red-500/20 text-red-500/80')}`}
                   >
                     <span className={`text-xs uppercase tracking-wider mb-1 font-bold ${isSel ? 'text-primary' : 'text-zinc-500'}`}>{trendLabels[tk]}</span>
@@ -199,8 +263,100 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
                 )
               })}
             </div>
-          )}
-        </div>
+          </PopoverContent>
+        </Popover>
+
+        {/* Global Wallet Card */}
+        <Popover>
+          <PopoverTrigger asChild>
+            <button className="relative flex-1 min-w-[100px] w-full flex cursor-pointer backdrop-blur-md overflow-hidden active:scale-95 items-center px-2 py-1.5 rounded-md border bg-white/80 dark:bg-zinc-800/40 border-zinc-200/30 dark:border-white/10 hover:border-zinc-300 dark:hover:border-white/20 hover:bg-zinc-50 dark:hover:bg-zinc-900/40 transition-all duration-300 text-left">
+              {/* Animated Background Pulse */}
+              <div className="absolute inset-0 pointer-events-none opacity-10 bg-gradient-to-r from-transparent via-emerald-500 to-transparent -translate-x-full animate-[shimmer_5s_infinite]" />
+
+              {/* Left side: Label */}
+              <div className="flex flex-col gap-0.5 justify-center flex-1 relative z-10">
+                <div className="flex items-center gap-1.5 text-zinc-900 dark:text-zinc-100">
+                  <Wallet className="h-3 w-3 shrink-0 text-emerald-500/70" />
+                  <span className="text-xs font-bold uppercase tracking-widest whitespace-nowrap opacity-70">Global Wallet</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">TOTAL</span>
+                </div>
+              </div>
+
+              {/* Subtle Divider */}
+              <div className="w-px h-6 bg-zinc-300/50 dark:bg-white/10 mx-3 relative z-10" />
+
+              {/* Right side: Value */}
+              <div className="flex flex-col justify-center items-end relative z-10">
+                <span className="text-sm font-black tabular-nums tracking-tighter text-emerald-400">
+                  {totalBalanceSOL.toFixed(2)} SOL
+                </span>
+              </div>
+            </button>
+          </PopoverTrigger>
+          <PopoverContent className="p-0 w-full" align="start" sideOffset={8}>
+            <div className="p-3 min-w-[320px] w-full space-y-3 bg-white dark:bg-zinc-900/95 backdrop-blur-md rounded-md">
+              {/* Header */}
+              <div className="flex items-center gap-2 pb-2 border-b border-zinc-200 dark:border-white/10">
+                <Wallet className="h-4 w-4 text-emerald-400" />
+                <span className="text-sm font-bold uppercase tracking-wider">Wallet Details</span>
+              </div>
+
+              {/* Aggregated Totals */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="p-2 rounded bg-zinc-50 dark:bg-black/30 border border-zinc-200 dark:border-white/10">
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span className="text-[9px] font-bold uppercase text-zinc-500">Total SOL</span>
+                  </div>
+                  <span className="text-lg font-black text-emerald-400 tabular-nums">{totalBalanceSOL.toFixed(4)}</span>
+                </div>
+                <div className="p-2 rounded bg-zinc-50 dark:bg-black/30 border border-zinc-200 dark:border-white/10">
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <Coins className="h-3 w-3 text-cyan-400" />
+                    <span className="text-[9px] font-bold uppercase text-zinc-500">Total Tokens</span>
+                  </div>
+                  <span className="text-lg font-black text-cyan-400 tabular-nums">{totalBalanceToken.toFixed(1)}</span>
+                </div>
+              </div>
+
+              {/* Primary Wallet Address */}
+              {primaryWalletAddress && (
+                <div className="p-2 rounded bg-zinc-50 dark:bg-black/30 border border-zinc-200 dark:border-white/10">
+                  <div className="text-[9px] font-bold uppercase text-zinc-500 mb-1">Primary Wallet</div>
+                  <div className="text-xs font-mono text-zinc-700 dark:text-zinc-300 truncate">
+                    {primaryWalletAddress.slice(0, 8)}...{primaryWalletAddress.slice(-6)}
+                  </div>
+                </div>
+              )}
+
+              {/* Individual Wallets */}
+              {Object.keys(botsByWallet).length > 0 && (
+                <div className="pt-2 border-t border-zinc-200 dark:border-white/10">
+                  <div className="text-[9px] font-bold uppercase text-zinc-500 mb-2">Bots by Wallet</div>
+                  <div className="space-y-1.5 max-h-[150px] overflow-y-auto">
+                    {Object.entries(botsByWallet).map(([addr, walletBots]) => {
+                      const walletSOL = walletBots.reduce((acc, b) => acc + (b.stats?.balanceSOL || 0), 0);
+                      const walletToken = walletBots.reduce((acc, b) => acc + (b.stats?.balanceToken || 0), 0);
+                      
+                      return (
+                        <div key={addr} className="flex items-center justify-between p-1.5 rounded bg-zinc-100 dark:bg-black/20 text-[10px]">
+                          <span className="font-mono text-zinc-600 dark:text-zinc-400 truncate max-w-[120px]">
+                            {addr === 'unknown' ? 'No wallet' : `${addr.slice(0, 6)}...${addr.slice(-4)}`}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-emerald-500">{walletSOL.toFixed(2)}</span>
+                            <span className="font-mono text-cyan-500">{walletToken.toFixed(0)}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </PopoverContent>
+        </Popover>
 
 
         <StatBadge
@@ -273,7 +429,7 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
         {/* Play/Stop All Button */}
         <div
           onClick={() => !isAllActionLoading && onToggleAll?.(targetStatus)}
-          className={`flex-none w-[120px] h-[52px] flex flex-col justify-center items-center gap-1 px-3 rounded-md border transition-all duration-300 cursor-pointer active:scale-95 group relative overflow-hidden ${isAllActionLoading
+          className={`flex-1 min-w-[100px] h-[52px] flex flex-col justify-center items-center gap-1 px-2 rounded-md border transition-all duration-300 cursor-pointer active:scale-95 group relative overflow-hidden ${isAllActionLoading
             ? "bg-zinc-200 dark:bg-zinc-800/40 border-zinc-300 dark:border-zinc-700 opacity-50 cursor-wait"
             : someRunning
               ? "bg-red-500/10 border-red-500/30 hover:bg-red-500/20 hover:border-red-500/50 shadow-[0_0_10px_rgba(239,68,68,0.1)]"
