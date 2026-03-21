@@ -70,7 +70,7 @@ function StatBadge({ icon, title, value, valueColor = "text-zinc-900 dark:text-z
       onClick={onClick}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
-      className={`flex-1 min-w-[100px] w-full flex flex-col justify-center gap-0.5 px-2 py-1.5 rounded-md bg-white/80 dark:bg-zinc-800/40 border backdrop-blur-md transition-all leading-none ${onClick ? 'cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-800/60' : ''} ${containerClass}`}
+      className={`flex-1 min-w-[100px] w-full flex flex-col justify-center gap-0.5 px-2 py-1.5 rounded-md bg-white/80 dark:bg-zinc-500/5 border backdrop-blur-md transition-all leading-none ${onClick ? 'cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-800/60' : ''} ${containerClass}`}
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}
       onKeyDown={onClick ? (e) => (e.key === 'Enter' || e.key === ' ') && onClick() : undefined}
