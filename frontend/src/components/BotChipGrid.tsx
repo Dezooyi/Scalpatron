@@ -29,7 +29,7 @@ function useGridColumns(): number {
 
     const update = () => {
       const w = window.innerWidth;
-      setColumns(w >= 1440 ? 4 : w >= 1280 ? 3 : w >= 768 ? 2 : 1);
+      setColumns(w >= 1440 ? 4 : w >= 1200 ? 3 : w >= 768 ? 2 : 1);
     };
 
     const debouncedUpdate = () => {
@@ -548,7 +548,7 @@ const BotChip = memo(({
           {sizeVariant === "xl" && (
             <>
               <div className="flex items-center gap-2 pt-0 mt-1 pb-1 mb-0 animate-in fade-in duration-900">
-                <span className={`text-xl truncate flex-1 font-bold ${isSniper ? "text-blue-400" : isRunner ? "text-orange-400" : isDip ? "text-purple-400" : ""}`}>{bot.name}</span>
+                <span className={`text-xl truncate flex-1 font-Light ${isSniper ? "text-blue-400" : isRunner ? "text-orange-400" : isDip ? "text-purple-400" : ""}`}>{bot.name}</span>
                 <span className={`shrink-0 flex items-center justify-center p-0.5 rounded-full transition-all duration-300 ${isSniper ? "bg-blue-500/10 shadow-[0_0_12px_rgba(59,130,246,0.3)]" : isRunner ? "bg-orange-500/10 shadow-[0_0_12px_rgba(249,115,22,0.3)]" : isDip ? "bg-purple-500/10 shadow-[0_0_12px_rgba(168,85,247,0.3)]" : ""}`}>
                   <StrategyBadge strategyType={st} strategyName={sn} strategyId={si} iconSize="h-2 w-2" />
                 </span>
@@ -558,7 +558,7 @@ const BotChip = memo(({
                   <StatusButton isRunning={isRunning} status={bot.status} size="l" />
                   <div className="flex flex-col min-w-0">
                     <div className="flex items-center gap-2 truncate">
-                      <span className="text-base font-black text-primary uppercase shrink-0">{tokenSymbol}</span>
+                      <span className="text-xl font-black text-primary uppercase shrink-0">{tokenSymbol}</span>
                     </div>
 
                   </div>
@@ -566,17 +566,17 @@ const BotChip = memo(({
 
               </div>
 
-              <div className="grid grid-cols-5 gap-2 font-mono text-sm pt-1 border-t border-border/30 mt-0">
+              <div className="grid grid-cols-5 gap-2 text-base font-light pt-1 border-t border-border/30 mt-0">
                 {[
-                  { label: "Trades", value: bot.stats?.totalTrades || 0, color: "" },
+                  { label: "Trades", value: bot.stats?.totalTrades || 0, color: "text-2xl" },
                   { label: "Win/Loss", value: `${bot.stats?.wins || 0}/${bot.stats?.losses || 0}`, color: winRate !== null && winRate >= 50 ? "text-green-400" : "text-red-400" },
                   { label: "L.Trade", value: lastTradeTime, color: "" },
                   { label: "Est. 24h", value: est24h, color: "" },
                   { label: "PnL %", value: pnlStr, color: pnlColor },
                 ].map(({ label, value, color }) => (
                   <div key={label} className="flex flex-col items-start gap-1">
-                    <span className="text-zinc-500 uppercase text-sm font-black tracking-tight whitespace-nowrap">{label}</span>
-                    <span className={`font-black text-xl leading-none ${color}`}>{value}</span>
+                    <span className="text-zinc-500 uppercase text-xs font-black tracking-tight whitespace-nowrap">{label}</span>
+                    <span className={`font-black leading-none text-xs ${color}`}>{value}</span>
                   </div>
                 ))}
               </div>
@@ -621,7 +621,7 @@ const BotChip = memo(({
                 ].map(({ label, value, color }) => (
                   <div key={label} className="flex flex-col items-start gap-0.5">
                     <span className="text-zinc-500 uppercase text-xs font-bold tracking-tight whitespace-nowrap">{label}</span>
-                    <span className={`font-bold text-[var(--ds-font-size-lr)] leading-none ${color}`}>{value}</span>
+                    <span className={`font-bold text-l leading-none ${color}`}>{value}</span>
                   </div>
                 ))}
               </div>
