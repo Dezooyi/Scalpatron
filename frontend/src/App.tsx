@@ -536,24 +536,34 @@ export default function App() {
         });
       }
 
-      if (now - lastUpdate >= minInterval) {
-        // Immediate update if throttle interval has passed
-        sseThrottleRef.current['bots'] = now;
-        setBots(orderedData);
-      } else {
-        // Queue update for later batching
-        pendingBotsUpdateRef.current = orderedData;
-        if (botsUpdateTimeoutRef.current) return;
+      // Preserve priceHistory from current state when updating via SSE
+      setBots(prevBots => {
+        const priceHistoryMap = new Map(prevBots.map(b => [b.id, b.priceHistory || []]));
+        const updatedWithHistory = orderedData.map(bot => ({
+          ...bot,
+          priceHistory: priceHistoryMap.get(bot.id) || []
+        }));
+        
+        if (now - lastUpdate >= minInterval) {
+          // Immediate update if throttle interval has passed
+          sseThrottleRef.current['bots'] = now;
+          return updatedWithHistory;
+        } else {
+          // Queue update for later batching
+          pendingBotsUpdateRef.current = updatedWithHistory;
+          if (botsUpdateTimeoutRef.current) return prevBots;
 
-        botsUpdateTimeoutRef.current = setTimeout(() => {
-          if (pendingBotsUpdateRef.current) {
-            sseThrottleRef.current['bots'] = Date.now();
-            setBots(pendingBotsUpdateRef.current);
-            pendingBotsUpdateRef.current = null;
-          }
-          botsUpdateTimeoutRef.current = null;
-        }, minInterval - (now - lastUpdate));
-      }
+          botsUpdateTimeoutRef.current = setTimeout(() => {
+            if (pendingBotsUpdateRef.current) {
+              sseThrottleRef.current['bots'] = Date.now();
+              setBots(pendingBotsUpdateRef.current);
+              pendingBotsUpdateRef.current = null;
+            }
+            botsUpdateTimeoutRef.current = null;
+          }, minInterval - (now - lastUpdate));
+          return prevBots;
+        }
+      });
     };
 
     sse.addEventListener("state", (e) => {
@@ -755,7 +765,8 @@ export default function App() {
           try {
             const res = await fetch(`${getApiBase()}/api/bots/${bot.id}/history?limit=100`);
             const data = await res.json();
-            histories[bot.id] = data.history || [];
+            // API returns objects { timestamp, price }, but we need number[] for charts
+            histories[bot.id] = (data.history || []).map((item: { price: number }) => item.price);
           } catch (err) {
             console.error(`[Init] Price History Fetch error for bot ${bot.id}:`, err);
             histories[bot.id] = [];
