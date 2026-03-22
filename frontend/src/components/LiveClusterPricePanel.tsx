@@ -30,7 +30,7 @@ export function LiveClusterPricePanel({ selectedBot, setBots }: LiveClusterPrice
   const [priceHistory, setPriceHistory] = useState<PricePoint[]>([]);
   const lastAppendedPrice = useRef<number | null>(null);
 
-  const getApiBase = () => localStorage.getItem('scalpatron_api_url') ?? 'http://localhost:3000';
+  const getApiBase = () => localStorage.getItem('scalpatron_api_url') ?? '';
 
   // Fetch price history from API endpoint on bot change
   useEffect(() => {

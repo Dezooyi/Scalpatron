@@ -281,7 +281,7 @@ type SettingsChange = {
 type BotSettingsChanges = Record<string, SettingsChange[]>;
 
 const getApiBase = () =>
-  localStorage.getItem('scalpatron_api_url') ?? 'http://localhost:3000';
+  localStorage.getItem('scalpatron_api_url') ?? '';
 
 // EMA-Perioden-Konstanten für Trend-Strategie-Anzeige
 const EMA_PERIOD_THRESHOLD = 30;

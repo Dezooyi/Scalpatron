@@ -58,7 +58,7 @@ interface LiveFeedListCardProps {
 }
 
 const getApiBase = () =>
-  localStorage.getItem("scalpatron_api_url") ?? "http://localhost:3000";
+  localStorage.getItem("scalpatron_api_url") ?? "";
 
 export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs }: LiveFeedListCardProps) {
   const [entries, setEntries] = useState<PriceTick[]>([]);

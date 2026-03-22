@@ -50,7 +50,15 @@ type Props = {
 
 export default function GlobalSettings({ theme, onThemeChange, onSaved, onAnimConfigChange }: Props) {
   const [settings, setSettings] = useState<GlobalSettingsData>(DEFAULTS);
-  const [apiUrl, setApiUrl] = useState(() => localStorage.getItem(LS_API_URL_KEY) ?? "http://localhost:3000");
+  const [apiUrl, setApiUrl] = useState(() => {
+    const stored = localStorage.getItem(LS_API_URL_KEY);
+    // Empty string = use Vite proxy (relative URLs). "http://localhost:3000" is the old default — treat as empty.
+    if (!stored || stored === "http://localhost:3000") {
+      localStorage.removeItem(LS_API_URL_KEY);
+      return "";
+    }
+    return stored;
+  });
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
   const [connStatus, setConnStatus] = useState<"idle" | "ok" | "error">("idle");
   const [connTesting, setConnTesting] = useState(false);
