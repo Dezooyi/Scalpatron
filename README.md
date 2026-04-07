@@ -1,4 +1,5 @@
 # Scalpatron — Multi-Strategy Trading Bot for Solana
+<img width="2151" height="3296" alt="image" src="https://github.com/user-attachments/assets/392fb866-5a05-4bd0-be66-cf1ebd675c87" />
 
 > Automatisierter Trading-Bot für Solana SPL Tokens mit Range Spike Scalping, KI-gestützter Marktanalyse und Multi-Strategy Support.
 
