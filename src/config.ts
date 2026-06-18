@@ -3,8 +3,8 @@ dotenv.config();
 
 /**
  * Price Feed Provider Konfiguration
- * - 'dexscreener': https://api.dexscreener.com (kostenlos, gut für kleine/mid caps)
- * - 'jupiter': https://price.jup.ag/v6/price (100 Requests/min, empfohlen)
+ * - 'dexscreener': https://api.dexscreener.com (kostenlos, gut für kleine/mid caps) - DEFAULT
+ * - 'jupiter': https://price.jup.ag/v6/price (DEPRECATED - Endpoint wurde abgeschaltet, DNS löst nicht mehr auf)
  * - 'birdeye': https://public-api.birdeye.so (benötigt API Key)
  * - 'custom': Eigene URL über PRICE_FEED_CUSTOM_URL
  */
@@ -24,11 +24,21 @@ export const CONFIG = {
   JUPITER_ULTRA_URL: process.env.JUPITER_ULTRA_URL ?? 'https://lite.jup.ag/ultra/v1/',
   
   // Price Feed Konfiguration
-  PRICE_FEED_PROVIDER: (process.env.PRICE_FEED_PROVIDER ?? 'jupiter') as PriceFeedProvider,
+  PRICE_FEED_PROVIDER: (process.env.PRICE_FEED_PROVIDER ?? 'dexscreener') as PriceFeedProvider,
   PRICE_FEED_TICKRATE_MS: parseInt(process.env.PRICE_FEED_TICKRATE_MS ?? '2000', 10),
   PRICE_FEED_REQUEST_INTERVAL_MS: parseInt(process.env.PRICE_FEED_REQUEST_INTERVAL_MS ?? '800', 10),
   PRICE_FEED_MAX_RETRIES: parseInt(process.env.PRICE_FEED_MAX_RETRIES ?? '4', 10),
   PRICE_FEED_CUSTOM_URL: process.env.PRICE_FEED_CUSTOM_URL ?? '',
+  // Stale-Price-Handling (ADR-010): ab dieser Veraltungsdauer (ms) wird Trading blockiert.
+  // Default = 3 * TICKRATE (Toleranz für 1–2 transiente Fehlpolls, Block bei anhaltendem Ausfall).
+  PRICE_FEED_MAX_STALE_AGE_MS: parseInt(
+    process.env.PRICE_FEED_MAX_STALE_AGE_MS ??
+      String(3 * parseInt(process.env.PRICE_FEED_TICKRATE_MS ?? '2000', 10)),
+    10,
+  ),
+  // Ab dieser Veraltungsdauer (ms) gilt ein Ausfall als „lang": beim nächsten echten Tick
+  // wird die History bereinigt und ein Re-Warmup erzwungen (kein Phantom-Spike).
+  PRICE_FEED_LONG_OUTAGE_MS: parseInt(process.env.PRICE_FEED_LONG_OUTAGE_MS ?? '60000', 10),
   
   // Provider-spezifische URLs
   get PRICE_FEED_URL(): string {

@@ -12,7 +12,7 @@ export interface MacroData {
 
 const ENABLE_MACRO = process.env.ENABLE_MACRO_CONTEXT === 'true' || true; // Default true for this upgrade
 const BTC_API = process.env.MACRO_BTC_API ?? 'https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT';
-const JUPITER_API = process.env.JUPITER_URL ?? 'https://price.jup.ag/v3/price?ids=So11111111111111111111111111111111111111112';
+const SOL_API = process.env.MACRO_SOL_API ?? 'https://api.binance.com/api/v3/ticker/24hr?symbol=SOLUSDT';
 
 class MacroFeed {
   private currentData: MacroData | null = null;
@@ -42,14 +42,12 @@ class MacroFeed {
       const btcPrice = parseFloat(btcJson.lastPrice);
       const btcTrend24h = parseFloat(btcJson.priceChangePercent); // Binance 24hr ticker
 
-      // Fetch SOL from Jupiter V3
-      const solRes = await fetch(JUPITER_API, { signal: AbortSignal.timeout(5000) });
+      // Fetch SOL from Binance
+      const solRes = await fetch(SOL_API, { signal: AbortSignal.timeout(5000) });
       const solJson = await solRes.json();
       
-      const solData = solJson.data['So11111111111111111111111111111111111111112'];
-      const solPrice = solData ? solData.price : 0;
-      // Jupiter V3 doesn't typically provide priceChange1h directly in the basic /price endpoint without deeper querying.
-      // We will store historical prices to calculate our own 1h trend.
+      const solPrice = parseFloat(solJson.lastPrice);
+      // SOL-Trend wird intern aus rolling buffer berechnet (falls benötigt), hier nur Preis exponieren.
       
       let solTrend1h = 0; // We'll implement internal rolling buffer if needed, for now just expose price.
       

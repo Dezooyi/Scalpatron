@@ -5,6 +5,13 @@ import { getTokenInfo } from './db.js';
 export interface PricePoint {
   timestamp: number;
   price: number;
+  /** Marker für veraltete/rekonstruierte Punkte (ADR-010). Wird aktuell nie als stale
+   *  emittiert (stale Punkte erreichen den Bot gar nicht), bleibt aber zur expliziten
+   *  Semantik im Typ. */
+  stale?: boolean;
+  /** Nur auf dem ersten echten Tick nach einem langen Feed-Ausfall gesetzt (ADR-010).
+   *  Signalisiert dem Bot: Detector zurücksetzen, Re-Warmup läuft. */
+  recoveredFromOutage?: boolean;
 }
 
 type DexScreenerPair = {
@@ -177,6 +184,10 @@ export class PriceFeed extends EventEmitter {
   private intervalIds: Map<string, ReturnType<typeof setInterval>> = new Map();
   private subscriberCounts: Map<string, number> = new Map();
   private lastPollMap: Map<string, number> = new Map();
+  // Stale-Tracking (ADR-010): letzter Zeitpunkt eines *echten* Preises pro Mint
+  private lastFreshAtMap: Map<string, number> = new Map();
+  // Anzahl aufeinanderfolgender fehlgeschlagener/veralteter Polls pro Mint
+  private consecutiveStaleMap: Map<string, number> = new Map();
   private getBotNamesForToken: ((mintAddress: string) => string[]) | null = null;
 
   private constructor() {
@@ -225,6 +236,8 @@ export class PriceFeed extends EventEmitter {
       this.historyMap.delete(mintAddress);
       lastRequestTimeMap.delete(mintAddress);
       pendingRequests.delete(mintAddress);
+      this.lastFreshAtMap.delete(mintAddress);
+      this.consecutiveStaleMap.delete(mintAddress);
     } else {
       this.subscriberCounts.set(mintAddress, currentCount - 1);
     }
@@ -238,6 +251,18 @@ export class PriceFeed extends EventEmitter {
     return this.lastPollMap.get(mintAddress);
   }
 
+  /** Zeitpunkt (Epoch-ms) des letzten *echten* Preises für diesen Mint (ADR-010). */
+  public getLastFreshAt(mintAddress: string): number | undefined {
+    return this.lastFreshAtMap.get(mintAddress);
+  }
+
+  /** Veraltungsdauer des Feeds in ms (0, falls noch kein echter Preis empfangen). */
+  public getFeedStaleMs(mintAddress: string): number {
+    const lastFresh = this.lastFreshAtMap.get(mintAddress);
+    if (lastFresh === undefined) return 0;
+    return Date.now() - lastFresh;
+  }
+
   public seedHistory(mintAddress: string, points: PricePoint[]): void {
     const history = this.historyMap.get(mintAddress) || [];
     // Concatenate and sort by timestamp, then unique by timestamp
@@ -249,6 +274,11 @@ export class PriceFeed extends EventEmitter {
     
     // Limit to 1000 points
     this.historyMap.set(mintAddress, uniquePoints.slice(-1000));
+    // ADR-010: zuletzt bekannten echten Zeitpunkt übernehmen, damit die
+    // Veraltungsdauer auch direkt nach Start/Restore korrekt abgebildet wird.
+    if (uniquePoints.length > 0) {
+      this.lastFreshAtMap.set(mintAddress, uniquePoints[uniquePoints.length - 1].timestamp);
+    }
     console.log(`[PriceFeed] seeded ${uniquePoints.length} points for ${mintAddress}`);
   }
 
@@ -258,22 +288,51 @@ export class PriceFeed extends EventEmitter {
       const price = await fetchTokenPrice(mintAddress);
       
       if (price === null) {
-        // Fallback: Letzten bekannten Preis verwenden wenn verfügbar
+        // ADR-010: Stale-Price-Isolation. Kein Re-Emit mit Date.now() als „frisch".
+        // Der Bot (price:<mint>-Listener) erhält keinen Punkt -> kein Record/Persist/Trade.
+        // Stattdessen Outage-Status separat signalisieren (für UI/Circuit-Breaker).
+        const prevCount = this.consecutiveStaleMap.get(mintAddress) ?? 0;
+        this.consecutiveStaleMap.set(mintAddress, prevCount + 1);
+
+        const lastFreshAt = this.lastFreshAtMap.get(mintAddress);
         const history = this.historyMap.get(mintAddress) || [];
+        const refTs = lastFreshAt ?? (history.length > 0 ? history[history.length - 1].timestamp : undefined);
+        const staleForMs = refTs !== undefined ? Date.now() - refTs : 0;
         const lastPrice = history.length > 0 ? history[history.length - 1].price : null;
-        
+
         if (lastPrice !== null) {
-          console.warn(`[PriceFeed] ⚠️  Rate Limit / Fehler für ${mintAddress}. Verwende letzten Preis: $${lastPrice}`);
-          // Emit last known price with current timestamp
-          const point: PricePoint = { timestamp: Date.now(), price: lastPrice };
-          this.emit(`price:${mintAddress}`, point);
-          this.emit('price_update', { mintAddress, ...point });
+          console.warn(`[PriceFeed] ⚠️  Kein echter Preis für ${mintAddress} (consecutive #${prevCount + 1}). Trading pausiert, verwende letzten Preis $${lastPrice} nur zur Anzeige.`);
         } else {
-          console.warn(`[PriceFeed] ❌ Kein Preis für ${mintAddress} und kein Fallback verfügbar`);
+          console.warn(`[PriceFeed] ❌ Kein Preis für ${mintAddress} und kein Fallback verfügbar.`);
         }
+
+        // Outage-Signal für UI/Stats/Circuit-Breaker (kein Trading-Pfad).
+        this.emit('price_stale', {
+          mintAddress,
+          staleForMs,
+          consecutiveStale: prevCount + 1,
+          lastPrice,
+          lastFreshAt: lastFreshAt ?? null,
+        });
         return;
       }
       
+      // --- Echter (frischer) Preis ---
+      const now = Date.now();
+      const prevFreshAt = this.lastFreshAtMap.get(mintAddress);
+
+      // Outage-Recovery (ADR-010): nach langem Ausfall History bereinigen und
+      // Re-Warmup erzwingen, damit keine veraltete Floor-Basis zu Phantom-Spikes führt.
+      let recoveredFromOutage = false;
+      if (prevFreshAt !== undefined && (now - prevFreshAt) > CONFIG.PRICE_FEED_LONG_OUTAGE_MS) {
+        this.historyMap.set(mintAddress, []);
+        recoveredFromOutage = true;
+        console.warn(`[PriceFeed] 🔄 Langer Feed-Ausfall beendet (${Math.round((now - prevFreshAt) / 1000)}s). History bereinigt, Re-Warmup aktiv.`);
+      }
+
+      this.lastFreshAtMap.set(mintAddress, now);
+      this.consecutiveStaleMap.set(mintAddress, 0);
+
       // Gruppierte Log-Ausgabe mit Token-Symbol und Bot-Namen
       const tokenInfo = getTokenInfo(mintAddress);
       const tokenSymbol = tokenInfo?.symbol ?? mintAddress.slice(0, 8);
@@ -281,12 +340,13 @@ export class PriceFeed extends EventEmitter {
       const botList = botNames.length > 0 ? ` → [${botNames.join(', ')}]` : '';
       
       console.log(`[PriceFeed] ✅ ${tokenSymbol}: $${price}${botList}`);
-      const point: PricePoint = { timestamp: Date.now(), price };
+      const point: PricePoint = { timestamp: now, price, recoveredFromOutage };
       const history = this.historyMap.get(mintAddress) || [];
       history.push(point);
 
       // Limit history size to 1000 points per token to save memory
       if (history.length > 1000) history.shift();
+      this.historyMap.set(mintAddress, history);
 
       this.emit(`price:${mintAddress}`, point);
       // Also emit a general price event for the server/UI context

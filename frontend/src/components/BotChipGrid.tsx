@@ -1,4 +1,4 @@
-import { memo, useState, useEffect, useSyncExternalStore, useMemo, useCallback, useRef } from "react";
+import { memo, useState, useEffect, useLayoutEffect, useSyncExternalStore, useMemo, useCallback, useRef } from "react";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import {
@@ -18,32 +18,36 @@ import type { BotState, TokenInfo } from "../App";
 import type { AnimationConfig } from "../lib/animationConfig";
 
 /**
- * Tracks the responsive column count to match the CSS grid
- * (grid-cols-1 / md:2 / lg:3 / xl:3 / 2xl:4)
+ * Liest die tatsächliche Spaltenzahl des gerenderten Grids direkt aus dem DOM,
+ * damit die JS-seitige sizeVariant-Berechnung immer mit der CSS-Grid
+ * (grid-cols-1 / md:2 / lg:3 / xl:3 / 2xl:4) synchron bleibt. Gemessen wird
+ * über das offsetTop der Kinder, daher robust gegen Breakpoint-/minmax-Änderungen.
  */
-function useGridColumns(): number {
+function useGridColumns(gridRef: React.RefObject<HTMLDivElement | null>): number {
   const [columns, setColumns] = useState(1);
 
-  useEffect(() => {
-    let resizeTimeout: ReturnType<typeof setTimeout>;
+  useLayoutEffect(() => {
+    const el = gridRef.current;
+    if (!el) return;
 
     const update = () => {
-      const w = window.innerWidth;
-      setColumns(w >= 1440 ? 4 : w >= 1200 ? 3 : w >= 768 ? 2 : 1);
+      const first = el.firstElementChild as HTMLElement | null;
+      if (!first) return;
+      const top = first.offsetTop;
+      let count = 0;
+      let child: Element | null = first;
+      while (child && (child as HTMLElement).offsetTop === top) {
+        count++;
+        child = child.nextElementSibling;
+      }
+      if (count > 0) setColumns(count);
     };
 
-    const debouncedUpdate = () => {
-      clearTimeout(resizeTimeout);
-      resizeTimeout = setTimeout(update, 150);
-    };
-
+    const ro = new ResizeObserver(() => update());
+    ro.observe(el);
     update();
-    window.addEventListener("resize", debouncedUpdate);
-    return () => {
-      clearTimeout(resizeTimeout);
-      window.removeEventListener("resize", debouncedUpdate);
-    };
-  }, []);
+    return () => ro.disconnect();
+  }, [gridRef]);
 
   return columns;
 }
@@ -688,7 +692,8 @@ export const BotChipGrid = memo(({
   onSelectBot,
   onReorderBots,
 }: BotChipGridProps) => {
-  const gridColumns = useGridColumns();
+  const gridRef = useRef<HTMLDivElement>(null);
+  const gridColumns = useGridColumns(gridRef);
 
   // Drag and Drop State
   const [dragState, setDragState] = useState<DragState>({
@@ -814,6 +819,7 @@ export const BotChipGrid = memo(({
 
   return (
     <div
+      ref={gridRef}
       className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 2xl:grid-cols-4 gap-3 overflow-visible"
       onDragOver={(e) => e.preventDefault()}
     >

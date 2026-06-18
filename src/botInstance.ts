@@ -7,6 +7,7 @@ import { PriceRecorder } from './priceRecorder.js';
 import { StrategyEngine } from './strategyEngine.js';
 import type { StrategyConfig, IndicatorConfig } from './strategyTypes.js';
 import { TIMEFRAME_MS } from './candleAggregator.js';
+import { CONFIG } from './config.js';
 
 const PRICE_FEED_TICKRATE_MS = process.env.PRICE_FEED_TICKRATE_MS
   ? parseInt(process.env.PRICE_FEED_TICKRATE_MS, 10)
@@ -28,6 +29,7 @@ export interface BotState {
   recentTrades: TradeLogEntry[];
   // priceHistory removed for SSE performance - fetch via /api/bots/:id/history instead
   lastPoll?: number;
+  feedStaleMs?: number; // Veraltungsdauer des Feeds in ms (ADR-010); 0 = frisch
   totalTicks?: number;
   startTime?: number;
   strategyId?: string;
@@ -452,6 +454,7 @@ export class BotInstance {
       recentTrades,
       // priceHistory removed for SSE performance - fetch via /api/bots/:id/history instead
       lastPoll: feed.getLastPoll(this.mintAddress),
+      feedStaleMs: feed.getFeedStaleMs(this.mintAddress),
       totalTicks: this.cumulativeTicks,
       startTime: this.startTime,
       strategyId: this.activeStrategyConfig?.id,
@@ -509,6 +512,16 @@ export class BotInstance {
     this.cumulativeTicks++;
 
     const feed = PriceFeed.getInstance();
+
+    // ADR-010: Outage-Recovery. Nach langem Feed-Ausfall hat PriceFeed die History
+    // bereinigt; hier transienten Detector-/Strategie-State zurücksetzen (Re-Warmup),
+    // damit keine veraltete Floor-/Peak-Basis zu Phantom-Signalen führt.
+    if (point.recoveredFromOutage) {
+      this.detector.reset();
+      this.strategyEngine?.reset();
+      logger.warn(this.id, 'FEED', `Langer Price-Feed-Ausfall beendet – Detector/Strategie zurückgesetzt, Re-Warmup aktiv.`);
+    }
+
     const history = feed.getHistory(this.mintAddress);
 
     // Record price to persistent storage (SQLite + JSONL)
@@ -520,6 +533,15 @@ export class BotInstance {
     // Heartbeat every 5 ticks to keep terminal alive
     if (history.length % 5 === 0) {
       logger.info(this.id, 'FEED', `Tick #${history.length} empfangen: $${point.price.toFixed(8)} | Buffer: ${history.length}/${this.detector.settings.floorWindow}`);
+    }
+
+    // ADR-010: Trading-Circuit-Breaker. Bei veraltetem Feed keine Entscheidungen
+    // treffen – verteidigt auch den Race-Fall eines verzögert verarbeiteten Ticks.
+    // (Echt frische Ticks haben staleMs ≈ 0, daher feuert der Breaker im Normalfall nie.)
+    const staleMs = feed.getFeedStaleMs(this.mintAddress);
+    if (staleMs > CONFIG.PRICE_FEED_MAX_STALE_AGE_MS) {
+      logger.warn(this.id, 'TRADER', `Trading blockiert (Circuit-Breaker): Preis-Feed seit ${Math.round(staleMs / 1000)}s veraltet.`);
+      return;
     }
 
     // Block trading during warmup.

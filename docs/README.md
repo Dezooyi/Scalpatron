@@ -14,6 +14,13 @@
 - [Betrieb](./operations.md) — Starten, Dashboard-Bedienung, Logs, Troubleshooting
 - [Design System](./design-system.md) — CSS-Variablen, Runtime-Overrides, `@theme inline` vs. `@theme`, dsConfig.ts
 
+### Referenz & Projektmanagement
+
+- [**Decision Records (ADR-Index + Agent-Workflow)**](./decisions/README.md) — Architektur- & Trading-Entscheidungen, inkl. ADR-Vorgaben für Agenten
+- [API Endpoints](./api/endpoints.md) — REST + SSE Endpunkte
+- [Guides](./guides/) — Price-Feed-Setup, Performance-Tuning
+- [Changelogs](./changes/) — Änderungsprotokolle nach Monat
+
 ## Schnellstart
 
 ```bash

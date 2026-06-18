@@ -8,6 +8,57 @@ import { CONFIG } from './config.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ENV_PATH = path.resolve(__dirname, '..', '.env');
 
+class AsyncMutex {
+  private queue: Array<() => void> = [];
+  private locked = false;
+
+  async runExclusive<T>(fn: () => Promise<T>, timeoutMs = 30000): Promise<T> {
+    if (this.locked) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(`Mutex lock timeout after ${timeoutMs}ms`));
+        }, timeoutMs);
+        this.queue.push(() => {
+          clearTimeout(timer);
+          Promise.resolve(fn())
+            .then(resolve)
+            .catch(reject);
+        });
+      });
+    }
+
+    this.locked = true;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.locked = false;
+        this.queue.shift();
+        reject(new Error(`Mutex lock timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      const release = () => {
+        clearTimeout(timer);
+        this.locked = false;
+        const next = this.queue.shift();
+        if (next) next();
+      };
+
+      Promise.resolve(fn())
+        .then(resolve)
+        .catch(reject)
+        .finally(release);
+    });
+  }
+}
+
+const walletLocks = new Map<string, AsyncMutex>();
+
+export function getWalletLock(pubkey: string): AsyncMutex {
+  if (!walletLocks.has(pubkey)) {
+    walletLocks.set(pubkey, new AsyncMutex());
+  }
+  return walletLocks.get(pubkey)!;
+}
+
 function updateEnvKey(key: string, value: string): void {
   let content = fs.readFileSync(ENV_PATH, 'utf-8');
   const regex = new RegExp(`^${key}=.*$`, 'm');

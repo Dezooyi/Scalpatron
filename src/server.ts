@@ -106,6 +106,11 @@ export class BotServer {
       this.broadcast('terminal_log', entry);
     });
 
+    // ADR-010: Price-Feed-Outage an alle SSE-Clients weiterleiten (für UI-Badge).
+    this.priceFeed.on('price_stale', (payload) => {
+      this.broadcast('price_stale', payload);
+    });
+
     // Periodisch Token-Preise von DexScreener aktualisieren (alle 60 Sekunden)
     setInterval(() => {
       this.tokenService.refreshAllTokenPrices().catch(() => {});

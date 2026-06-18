@@ -7,7 +7,7 @@ export type TradeLogEntry = TradeLogEntryType;
 
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction } from '@solana/web3.js';
 import { createJupiterApiClient } from '@jup-ag/api';
-import { loadOrCreateKeypair } from './wallet.js';
+import { loadOrCreateKeypair, getWalletLock } from './wallet.js';
 import { CONFIG } from './config.js';
 
 export interface Position {
@@ -90,6 +90,9 @@ export class Trader {
     this.logger = new Logger(this.paperMode ? 'paper-trades.jsonl' : 'live-trades.jsonl');
     if (!this.paperMode && !this.connection) {
       this.initLiveMode();
+    }
+    if (!this.paperMode) {
+      this.syncBalances().catch(() => {});
     }
   }
 
@@ -237,7 +240,7 @@ export class Trader {
         inputMint,
         outputMint,
         amount: amountLamports,
-        slippageBps: 200, // 2% Slippage für Meme-Coins ratsam
+        slippageBps: 200,
       });
       if (!quoteResponse) throw new Error('Kein Quote erhalten');
       
@@ -258,13 +261,13 @@ export class Trader {
       const rawTransaction = transaction.serialize();
 
       console.log(`[Jupiter] Sende Tx...`);
+      const latestBlockhash = await this.connection.getLatestBlockhash();
       const txid = await this.connection.sendRawTransaction(rawTransaction, {
         skipPreflight: true,
         maxRetries: 3,
       });
 
       console.log(`[Jupiter] Tx gesendet: ${txid}. Warte auf Bestätigung...`);
-      const latestBlockhash = await this.connection.getLatestBlockhash();
       await this.connection.confirmTransaction({
         signature: txid,
         blockhash: latestBlockhash.blockhash,
@@ -285,38 +288,35 @@ export class Trader {
       let effectiveTradeSize = this.tradeSize;
       
       if (positionSizePct !== null) {
-        // Strategy template specifies a percentage of current balance (e.g. 0.05 for 5%, or 5 for 5%)
         const pct = positionSizePct > 1 ? positionSizePct / 100 : positionSizePct;
         effectiveTradeSize = this.balanceSOL * pct;
       } else if (this.tradingMode === 'aggressive') {
-        // Aggressive mode uses user's "aggressiveness" slider / agent override
         effectiveTradeSize = this.balanceSOL * (this.aggressiveness / 100);
       }
       
-      // Balance validation: prevent trades with insufficient or negative balance
-      if (effectiveTradeSize <= 0) {
-        console.warn(`[Trader] BUY abgelehnt: Unzureichendes SOL (effectiveTradeSize: ${effectiveTradeSize.toFixed(4)} SOL, balance: ${this.balanceSOL.toFixed(4)} SOL)`);
-        return null;
-      }
-      
-      // Prevent trades when balance is too low (minimum 0.01 SOL buffer)
-      if (effectiveTradeSize > this.balanceSOL - 0.01) {
-        console.warn(`[Trader] BUY abgelehnt: Trade-Größe (${effectiveTradeSize.toFixed(4)} SOL) exceeds available balance (${this.balanceSOL.toFixed(4)} SOL)`);
-        return null;
+      if (!this.paperMode) {
+        const pk = this.keypair!.publicKey.toBase58();
+        await getWalletLock(pk).runExclusive(async () => {
+          await this.syncBalances();
+          
+          if (effectiveTradeSize <= 0) {
+            throw new Error('BUY_SKIPPED');
+          }
+          
+          if (effectiveTradeSize > this.balanceSOL - 0.01) {
+            throw new Error('BUY_SKIPPED');
+          }
+          
+          const amountLamports = Math.floor(effectiveTradeSize * 1e9);
+          const success = await this.executeLiveSwap(CONFIG.SOL_MINT, this.targetMint, amountLamports);
+          if (!success) throw new Error('SWAP_FAILED');
+        });
       }
       
       const ugorAmount = effectiveTradeSize / result.currentPrice;
 
-      if (!this.paperMode) {
-        const amountLamports = Math.floor(effectiveTradeSize * 1e9);
-        const success = await this.executeLiveSwap(CONFIG.SOL_MINT, this.targetMint, amountLamports);
-        if (!success) return null;
-      }
-
       this.balanceSOL -= effectiveTradeSize;
       this.balanceToken += ugorAmount;
-      // Note: totalTrades is only incremented on SELL (= completed trade cycle),
-      // not on BUY, so that Total Trades === wins + losses (closed trades only).
       this.positions.push({
         entryPrice: result.currentPrice,
         entryTime: Date.now(),
@@ -341,6 +341,9 @@ export class Trader {
       
       return entry;
     } catch (e: any) {
+      if (e.message === 'BUY_SKIPPED' || e.message === 'SWAP_FAILED') {
+        return null;
+      }
       console.error(`[Trader] buy() Fehler:`, e.message);
       return null;
     } finally {
@@ -353,9 +356,18 @@ export class Trader {
     this.isSwapping = true;
     try {
       if (!this.paperMode) {
-        const amountLamports = Math.floor(pos.amount * Math.pow(10, this.targetDecimals));
-        const success = await this.executeLiveSwap(this.targetMint, CONFIG.SOL_MINT, amountLamports);
-        if (!success) return null;
+        const pk = this.keypair!.publicKey.toBase58();
+        await getWalletLock(pk).runExclusive(async () => {
+          await this.syncBalances();
+          
+          if (this.balanceToken <= 0) {
+            throw new Error('SELL_SKIPPED');
+          }
+          
+          const amountLamports = Math.floor(this.balanceToken * Math.pow(10, this.targetDecimals));
+          const success = await this.executeLiveSwap(this.targetMint, CONFIG.SOL_MINT, amountLamports);
+          if (!success) throw new Error('SWAP_FAILED');
+        });
       }
 
       const pnlPercent = ((result.currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
@@ -363,7 +375,7 @@ export class Trader {
       this.balanceSOL += solReturn;
       this.balanceToken -= pos.amount;
       this.positions = [];
-      this.totalTrades++; // Only count completed trades (SELL = closed cycle)
+      this.totalTrades++;
       this.totalPnlPercent += pnlPercent;
       if (pnlPercent > 0) this.wins++;
       else this.losses++;
@@ -387,6 +399,9 @@ export class Trader {
       
       return entry;
     } catch (e: any) {
+      if (e.message === 'SELL_SKIPPED' || e.message === 'SWAP_FAILED') {
+        return null;
+      }
       console.error(`[Trader] sell() Fehler:`, e.message);
       return null;
     } finally {
