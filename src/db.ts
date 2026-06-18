@@ -50,6 +50,7 @@ export function initDB() {
       price REAL NOT NULL,
       amount REAL,
       pnlPercent REAL,
+      status TEXT NOT NULL DEFAULT 'CONFIRMED',
       FOREIGN KEY (botId) REFERENCES bots(id) ON DELETE CASCADE
     );
 
@@ -138,6 +139,8 @@ export function initDB() {
     `ALTER TABLE tokens ADD COLUMN liquidity REAL DEFAULT NULL`,
     `ALTER TABLE tokens ADD COLUMN priceChange24h REAL DEFAULT NULL`,
     `ALTER TABLE tokens ADD COLUMN priceUpdatedAt INTEGER DEFAULT NULL`,
+    // trades: status column for PENDING trade lifecycle (ADR-007)
+    `ALTER TABLE trades ADD COLUMN status TEXT DEFAULT 'CONFIRMED'`,
   ];
   for (const sql of migrations) {
     try { db.exec(sql); } catch (_) { /* column already exists */ }
@@ -651,4 +654,54 @@ export function deleteBotOrder(botId: string): void {
 export function getTokenInfo(mintAddress: string): { symbol: string; name: string; decimals: number; priceUsd?: number } | null {
   const row = db.prepare('SELECT symbol, name, decimals, priceUsd FROM tokens WHERE mintAddress = ?').get(mintAddress) as any;
   return row || null;
+}
+
+// --- Trade Lifecycle (ADR-007: PENDING trade persistence) ---
+
+export interface TradeRow {
+  id: number;
+  botId: string;
+  timestamp: number;
+  action: string;
+  price: number;
+  amount: number | null;
+  pnlPercent: number | null;
+  status: string;
+}
+
+export function insertPendingTrade(
+  botId: string,
+  action: string,
+  price: number,
+  amount: number | null,
+  pnlPercent: number | null = null
+): number {
+  const stmt = db.prepare(`
+    INSERT INTO trades (botId, timestamp, action, price, amount, pnlPercent, status)
+    VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
+  `);
+  const result = stmt.run(botId, Date.now(), action, price, amount, pnlPercent);
+  return result.lastInsertRowid as number;
+}
+
+export function confirmTrade(tradeId: number): void {
+  db.prepare(`UPDATE trades SET status = 'CONFIRMED' WHERE id = ?`).run(tradeId);
+}
+
+export function failTrade(tradeId: number): void {
+  db.prepare(`UPDATE trades SET status = 'FAILED' WHERE id = ?`).run(tradeId);
+}
+
+export function getPendingTrades(botId?: string): TradeRow[] {
+  let query = `SELECT * FROM trades WHERE status = 'PENDING'`;
+  const params: string[] = [];
+  if (botId) {
+    query += ` AND botId = ?`;
+    params.push(botId);
+  }
+  return db.prepare(query).all(...params) as TradeRow[];
+}
+
+export function updateTradePnL(tradeId: number, pnlPercent: number): void {
+  db.prepare(`UPDATE trades SET pnlPercent = ? WHERE id = ?`).run(pnlPercent, tradeId);
 }

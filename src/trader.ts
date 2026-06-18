@@ -9,6 +9,7 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction 
 import { createJupiterApiClient } from '@jup-ag/api';
 import { loadOrCreateKeypair, getWalletLock } from './wallet.js';
 import { CONFIG } from './config.js';
+import { insertPendingTrade, confirmTrade, failTrade } from './db.js';
 
 export interface Position {
   entryPrice: number;
@@ -46,6 +47,7 @@ export class Trader {
   private tradingMode: 'fixed' | 'aggressive';
   private _lastPrice = 0;
   paperMode: boolean;
+  private botId: string;
 
   private connection?: Connection;
   private keypair?: Keypair;
@@ -61,6 +63,7 @@ export class Trader {
     logFile?: string;
     targetMint?: string;
     targetDecimals?: number;
+    botId?: string;
   } = {}) {
     this.balanceSOL = opts.initialSOL ?? 10;
     this.tradeSize = opts.tradeSize ?? 1;
@@ -70,6 +73,7 @@ export class Trader {
     this.paperMode = opts.paperMode ?? true;
     this.targetMint = opts.targetMint ?? CONFIG.UGOR_MINT;
     this.targetDecimals = opts.targetDecimals ?? 6;
+    this.botId = opts.botId ?? 'default';
     this.logger = new Logger(opts.logFile ?? (this.paperMode ? 'paper-trades.jsonl' : 'live-trades.jsonl'));
 
     if (!this.paperMode) {
@@ -232,8 +236,10 @@ export class Trader {
     }
   }
 
-  private async executeLiveSwap(inputMint: string, outputMint: string, amountLamports: number): Promise<boolean> {
-    if (!this.connection || !this.keypair || !this.jupiterApi) return false;
+  private async executeLiveSwap(inputMint: string, outputMint: string, amountLamports: number): Promise<{ success: boolean; error?: string; txid?: string; meta?: unknown }> {
+    if (!this.connection || !this.keypair || !this.jupiterApi) {
+      return { success: false, error: 'No connection or keypair' };
+    }
     try {
       console.log(`[Jupiter] Hole Quote...`);
       const quoteResponse = await this.jupiterApi.quoteGet({
@@ -242,7 +248,7 @@ export class Trader {
         amount: amountLamports,
         slippageBps: 200,
       });
-      if (!quoteResponse) throw new Error('Kein Quote erhalten');
+      if (!quoteResponse) return { success: false, error: 'Kein Quote erhalten' };
       
       console.log(`[Jupiter] Generiere Swap-Tx...`);
       const swapResult = await this.jupiterApi.swapPost({
@@ -263,27 +269,66 @@ export class Trader {
       console.log(`[Jupiter] Sende Tx...`);
       const latestBlockhash = await this.connection.getLatestBlockhash();
       const txid = await this.connection.sendRawTransaction(rawTransaction, {
-        skipPreflight: true,
+        skipPreflight: false,
         maxRetries: 3,
       });
 
       console.log(`[Jupiter] Tx gesendet: ${txid}. Warte auf Bestätigung...`);
-      await this.connection.confirmTransaction({
-        signature: txid,
-        blockhash: latestBlockhash.blockhash,
-        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-      }, 'confirmed');
+      
+      let confirmed = false;
+      let confirmError: string | undefined;
+      try {
+        await this.connection.confirmTransaction({
+          signature: txid,
+          blockhash: latestBlockhash.blockhash,
+          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+        }, 'confirmed');
+        confirmed = true;
+      } catch (e: any) {
+        confirmError = e.message;
+        if (!e.message.includes('expired') && !e.message.includes('block height exceeded')) {
+          console.error(`[Jupiter] Confirm Error: ${e.message}`);
+        }
+      }
 
-      console.log(`[Jupiter] Tx bestätigt! ✅`);
-      return true;
+      if (!confirmed) {
+        console.log(`[Jupiter] confirmTransaction fehlgeschlagen, prüfe getTransaction...`);
+      }
+
+      let meta: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        try {
+          const txInfo = await this.connection.getTransaction(txid, { maxSupportedTransactionVersion: 0 });
+          if (txInfo) {
+            meta = txInfo.meta;
+            if (txInfo.meta?.err === null) {
+              console.log(`[Jupiter] Tx verifiziert via getTransaction! ✅`);
+              return { success: true, txid, meta };
+            } else {
+              const errMsg = txInfo.meta?.err ? JSON.stringify(txInfo.meta.err) : 'Unknown error';
+              console.error(`[Jupiter] Tx fehlgeschlagen on-chain: ${errMsg}`);
+              return { success: false, error: `On-chain error: ${errMsg}`, txid, meta };
+            }
+          }
+        } catch (e: any) {
+          console.log(`[Jupiter] getTransaction attempt ${attempt + 1} fehlgeschlagen: ${e.message}`);
+        }
+      }
+
+      if (!confirmed) {
+        return { success: false, error: confirmError || 'Tx nicht verifiziert', txid };
+      }
+      return { success: false, error: 'Tx nicht in getTransaction gefunden', txid };
     } catch (e: any) {
       console.error(`[Jupiter] Live-Swap Fehler: ${e.message}`);
-      return false;
+      return { success: false, error: e.message };
     }
   }
 
   private async buy(result: PatternResult, settings: Record<string, number>, positionSizePct: number | null): Promise<TradeLogEntry | null> {
     this.isSwapping = true;
+    let tradeId: number | null = null;
     try {
       let effectiveTradeSize = this.tradeSize;
       
@@ -307,9 +352,15 @@ export class Trader {
             throw new Error('BUY_SKIPPED');
           }
           
+          tradeId = insertPendingTrade(this.botId, 'BUY', result.currentPrice, effectiveTradeSize / result.currentPrice);
+          
           const amountLamports = Math.floor(effectiveTradeSize * 1e9);
-          const success = await this.executeLiveSwap(CONFIG.SOL_MINT, this.targetMint, amountLamports);
-          if (!success) throw new Error('SWAP_FAILED');
+          const swapResult = await this.executeLiveSwap(CONFIG.SOL_MINT, this.targetMint, amountLamports);
+          if (!swapResult.success) {
+            failTrade(tradeId);
+            throw new Error('SWAP_FAILED');
+          }
+          confirmTrade(tradeId);
         });
       }
       
@@ -354,6 +405,7 @@ export class Trader {
   private async sell(result: PatternResult, settings: Record<string, number>): Promise<TradeLogEntry | null> {
     const pos = this.getAggregatedPosition()!;
     this.isSwapping = true;
+    let tradeId: number | null = null;
     try {
       if (!this.paperMode) {
         const pk = this.keypair!.publicKey.toBase58();
@@ -364,9 +416,15 @@ export class Trader {
             throw new Error('SELL_SKIPPED');
           }
           
+          tradeId = insertPendingTrade(this.botId, 'SELL', result.currentPrice, pos.amount);
+          
           const amountLamports = Math.floor(this.balanceToken * Math.pow(10, this.targetDecimals));
-          const success = await this.executeLiveSwap(this.targetMint, CONFIG.SOL_MINT, amountLamports);
-          if (!success) throw new Error('SWAP_FAILED');
+          const swapResult = await this.executeLiveSwap(this.targetMint, CONFIG.SOL_MINT, amountLamports);
+          if (!swapResult.success) {
+            failTrade(tradeId);
+            throw new Error('SWAP_FAILED');
+          }
+          confirmTrade(tradeId);
         });
       }
 

@@ -91,28 +91,29 @@ export class BotInstance {
       paperMode, 
       logFile: `trades-${this.id}.jsonl`,
       targetMint: this.mintAddress,
-      targetDecimals
+      targetDecimals,
+      botId: this.id
     });
     this.restoreStatsFromDB();
   }
 
   private restoreStatsFromDB(): void {
     const rows = db.prepare(
-      `SELECT timestamp, action, price, amount, pnlPercent FROM trades WHERE botId = ? ORDER BY timestamp ASC`
-    ).all(this.id) as { timestamp: number; action: string; price: number; amount: number | null; pnlPercent: number | null }[];
+      `SELECT timestamp, action, price, amount, pnlPercent, status FROM trades WHERE botId = ? ORDER BY timestamp ASC`
+    ).all(this.id) as { timestamp: number; action: string; price: number; amount: number | null; pnlPercent: number | null; status: string }[];
 
     let totalTrades = 0, wins = 0, losses = 0, totalPnlPercent = 0;
     
-    // We replay trades to restore accumulated balance. 
-    // Initialization: Trader sets initialSOL dynamically when instantiated (passed as opts.initialSOL).
     let currentBalanceSOL = this.trader.getStats().balanceSOL;
     let currentBalanceToken = 0;
 
     let openPositions: OpenPosition[] = [];
 
     for (const row of rows) {
+      if (row.status === 'PENDING') {
+        continue;
+      }
       if (row.action === 'BUY' && row.amount) {
-        // BUY only restores balance/positions — totalTrades is counted on SELL (closed cycle)
         const investedSOL = row.amount * row.price;
         currentBalanceSOL -= investedSOL;
         currentBalanceToken += row.amount;
@@ -122,7 +123,6 @@ export class BotInstance {
           amount: row.amount,
         });
       } else if (row.action === 'SELL' && row.amount) {
-        // SELL = completed trade cycle → count as one trade
         totalTrades++;
         const pnl = row.pnlPercent ?? 0;
         totalPnlPercent += pnl;
@@ -132,12 +132,10 @@ export class BotInstance {
         const returnSOL = row.amount * row.price;
         currentBalanceSOL += returnSOL;
         currentBalanceToken -= row.amount;
-        // In current implementation a SELL closes all positions.
         openPositions = [];
       }
     }
     
-    // Safety check against float math weirdness
     currentBalanceSOL = Math.max(0, currentBalanceSOL);
     currentBalanceToken = Math.max(0, currentBalanceToken);
 
