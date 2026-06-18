@@ -1,7 +1,7 @@
 # ADR-007: Pending-Trade Persistenz (Crash Recovery)
 
 **Datum:** 18. Juni 2026
-**Status:** Vorgeschlagen
+**Status:** Akzeptiert
 **Bereich:** Trade-Code
 
 ---
@@ -96,6 +96,19 @@ Ein einfacher Lifecycle-Status löst das ohne On-Chain-Reconciliation im Normalf
   und Persistenz betreffen.
 - On-Chain-Auflösung der `PENDING`-Trades via Signatur-Lookup
   (`connection.getTransaction`).
+
+### Implementierung (18.06.2026)
+
+**`src/db.ts:45-54`** - trades table now has `status TEXT NOT NULL DEFAULT 'CONFIRMED'`  
+**`src/db.ts:141`** - Migration: `ALTER TABLE trades ADD COLUMN status TEXT DEFAULT 'CONFIRMED'`  
+**`src/db.ts:668-703`** - Neue Funktionen: `insertPendingTrade`, `confirmTrade`, `failTrade`, `getPendingTrades`, `updateTradePnL`  
+**`src/trader.ts:11`** - Import der Trade-Lifecycle Funktionen aus db.ts  
+**`src/trader.ts:62`** - Neues Feld: `private botId: string`  
+**`src/trader.ts:74`** - `botId` im Constructor initialisiert  
+**`src/trader.ts:305-307`** - `buy()`: `insertPendingTrade` vor Swap, `confirmTrade`/`failTrade` nach Swap  
+**`src/trader.ts:379-381`** - `sell()`: `insertPendingTrade` vor Swap, `confirmTrade`/`failTrade` nach Swap  
+**`src/botInstance.ts:95`** - `botId` wird an Trader Constructor übergeben  
+**`src/botInstance.ts:102`** - Query inkl. `status` Spalte, PENDING rows werden übersprungen
 
 ## Beziehungen
 
