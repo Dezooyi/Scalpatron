@@ -19,8 +19,14 @@ function updateEnvKey(key: string, value: string): void {
   fs.writeFileSync(ENV_PATH, content, 'utf-8');
 }
 
-export function loadOrCreateKeypair(): Keypair {
+export function loadOrCreateKeypair(mode: 'live' | 'dev' = 'dev'): Keypair {
   if (!CONFIG.WALLET_PRIVATE_KEY) {
+    if (mode === 'live') {
+      throw new Error(
+        '[Wallet] WALLET_PRIVATE_KEY ist nicht gesetzt. ' +
+        'Bitte in .env konfigurieren (SOLANA_MAINNET_WALLET_PRIVATE_KEY).'
+      );
+    }
     const keypair = Keypair.generate();
     const base58Key = bs58.encode(keypair.secretKey);
     updateEnvKey('WALLET_PRIVATE_KEY', base58Key);

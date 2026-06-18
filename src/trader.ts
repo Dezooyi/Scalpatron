@@ -80,7 +80,7 @@ export class Trader {
 
   private initLiveMode() {
     this.connection = new Connection(CONFIG.RPC_URL, 'confirmed');
-    this.keypair = loadOrCreateKeypair();
+    this.keypair = loadOrCreateKeypair('live');
     // Verwende den Jupiter Ultra Endpoint (bzw. normalen v6 wenn fallback nötig)
     this.jupiterApi = createJupiterApiClient({ basePath: CONFIG.JUPITER_ULTRA_URL });
   }
