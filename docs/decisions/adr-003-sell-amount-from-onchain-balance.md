@@ -1,7 +1,7 @@
 # ADR-003: SELL-Menge aus On-Chain-Balance ableiten
 
 **Datum:** 18. Juni 2026
-**Status:** Vorgeschlagen
+**Status:** Akzeptiert
 **Bereich:** Trade-Code
 
 ---
