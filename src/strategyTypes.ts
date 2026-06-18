@@ -89,6 +89,7 @@ export interface StrategyConfig {
     spikeThreshold?: number;
     sellDropThreshold?: number;
     cooldownTicks?: number;
+    takeProfitThreshold?: number;
   };
   // Grid-specific config (strategy_type === 'grid')
   grid?: {

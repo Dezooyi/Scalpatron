@@ -373,8 +373,12 @@ export class Trader {
         if (!success) return null;
       }
 
-      const pnlPercent = ((result.currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
-      const solReturn = pos.amount * result.currentPrice;
+      const pnlPercent = ((result.currentPrice - pos.entryPrice) / pos.entryPrice) * 100 - (CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT * 100);
+      let solReturn = pos.amount * result.currentPrice;
+      if (this.paperMode) {
+        const entryCost = pos.amount * pos.entryPrice;
+        solReturn -= entryCost * CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT * 2;
+      }
       this.balanceSOL += solReturn;
       this.balanceToken -= pos.amount;
       this.positions = [];
