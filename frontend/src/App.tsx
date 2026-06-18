@@ -78,6 +78,7 @@ import { Label } from "@/components/ui/label";
 import { CreateBotDialog } from "@/components/CreateBotDialog";
 import { BotChipGrid } from "@/components/BotChipGrid";
 import { GlobalBotStatsBar } from "@/components/GlobalBotStatsBar";
+import { PerformanceSection } from "@/components/PerformanceSection";
 import { formatUptime } from "@/lib/botUtils";
 import {
   Table,
@@ -1928,6 +1929,16 @@ export default function App() {
                     nextAnalysisTime={agentStatus?.nextAnalysisTime}
                     onToggleAll={handleToggleAll}
                     isAllActionLoading={isAllActionLoading}
+                  />
+                )}
+
+                {/* Performance Section (PnL & Risk-Analyse aller Bots) — direkt unter der ersten Zeile */}
+                {bots.length > 0 && (
+                  <PerformanceSection
+                    bots={bots}
+                    tokens={tokens}
+                    selectedBotId={selectedBotId}
+                    onSelectBot={setSelectedBotId}
                   />
                 )}
 

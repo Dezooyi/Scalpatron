@@ -141,6 +141,8 @@ export function initDB() {
     `ALTER TABLE tokens ADD COLUMN priceUpdatedAt INTEGER DEFAULT NULL`,
     // trades: status column for PENDING trade lifecycle (ADR-007)
     `ALTER TABLE trades ADD COLUMN status TEXT DEFAULT 'CONFIRMED'`,
+    // trades: paper/live mode pro Trade (1 = paper, 0 = live) für exakte Performance-Analyse
+    `ALTER TABLE trades ADD COLUMN paperMode INTEGER NOT NULL DEFAULT 1`,
   ];
   for (const sql of migrations) {
     try { db.exec(sql); } catch (_) { /* column already exists */ }
@@ -667,6 +669,7 @@ export interface TradeRow {
   amount: number | null;
   pnlPercent: number | null;
   status: string;
+  paperMode: number;
 }
 
 export function insertPendingTrade(
@@ -674,13 +677,14 @@ export function insertPendingTrade(
   action: string,
   price: number,
   amount: number | null,
-  pnlPercent: number | null = null
+  pnlPercent: number | null = null,
+  paperMode: boolean = true,
 ): number {
   const stmt = db.prepare(`
-    INSERT INTO trades (botId, timestamp, action, price, amount, pnlPercent, status)
-    VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
+    INSERT INTO trades (botId, timestamp, action, price, amount, pnlPercent, status, paperMode)
+    VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?)
   `);
-  const result = stmt.run(botId, Date.now(), action, price, amount, pnlPercent);
+  const result = stmt.run(botId, Date.now(), action, price, amount, pnlPercent, paperMode ? 1 : 0);
   return result.lastInsertRowid as number;
 }
 
@@ -704,4 +708,42 @@ export function getPendingTrades(botId?: string): TradeRow[] {
 
 export function updateTradePnL(tradeId: number, pnlPercent: number): void {
   db.prepare(`UPDATE trades SET pnlPercent = ? WHERE id = ?`).run(pnlPercent, tradeId);
+}
+
+/**
+ * Liefert bestätigte Trades für die Performance-Analyse, optional gefiltert
+ * nach Zeitraum und Bot-IDs. Wird vom /api/performance Endpoint genutzt,
+ * damit Lange-Zeitraum-Filter (7d/30d/All) nicht durch das 50-Trades-SSE-Limit
+ * beschnitten werden.
+ */
+export function getTradesForPerformance(
+  from?: number,
+  to?: number,
+  botIds?: string[],
+  mode?: 'paper' | 'live',
+): TradeRow[] {
+  const conditions = [`status = 'CONFIRMED'`];
+  const params: (string | number)[] = [];
+
+  if (from !== undefined) {
+    conditions.push(`timestamp >= ?`);
+    params.push(from);
+  }
+  if (to !== undefined) {
+    conditions.push(`timestamp <= ?`);
+    params.push(to);
+  }
+  if (botIds && botIds.length > 0) {
+    const placeholders = botIds.map(() => `?`).join(`,`);
+    conditions.push(`botId IN (${placeholders})`);
+    params.push(...botIds);
+  }
+  if (mode === 'paper') {
+    conditions.push(`paperMode = 1`);
+  } else if (mode === 'live') {
+    conditions.push(`paperMode = 0`);
+  }
+
+  const query = `SELECT * FROM trades WHERE ${conditions.join(` AND `)} ORDER BY timestamp ASC`;
+  return db.prepare(query).all(...params) as TradeRow[];
 }

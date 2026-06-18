@@ -379,7 +379,7 @@ export class Trader {
             throw new Error('BUY_SKIPPED');
           }
 
-          tradeId = insertPendingTrade(this.botId, 'BUY', result.currentPrice, effectiveTradeSize / result.currentPrice);
+          tradeId = insertPendingTrade(this.botId, 'BUY', result.currentPrice, effectiveTradeSize / result.currentPrice, null, this.paperMode);
 
           const amountLamports = Math.floor(effectiveTradeSize * 1e9);
           const swapResult = await this.executeLiveSwap(CONFIG.SOL_MINT, this.targetMint, amountLamports);
@@ -443,7 +443,7 @@ export class Trader {
             throw new Error('SELL_SKIPPED');
           }
           
-          tradeId = insertPendingTrade(this.botId, 'SELL', result.currentPrice, pos.amount);
+          tradeId = insertPendingTrade(this.botId, 'SELL', result.currentPrice, pos.amount, null, this.paperMode);
           
           const amountLamports = Math.floor(this.balanceToken * Math.pow(10, this.targetDecimals));
           const swapResult = await this.executeLiveSwap(this.targetMint, CONFIG.SOL_MINT, amountLamports);

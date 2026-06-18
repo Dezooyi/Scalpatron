@@ -3,7 +3,7 @@ import type { BotManager } from './botManager.js';
 import { PriceRecorder } from './priceRecorder.js';
 import { logger } from './appLogger.js';
 import { TokenService, isValidMintAddress } from './tokenService.js';
-import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder } from './db.js';
+import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder, getTradesForPerformance } from './db.js';
 import { loadBuiltinTemplates } from './strategyEngine.js';
 import { PriceFeed } from './priceFeed.js';
 import type { OllamaAgent } from './ollamaAgent.js';
@@ -1112,6 +1112,32 @@ export class BotServer {
         const perf = getRegimePerformance(botId);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(perf));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/performance — bestätigte Trades für Performance-Analyse (alle Bots, zeitgefiltert)
+    // Query-Parameter: from=<ms>, to=<ms>, botIds=<comma-separierte IDs>, mode=paper|live
+    if (pathname === '/api/performance' && req.method === 'GET') {
+      try {
+        const fromParam = urlObj.searchParams.get('from');
+        const toParam = urlObj.searchParams.get('to');
+        const botIdsParam = urlObj.searchParams.get('botIds');
+        const modeParam = urlObj.searchParams.get('mode');
+
+        const from = fromParam ? parseInt(fromParam, 10) : undefined;
+        const to = toParam ? parseInt(toParam, 10) : undefined;
+        const botIds = botIdsParam
+          ? botIdsParam.split(',').map(s => s.trim()).filter(Boolean)
+          : undefined;
+        const mode = modeParam === 'paper' || modeParam === 'live' ? modeParam : undefined;
+
+        const trades = getTradesForPerformance(from, to, botIds, mode);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ trades }));
       } catch (e: any) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));
