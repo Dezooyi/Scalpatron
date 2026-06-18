@@ -44,8 +44,33 @@ export class PatternDetector {
   }
 
   analyze(history: PricePoint[]): PatternResult {
+    if (history.length === 0) {
+      return {
+        signal: 'HOLD',
+        floor: 0,
+        currentPrice: 0,
+        spikePercent: 0,
+        peakPrice: this.peakPrice,
+        dropFromPeak: 0,
+        reason: 'empty history',
+      };
+    }
+
     const current = history[history.length - 1];
     const floor = this.calcFloor(history);
+
+    if (!(floor > 0) || !(current.price > 0)) {
+      return {
+        signal: 'HOLD',
+        floor,
+        currentPrice: current.price,
+        spikePercent: 0,
+        peakPrice: this.peakPrice,
+        dropFromPeak: 0,
+        reason: 'floor or price non-positive',
+      };
+    }
+
     const spikePercent = ((current.price - floor) / floor) * 100;
 
     const result: PatternResult = {
@@ -99,6 +124,9 @@ export class PatternDetector {
 
   private calcFloor(history: PricePoint[]): number {
     const window = history.slice(-this.settings.floorWindow);
+    if (window.length === 0) {
+      return 0;
+    }
     const prices = window.map(p => p.price).sort((a, b) => a - b);
     const mid = Math.floor(prices.length / 2);
     // Median
