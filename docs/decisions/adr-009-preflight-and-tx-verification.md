@@ -1,7 +1,7 @@
 # ADR-009: Preflight & Tx-Verifikation vor State-Mutation
 
 **Datum:** 18. Juni 2026
-**Status:** Vorgeschlagen
+**Status:** Akzeptiert
 **Bereich:** Trade-Code
 
 ---
@@ -111,6 +111,19 @@ dafür.
   (`buy/sell`: Erfolg nur nach Verifikation), `src/botInstance.ts:567-577`.
 - Kombinieren mit ADR-007 (PENDING-Trade-Lifecycle) und ADR-003 (SELL aus Balance).
 - `getTransaction`-Polling-Helfer mit begrenzten Retries implementieren.
+
+### Implementierung (18.06.2026)
+
+**`src/trader.ts:239-327`** - `executeLiveSwap` komplett überarbeitet:  
+- `skipPreflight: false` (Zeile 272)  
+- Blockhash VOR dem Senden geholt (Zeile 268)  
+- `getTransaction` mit 3 Retry-Versuchen, 500ms Pause (Zeilen 293-315)  
+- Return-Typ geändert: `{ success: boolean; error?: string; txid?: string; meta?: unknown }`  
+- "expired"/"block height exceeded" führen NICHT direkt zu Failure, sondern zu getTransaction-Check  
+**`src/trader.ts:358`** - `buy()` prüft `swapResult.success` statt boolean  
+**`src/trader.ts:425`** - `sell()` prüft `swapResult.success` statt boolean  
+**`src/trader.ts:358-363`** - Bei `swapResult.success === false` → `failTrade()`, sonst `confirmTrade()`  
+**`src/trader.ts:425-430`** - Bei `swapResult.success === false` → `failTrade()`, sonst `confirmTrade()`
 
 ## Beziehungen
 
