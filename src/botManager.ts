@@ -33,7 +33,7 @@ export class BotManager {
       const settings = JSON.parse(row.settings);
       let walletAddress = row.walletAddress ?? '';
       if (row.paperMode === 0 && !walletAddress) {
-        walletAddress = loadOrCreateKeypair().publicKey.toBase58();
+        walletAddress = loadOrCreateKeypair('live').publicKey.toBase58();
       }
 
       const bot = new BotInstance(
@@ -67,7 +67,7 @@ export class BotManager {
     
     // Auto-fill wallet address if live mode and empty
     if (!config.paperMode && !walletAddress) {
-      walletAddress = loadOrCreateKeypair().publicKey.toBase58();
+      walletAddress = loadOrCreateKeypair('live').publicKey.toBase58();
     }
     const tradeSize = config.tradeSize ?? 1;
     const aggressiveness = config.aggressiveness ?? 10;
@@ -177,7 +177,7 @@ export class BotManager {
 
     // If switching to live mode and wallet is empty, auto-fill with global PK
     if (!paperMode && !bot.walletAddress) {
-      const globalAddr = loadOrCreateKeypair().publicKey.toBase58();
+      const globalAddr = loadOrCreateKeypair('live').publicKey.toBase58();
       bot.walletAddress = globalAddr;
     }
 
