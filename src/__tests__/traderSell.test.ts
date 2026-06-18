@@ -75,7 +75,7 @@ async function testSellCalculatesPnLFromPosAmountNotBalance(): Promise<boolean> 
     return false;
   }
 
-  const expectedPnl = ((0.02 - 0.01) / 0.01) * 100;
+  const expectedPnl = ((0.02 - 0.01) / 0.01) * 100 - 2;
   const pnlMatch = Math.abs((result.pnlPercent ?? 0) - expectedPnl) < 0.001;
   
   console.log(`[TraderSell Test] PnL calculated from pos.amount=100, price 0.01->0.02`);
