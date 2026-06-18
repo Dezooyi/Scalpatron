@@ -55,7 +55,13 @@ export interface ExitCondition {
 }
 
 export interface RiskManagement {
-  position_size: number;      // fraction of balance per trade (0.02 = 2%, 1.0 = 100%)
+  /**
+   * Fraction of SOL balance allocated per trade.
+   * MUST be a normalized ratio in [0, 1]: 0.02 = 2%, 0.5 = 50%, 1.0 = 100%.
+   * Values > 1 are divided by 100 (legacy compat) but this triggers a one-time warning.
+   * Strictly out-of-range values (< 0 or > 1 after normalization) are rejected.
+   */
+  position_size: number;
   max_positions: number;      // max concurrent open positions
   leverage: number;           // 1 = no leverage
   max_drawdown?: number;      // stop trading if drawdown exceeds this (0.1 = 10%)

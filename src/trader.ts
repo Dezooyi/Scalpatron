@@ -46,6 +46,7 @@ export class Trader {
   private tradingMode: 'fixed' | 'aggressive';
   private _lastPrice = 0;
   paperMode: boolean;
+  private _warnedPositionSizeOverflow = false;
 
   private connection?: Connection;
   private keypair?: Keypair;
@@ -56,6 +57,7 @@ export class Trader {
     initialSOL?: number;
     tradeSize?: number;
     aggressiveness?: number;
+    maxAggressiveness?: number;
     tradingMode?: 'fixed' | 'aggressive';
     paperMode?: boolean;
     logFile?: string;
@@ -65,7 +67,7 @@ export class Trader {
     this.balanceSOL = opts.initialSOL ?? 10;
     this.tradeSize = opts.tradeSize ?? 1;
     this.aggressiveness = opts.aggressiveness ?? 10;
-    this.maxAggressiveness = opts.aggressiveness ?? 10;
+    this.maxAggressiveness = opts.maxAggressiveness ?? opts.aggressiveness ?? 10;
     this.tradingMode = opts.tradingMode ?? 'fixed';
     this.paperMode = opts.paperMode ?? true;
     this.targetMint = opts.targetMint ?? CONFIG.UGOR_MINT;
@@ -285,12 +287,25 @@ export class Trader {
       let effectiveTradeSize = this.tradeSize;
       
       if (positionSizePct !== null) {
-        // Strategy template specifies a percentage of current balance (e.g. 0.05 for 5%, or 5 for 5%)
-        const pct = positionSizePct > 1 ? positionSizePct / 100 : positionSizePct;
-        effectiveTradeSize = this.balanceSOL * pct;
+        let normalizedPct = positionSizePct;
+        if (positionSizePct > 1) {
+          if (!this._warnedPositionSizeOverflow) {
+            console.warn(`[Trader] WARN: position_size > 1 normalized as ratio — update strategy config`);
+            this._warnedPositionSizeOverflow = true;
+          }
+          normalizedPct = positionSizePct / 100;
+        }
+        if (normalizedPct < 0 || normalizedPct > 1) {
+          console.warn(`[Trader] BUY abgelehnt: position_size out of range [0,1]: ${normalizedPct}`);
+          return null;
+        }
+        effectiveTradeSize = this.balanceSOL * normalizedPct;
       } else if (this.tradingMode === 'aggressive') {
-        // Aggressive mode uses user's "aggressiveness" slider / agent override
         effectiveTradeSize = this.balanceSOL * (this.aggressiveness / 100);
+      }
+      
+      if (this.maxAggressiveness > 0) {
+        effectiveTradeSize = Math.min(effectiveTradeSize, this.balanceSOL * (this.maxAggressiveness / 100));
       }
       
       // Balance validation: prevent trades with insufficient or negative balance
