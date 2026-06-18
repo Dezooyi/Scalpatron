@@ -12,13 +12,13 @@ Jede ADR erklÃ¤rt **das "Warum"** einer Entscheidung â€“ nicht das "Was" 
 | [0000](adr-0000-template.md) | ADR-Template & Workflow | Akzeptiert | Meta |
 | [001](adr-001-price-feed-provider.md) | Price Feed Provider | Akzeptiert | Price Feed |
 | [002](adr-002-live-wallet-key-required.md) | Live-Mode: WALLET_PRIVATE_KEY obligatorisch | Akzeptiert | Wallet |
-| [003](adr-003-sell-amount-from-onchain-balance.md) | SELL-Menge aus On-Chain-Balance ableiten | Vorgeschlagen | Trade-Code |
+| [003](adr-003-sell-amount-from-onchain-balance.md) | SELL-Menge aus On-Chain-Balance ableiten | Akzeptiert | Trade-Code |
 | [004](adr-004-normalize-position-size-unit.md) | position_size-Einheit normalisieren & cappen | Vorgeschlagen | Trade-Code |
 | [005](adr-005-scalping-asymmetry-take-profit.md) | Scalping-Asymmetrie auflÃ¶sen & Take-Profit | Vorgeschlagen | Strategie |
 | [006](adr-006-floor-zero-guard.md) | Floor=0 Guard im PatternDetector | Akzeptiert | Strategie |
-| [007](adr-007-pending-trade-persistence.md) | Pending-Trade Persistenz (Crash Recovery) | Vorgeschlagen | Trade-Code |
-| [008](adr-008-global-wallet-lock.md) | Globales Wallet-Lock Ã¼ber Live-Trader | Vorgeschlagen | Wallet |
-| [009](adr-009-preflight-and-tx-verification.md) | Preflight & Tx-Verifikation vor State-Mutation | Vorgeschlagen | Trade-Code |
+| [007](adr-007-pending-trade-persistence.md) | Pending-Trade Persistenz (Crash Recovery) | Akzeptiert | Trade-Code |
+| [008](adr-008-global-wallet-lock.md) | Globales Wallet-Lock Ã¼ber Live-Trader | Akzeptiert | Wallet |
+| [009](adr-009-preflight-and-tx-verification.md) | Preflight & Tx-Verifikation vor State-Mutation | Akzeptiert | Trade-Code |
 | [010](adr-010-stale-price-isolation.md) | Stale-Price-Isolation & Outage-Circuit-Breaker | Akzeptiert | Price Feed |
 
 > **Status-Werte:** `Vorgeschlagen` â†’ `Akzeptiert` â†’ `Veraltet` / `Ersetzt durch ADR-0XXX`
