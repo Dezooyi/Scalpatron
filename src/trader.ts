@@ -48,6 +48,7 @@ export class Trader {
   private _lastPrice = 0;
   paperMode: boolean;
   private botId: string;
+  private _warnedPositionSizeOverflow = false;
 
   private connection?: Connection;
   private keypair?: Keypair;
@@ -58,6 +59,7 @@ export class Trader {
     initialSOL?: number;
     tradeSize?: number;
     aggressiveness?: number;
+    maxAggressiveness?: number;
     tradingMode?: 'fixed' | 'aggressive';
     paperMode?: boolean;
     logFile?: string;
@@ -68,7 +70,7 @@ export class Trader {
     this.balanceSOL = opts.initialSOL ?? 10;
     this.tradeSize = opts.tradeSize ?? 1;
     this.aggressiveness = opts.aggressiveness ?? 10;
-    this.maxAggressiveness = opts.aggressiveness ?? 10;
+    this.maxAggressiveness = opts.maxAggressiveness ?? opts.aggressiveness ?? 10;
     this.tradingMode = opts.tradingMode ?? 'fixed';
     this.paperMode = opts.paperMode ?? true;
     this.targetMint = opts.targetMint ?? CONFIG.UGOR_MINT;
@@ -333,27 +335,52 @@ export class Trader {
       let effectiveTradeSize = this.tradeSize;
       
       if (positionSizePct !== null) {
-        const pct = positionSizePct > 1 ? positionSizePct / 100 : positionSizePct;
-        effectiveTradeSize = this.balanceSOL * pct;
+        let normalizedPct = positionSizePct;
+        if (positionSizePct > 1) {
+          if (!this._warnedPositionSizeOverflow) {
+            console.warn(`[Trader] WARN: position_size > 1 normalized as ratio — update strategy config`);
+            this._warnedPositionSizeOverflow = true;
+          }
+          normalizedPct = positionSizePct / 100;
+        }
+        if (normalizedPct < 0 || normalizedPct > 1) {
+          console.warn(`[Trader] BUY abgelehnt: position_size out of range [0,1]: ${normalizedPct}`);
+          return null;
+        }
+        effectiveTradeSize = this.balanceSOL * normalizedPct;
       } else if (this.tradingMode === 'aggressive') {
         effectiveTradeSize = this.balanceSOL * (this.aggressiveness / 100);
       }
-      
+
+      if (this.maxAggressiveness > 0) {
+        effectiveTradeSize = Math.min(effectiveTradeSize, this.balanceSOL * (this.maxAggressiveness / 100));
+      }
+
+      if (effectiveTradeSize <= 0) {
+        console.warn(`[Trader] BUY abgelehnt: Unzureichendes SOL (effectiveTradeSize: ${effectiveTradeSize.toFixed(4)} SOL, balance: ${this.balanceSOL.toFixed(4)} SOL)`);
+        return null;
+      }
+
+      if (effectiveTradeSize > this.balanceSOL - 0.01) {
+        console.warn(`[Trader] BUY abgelehnt: Trade-Größe (${effectiveTradeSize.toFixed(4)} SOL) exceeds available balance (${this.balanceSOL.toFixed(4)} SOL)`);
+        return null;
+      }
+
       if (!this.paperMode) {
         const pk = this.keypair!.publicKey.toBase58();
         await getWalletLock(pk).runExclusive(async () => {
           await this.syncBalances();
-          
+
           if (effectiveTradeSize <= 0) {
             throw new Error('BUY_SKIPPED');
           }
-          
+
           if (effectiveTradeSize > this.balanceSOL - 0.01) {
             throw new Error('BUY_SKIPPED');
           }
-          
+
           tradeId = insertPendingTrade(this.botId, 'BUY', result.currentPrice, effectiveTradeSize / result.currentPrice);
-          
+
           const amountLamports = Math.floor(effectiveTradeSize * 1e9);
           const swapResult = await this.executeLiveSwap(CONFIG.SOL_MINT, this.targetMint, amountLamports);
           if (!swapResult.success) {
@@ -363,7 +390,7 @@ export class Trader {
           confirmTrade(tradeId);
         });
       }
-      
+
       const ugorAmount = effectiveTradeSize / result.currentPrice;
 
       this.balanceSOL -= effectiveTradeSize;
@@ -428,8 +455,12 @@ export class Trader {
         });
       }
 
-      const pnlPercent = ((result.currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
-      const solReturn = pos.amount * result.currentPrice;
+      const pnlPercent = ((result.currentPrice - pos.entryPrice) / pos.entryPrice) * 100 - (CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT * 100);
+      let solReturn = pos.amount * result.currentPrice;
+      if (this.paperMode) {
+        const entryCost = pos.amount * pos.entryPrice;
+        solReturn -= entryCost * CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT * 2;
+      }
       this.balanceSOL += solReturn;
       this.balanceToken -= pos.amount;
       this.positions = [];

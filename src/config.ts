@@ -65,4 +65,6 @@ export const CONFIG = {
   // Ollama AI
   OLLAMA_URL: process.env.OLLAMA_URL ?? 'http://localhost:11434',
   OLLAMA_MODEL: process.env.OLLAMA_MODEL ?? 'qwen3.5:4b',
+
+  ESTIMATED_ROUNDTRIP_COST_PCT: 0.02,
 } as const;

@@ -17,22 +17,25 @@ export interface PatternResult {
 
 export interface PatternSettings {
   floorWindow: number;       // Ticks für Boden-Berechnung (default: 20)
-  spikeThreshold: number;    // % über Boden = Spike erkannt (default: 0.3)
-  sellDropThreshold: number; // % Rückgang vom Peak = Sell-Signal (default: 0.15)
-  cooldownTicks: number;     // Ticks warten nach Trade (default: 5)
+  spikeThreshold: number;    // % über Boden = Spike erkannt (default: 1.0)
+  sellDropThreshold: number; // % Rückgang vom Peak = Sell-Signal (default: 0.05)
+  cooldownTicks: number;     // Ticks warten nach Trade (default: 15)
+  takeProfitThreshold: number; // % above entry price = take-profit sell (default: 0.10)
 }
 
 export const DEFAULT_SETTINGS: PatternSettings = {
   floorWindow: 20,
-  spikeThreshold: 0.3,
-  sellDropThreshold: 0.15,
-  cooldownTicks: 5,
+  spikeThreshold: 1.0,
+  sellDropThreshold: 0.05,
+  cooldownTicks: 15,
+  takeProfitThreshold: 0.10,
 };
 
 export class PatternDetector {
   settings: PatternSettings;
   private inSpike = false;
   private peakPrice = 0;
+  private entryPrice = 0;
   private cooldown = 0;
 
   constructor(settings?: Partial<PatternSettings>) {
@@ -88,15 +91,14 @@ export class PatternDetector {
     }
 
     if (!this.inSpike) {
-      // Prüfe ob Spike beginnt
       if (spikePercent >= this.settings.spikeThreshold) {
         this.inSpike = true;
+        this.entryPrice = current.price;
         this.peakPrice = current.price;
         result.peakPrice = this.peakPrice;
         result.signal = 'BUY';
       }
     } else {
-      // Im Spike: tracke Peak
       if (current.price > this.peakPrice) {
         this.peakPrice = current.price;
       }
@@ -104,8 +106,13 @@ export class PatternDetector {
       result.peakPrice = this.peakPrice;
       result.dropFromPeak = dropFromPeak;
 
-      // Preis fällt vom Peak → Sell
-      if (dropFromPeak >= this.settings.sellDropThreshold) {
+      if (current.price >= this.entryPrice * (1 + this.settings.takeProfitThreshold)) {
+        result.signal = 'SELL';
+        result.reason = 'take_profit';
+        this.inSpike = false;
+        this.peakPrice = 0;
+        this.cooldown = this.settings.cooldownTicks;
+      } else if (dropFromPeak >= this.settings.sellDropThreshold) {
         result.signal = 'SELL';
         this.inSpike = false;
         this.peakPrice = 0;
@@ -119,6 +126,7 @@ export class PatternDetector {
   reset(): void {
     this.inSpike = false;
     this.peakPrice = 0;
+    this.entryPrice = 0;
     this.cooldown = 0;
   }
 
