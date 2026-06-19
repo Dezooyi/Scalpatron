@@ -3,6 +3,12 @@
 
 > Automatisierter Trading-Bot für Solana SPL Tokens mit Range Spike Scalping, KI-gestützter Marktanalyse und Multi-Strategy Support.
 
+## Lizenz
+
+Dieses Projekt steht unter der **Business Source License 1.1 (BSL 1.1)** — siehe [`LICENSE`](./LICENSE).
+
+Kopieren, Forken oder Weiterverwenden (auch in veränderter Form) ist **nur mit ausdrücklicher schriftlicher Genehmigung von Deniz Yilmaz** gestattet. Private Nutzung zur Evaluierung bleibt erlaubt. Ab dem **18.06.2030** wechselt die Lizenz automatisch zu **Apache 2.0**.
+
 ```
      Spike Peak (SELL)
         ╱╲

@@ -100,6 +100,37 @@ export function initDB() {
     CREATE INDEX IF NOT EXISTS idx_live_feed_mint ON live_feed(mintAddress);
     CREATE INDEX IF NOT EXISTS idx_live_feed_timestamp ON live_feed(timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_live_feed_mint_ts ON live_feed(mintAddress, timestamp DESC);
+
+    -- ADR-011: Self-Correction tables (Phase A)
+    CREATE TABLE IF NOT EXISTS trade_time_windows (
+      botId TEXT NOT NULL,
+      windowType TEXT NOT NULL CHECK (windowType IN ('hour_of_day','weekday')),
+      bucket INTEGER NOT NULL,
+      tradeCount INTEGER NOT NULL DEFAULT 0,
+      wins INTEGER NOT NULL DEFAULT 0,
+      totalPnl REAL NOT NULL DEFAULT 0,
+      lastUpdated INTEGER NOT NULL,
+      -- ADR-011 specifies a composite primary key, which is cleaner for ON CONFLICT upserts.
+      PRIMARY KEY (botId, windowType, bucket),
+      FOREIGN KEY (botId) REFERENCES bots(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_time_windows_bot ON trade_time_windows(botId);
+    CREATE INDEX IF NOT EXISTS idx_time_windows_lookup ON trade_time_windows(botId, windowType);
+
+    CREATE TABLE IF NOT EXISTS lessons_learned (
+      id TEXT PRIMARY KEY,
+      botId TEXT NOT NULL,
+      createdAt INTEGER NOT NULL,
+      category TEXT NOT NULL CHECK (category IN ('time_window','regime','strategy','param_drift','streak')),
+      lesson TEXT NOT NULL,
+      evidenceJSON TEXT, -- Renamed from 'evidence' to match ADR-011 'evidenceJSON'
+      severity REAL NOT NULL DEFAULT 0.5,
+      FOREIGN KEY (botId) REFERENCES bots(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_lessons_bot ON lessons_learned(botId, createdAt DESC);
+    CREATE INDEX IF NOT EXISTS idx_lessons_severity ON lessons_learned(botId, severity DESC);
   `);
 
   // Strategies table — stores StrategyConfig JSON (templates + user-saved)
@@ -472,29 +503,213 @@ export function loadAgentConfig(): object | null {
   try { return JSON.parse(raw); } catch { return null; }
 }
 
+// --- UI Settings Persistence ---
+const UI_SETTINGS_KEY = 'uiSettings';
+
+export interface UiSettings {
+  backgroundPulseEnabled?: boolean;
+  [key: string]: any; // Allow other UI settings
+}
+
+export function saveUiSettings(settings: UiSettings): void {
+  setSetting(UI_SETTINGS_KEY, JSON.stringify(settings));
+}
+
+export function loadUiSettings(): UiSettings | null {
+  const raw = getSetting(UI_SETTINGS_KEY, '');
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
 // --- Agent Outcome Tracking ---
 
 /**
  * When a SELL trade completes, attribute the PnL to the most recent agent_history
  * entry for this bot (the advice that was active when the BUY happened).
- */
-export function updateAgentOutcome(botId: string, pnlPercent: number, isWin: boolean): void {
+ * Also upserts time-window aggregates (ADR-011 Phase A).
+ */ 
+export function updateAgentOutcome(botId: string, pnlPercent: number, isWin: boolean, tradeTimestamp?: number): void {
   const entry = db.prepare(
     `SELECT id, outcomeTotalPnl, outcomeTradeCount, outcomeWins
      FROM agent_history WHERE botId = ? ORDER BY timestamp DESC LIMIT 1`
   ).get(botId) as { id: number; outcomeTotalPnl: number; outcomeTradeCount: number; outcomeWins: number } | undefined;
 
-  if (!entry) return;
-  db.prepare(
-    `UPDATE agent_history
-     SET outcomeTotalPnl = ?, outcomeTradeCount = ?, outcomeWins = ?
-     WHERE id = ?`
-  ).run(
-    (entry.outcomeTotalPnl ?? 0) + pnlPercent,
-    (entry.outcomeTradeCount ?? 0) + 1,
-    (entry.outcomeWins ?? 0) + (isWin ? 1 : 0),
-    entry.id,
-  );
+  if (entry) {
+    db.prepare(
+      `UPDATE agent_history
+       SET outcomeTotalPnl = ?, outcomeTradeCount = ?, outcomeWins = ?
+       WHERE id = ?`
+    ).run(
+      (entry.outcomeTotalPnl ?? 0) + pnlPercent,
+      (entry.outcomeTradeCount ?? 0) + 1,
+      (entry.outcomeWins ?? 0) + (isWin ? 1 : 0),
+      entry.id,
+    );
+  }
+
+  // ADR-011: time-window aggregation (hour_of_day, weekday) — upsert
+  upsertTimeWindow(botId, tradeTimestamp ?? Date.now(), pnlPercent, isWin);
+}
+
+/**
+ * ADR-011 Phase A: upsert a single trade outcome into the time-window aggregates.
+ * Computes hour_of_day (0..23) and weekday (0..6) buckets in UTC.
+ */
+export function upsertTimeWindow(botId: string, timestamp: number, pnlPercent: number, isWin: boolean): void {
+  const d = new Date(timestamp);
+  const hourBucket = d.getUTCHours();
+  const weekdayBucket = d.getUTCDay();
+
+  const upsert = db.prepare(`
+    INSERT INTO trade_time_windows (botId, windowType, bucket, tradeCount, wins, totalPnl, lastUpdated)
+    VALUES (?, ?, ?, 1, ?, ?, ?)
+    ON CONFLICT(botId, windowType, bucket) DO UPDATE SET
+      tradeCount = tradeCount + 1,
+      wins = wins + ?,
+      totalPnl = totalPnl + ?,
+      lastUpdated = ?
+  `);
+  const now = Date.now();
+  upsert.run(botId, 'hour_of_day', hourBucket, isWin ? 1 : 0, pnlPercent, now, isWin ? 1 : 0, pnlPercent, now);
+  upsert.run(botId, 'weekday', weekdayBucket, isWin ? 1 : 0, pnlPercent, now, isWin ? 1 : 0, pnlPercent, now);
+}
+
+export interface TimeWindowPerformance {
+  bucket: number;
+  tradeCount: number;
+  wins: number;
+  winRate: number;       // 0..100
+  avgPnl: number;        // %
+  totalPnl: number;
+}
+
+/**
+ * ADR-011 Phase A: Aggregated per-window stats.
+ * Filters buckets with tradeCount < minSampleSize (default 5) to avoid noise.
+ */
+export function getTimeWindowPerformance(
+  botId: string,
+  windowType: 'hour_of_day' | 'weekday',
+  minSampleSize = 5,
+): TimeWindowPerformance[] {
+  const rows = db.prepare(`
+    SELECT bucket, tradeCount, wins, totalPnl
+    FROM trade_time_windows
+    WHERE botId = ? AND windowType = ? AND tradeCount >= ?
+    ORDER BY (CAST(wins AS REAL) / tradeCount) DESC, tradeCount DESC
+  `).all(botId, windowType, minSampleSize) as {
+    bucket: number; tradeCount: number; wins: number; totalPnl: number;
+  }[];
+
+  return rows.map(r => ({
+    bucket: r.bucket,
+    tradeCount: r.tradeCount,
+    wins: r.wins,
+    winRate: r.tradeCount > 0 ? Math.round((r.wins / r.tradeCount) * 100) : 0,
+    avgPnl: r.tradeCount > 0 ? r.totalPnl / r.tradeCount : 0,
+    totalPnl: r.totalPnl,
+  }));
+}
+
+export interface TimeWindowDrift {
+  bucket: number;
+  windowWR: number;
+  overallWR: number;
+  delta: number;
+  sampleSize: number;
+}
+
+/**
+ * ADR-011 Phase A: drift detection.
+ * A bucket is "drifting" if |windowWR − overallWR| > driftThreshold (default 20%).
+ * Only buckets with sampleSize ≥ minSampleSize are reported.
+ */
+export function detectTimeWindowDrift(
+  botId: string,
+  windowType: 'hour_of_day' | 'weekday',
+  driftThreshold = 20,
+  minSampleSize = 5,
+): TimeWindowDrift[] {
+  const overall = db.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN pnlPercent > 0 THEN 1 ELSE 0 END) as wins
+    FROM trades
+    WHERE botId = ? AND status = 'CONFIRMED' AND pnlPercent IS NOT NULL
+      AND action = 'SELL'
+  `).get(botId) as { total: number; wins: number };
+
+  const overallWR = overall.total > 0 ? (overall.wins / overall.total) * 100 : 0;
+
+  const buckets = db.prepare(`
+    SELECT bucket, tradeCount, wins
+    FROM trade_time_windows
+    WHERE botId = ? AND windowType = ? AND tradeCount >= ?
+  `).all(botId, windowType, minSampleSize) as {
+    bucket: number; tradeCount: number; wins: number;
+  }[];
+
+  const drifts: TimeWindowDrift[] = [];
+  for (const b of buckets) {
+    const windowWR = (b.wins / b.tradeCount) * 100;
+    const delta = windowWR - overallWR;
+    if (Math.abs(delta) > driftThreshold) {
+      drifts.push({
+        bucket: b.bucket,
+        windowWR: Math.round(windowWR),
+        overallWR: Math.round(overallWR),
+        delta: Math.round(delta),
+        sampleSize: b.tradeCount,
+      });
+    }
+  }
+  // Worst drift first
+  drifts.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  return drifts;
+}
+
+export interface LessonEntry {
+  id: number;
+  botId: string;
+  createdAt: number;
+  category: 'time_window' | 'regime' | 'strategy' | 'param_drift' | 'streak';
+  lesson: string; 
+  evidenceJSON: string | null; // JSON object with data supporting the lesson
+  severity: number;
+}
+
+import { randomUUID } from 'crypto';
+
+export function insertLesson(
+  botId: string,
+  category: LessonEntry['category'],
+  lesson: string,
+  evidence: object | null = null,
+  severity = 0.5,
+): string {
+  const result = db.prepare(`
+    INSERT INTO lessons_learned (id, botId, createdAt, category, lesson, evidenceJSON, severity)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(randomUUID(), botId, Date.now(), category, lesson, evidence ? JSON.stringify(evidence) : null, severity);
+  return (result.lastInsertRowid as number).toString(); // Note: lastInsertRowid is for INTEGER PKs, but this is for confirmation. The actual ID is the UUID.
+}
+
+export function getLessonsForBot(botId: string, limit = 5, lookbackDays = 7): LessonEntry[] {
+  const since = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
+  const rows = db.prepare(`
+    SELECT id, botId, createdAt, category, lesson, evidenceJSON, severity
+    FROM lessons_learned
+    WHERE botId = ? AND createdAt >= ?
+    ORDER BY severity DESC, createdAt DESC
+    LIMIT ?
+  `).all(botId, since, limit) as LessonEntry[];
+
+  return rows as LessonEntry[];
+}
+
+export function countLessonsForBot(botId: string, lookbackDays = 7): number {
+  const since = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
+  return (db.prepare(`SELECT COUNT(*) as c FROM lessons_learned WHERE botId = ? AND createdAt >= ?`).get(botId, since) as { c: number }).c;
 }
 
 export interface RegimePerformance {
@@ -560,8 +775,6 @@ export function getBotStrategyId(botId: string): string | null {
 }
 
 // --- Strategy CRUD ---
-
-import { randomUUID } from 'crypto';
 
 export function saveStrategy(config: StrategyConfig, isTemplate = false): string {
   const id = config.id ?? randomUUID();

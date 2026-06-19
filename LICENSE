@@ -1,0 +1,28 @@
+Business Source License 1.1
+
+Licensor:  Deniz Yilmaz
+Licensed Work:  Scalpatron (this repository, including all source code,
+                configuration, documentation and accompanying materials)
+Change Date:  2030-06-18
+Change License:  Apache License, Version 2.0
+
+Additional Use Grant:
+  You may use, copy and modify the Licensed Work for personal,
+  non-commercial purposes and for the purpose of evaluating the
+  Licensed Work, provided that you do not use the Licensed Work
+  for any commercial purpose, including but not limited to:
+    - operating the Licensed Work, or any modified version of it,
+      as a hosted or managed service offered to third parties;
+    - distributing, sublicensing or reselling the Licensed Work,
+      or any modified version of it, to third parties;
+    - using the Licensed Work, or any modified version of it, to
+      trade on any public blockchain network on behalf of or for
+      the benefit of third parties;
+    - creating a competing product or service that is substantially
+      based on the Licensed Work.
+
+  Any other use requires a separate written commercial licence
+  agreement with the Licensor.
+
+For full terms of the Business Source License 1.1, see:
+https://mariadb.com/bsl11/

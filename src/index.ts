@@ -60,6 +60,8 @@ const savedAgentConfig = (() => {
 const agent = new OllamaAgent(savedAgentConfig);
 agent.connect(botManager, (botId, advice) => {
   server.broadcast('agent_advice', { botId, advice });
+}, (eventName, data) => {
+  server.broadcast(eventName, data);
 });
 agent.isAvailable().then(ok => {
   if (ok) {

@@ -82,13 +82,12 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
     if (priceHistory.length > prevPriceHistoryLength.current && prevPriceHistoryLength.current > 0) {
       // New tick started: Reset and re-run progress bar
       gsap.killTweensOf(progressbarRef.current);
-      gsap.set(progressbarRef.current, { width: "0%" });
-      
+      gsap.set(progressbarRef.current, { scaleX: 0 });
+
       gsap.to(progressbarRef.current, {
-        width: "100%",
+        scaleX: 1,
         duration: tickDuration / 1000,
         ease: "linear",
-        force3D: true,
         overwrite: true,
       });
 
@@ -106,7 +105,6 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
             duration: 0.4,
             stagger: 0.05,
             ease: "back.out(1.4)",
-            force3D: true,
             overwrite: true,
           }
         );
@@ -114,10 +112,9 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
     } else if (priceHistory.length > 0 && prevPriceHistoryLength.current === 0) {
       // Initial load: Start progress bar
       gsap.to(progressbarRef.current, {
-        width: "100%",
+        scaleX: 1,
         duration: tickDuration / 1000,
         ease: "linear",
-        force3D: true,
         overwrite: true,
       });
     }
@@ -152,7 +149,7 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
       <div className="relative flex-1 min-h-0 bg-muted/20 rounded-lg overflow-hidden shadow-inner border border-primary/10 w-full">
         {/* Zone Background Layers - Moved to zIndex 5 (Foreground) */}
         <div 
-          className="absolute left-0 right-0 bg-emerald-500/5 border-b border-emerald-500/20 transition-all duration-300 cursor-help"
+          className="absolute left-0 right-0 bg-emerald-500/5 border-b border-emerald-500/20 transition-[bottom,height] duration-300 cursor-help"
           style={{ 
             bottom: `${thresholdPercent}%`,
             height: `${Math.max(0, 100 - thresholdPercent)}%`,
@@ -166,7 +163,7 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
           onMouseLeave={() => tooltip.hide()}
         />
         <div 
-          className="absolute left-0 right-0 bg-amber-500/5 border-b border-amber-500/20 transition-all duration-300 cursor-help"
+          className="absolute left-0 right-0 bg-amber-500/5 border-b border-amber-500/20 transition-[bottom,height] duration-300 cursor-help"
           style={{ 
             bottom: `${floorPercent}%`,
             height: `${Math.max(0, thresholdPercent - floorPercent)}%`,
@@ -180,7 +177,7 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
           onMouseLeave={() => tooltip.hide()}
         />
         <div 
-          className="absolute left-0 right-0 bg-rose-500/5 border-b border-rose-500/20 transition-all duration-300 cursor-help"
+          className="absolute left-0 right-0 bg-rose-500/5 border-b border-rose-500/20 transition-[bottom,height] duration-300 cursor-help"
           style={{ 
             bottom: `${sellDropPercent}%`,
             height: `${Math.max(0, floorPercent - sellDropPercent)}%`,
@@ -281,7 +278,7 @@ export function ScannerPulse({ bot, tickDuration = 2000, className }: ScannerPul
         <div 
           ref={progressbarRef}
           className="absolute bottom-0 left-0 h-1 bg-gradient-to-r from-cyan-500/80 via-cyan-400/60 to-cyan-300/40 rounded-b-sm"
-          style={{ width: "0%", zIndex: 30 }}
+          style={{ width: "100%", transform: "scaleX(0)", transformOrigin: "left center", zIndex: 30 }}
         />
       </div>
 

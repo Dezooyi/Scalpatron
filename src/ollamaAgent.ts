@@ -20,8 +20,15 @@ import {
   saveAgentConfig,
   loadAgentConfig,
   getLiveFeedEntries,
+  getTimeWindowPerformance,
+  detectTimeWindowDrift,
+  getLessonsForBot,
+  type TimeWindowPerformance,
+  type TimeWindowDrift,
+  type LessonEntry,
   db,
 } from './db.js';
+import { generateLessons } from './lessonsGenerator.js';
 import { PriceFeed } from './priceFeed.js';
 
 // --- Types ---
@@ -82,6 +89,11 @@ export interface OllamaAdvice {
     scalping_settings?: Partial<PatternSettings>;
     risk_management?: { position_size?: number };
     entry_condition_hints?: string;
+  };
+  strategySwitch?: {              // ADR-011 Phase B: optional strategy-type switch
+    fromStrategyType: string;
+    toStrategyType: string;
+    reason: string;
   };
 }
 
@@ -214,14 +226,22 @@ export const COMMON_SYSTEM_PROMPT_HEADER = `You are a professional trading analy
 
 TASK:
 Analyze the market data and recommend optimized parameters for the NEXT cycle.
-Consider historical regime performance and the outcomes of previous recommendations.
+Consider historical regime performance, time-window performance, drift alerts,
+lessons learned, and the outcomes of previous recommendations.
+
+REFLECTION STEP (mandatory before JSON output):
+1. Look at YOUR PREVIOUS RECOMMENDATION in the "RECENT ANALYSES + OUTCOMES" block.
+2. Look at its OUTCOME (PnL, WR, n).
+3. Look at "TIME-WINDOW PERFORMANCE" and "LESSONS LEARNED" — these are recurring patterns.
+4. State one sentence inside "analysis": "I am correcting X because Y" or "I am keeping X because Y".
+5. Then output the JSON.
 
 Answer ONLY with valid JSON in this format (no Markdown blocks):
 {
   "regime": "RANGING|TRENDING|DEAD|VOLATILE",
   "confidence": 0.0-1.0,
   "reason": "short explanation (max 120 chars)",
-  "analysis": "detailed analysis 2-3 sentences",
+  "analysis": "detailed analysis 2-3 sentences, MUST start with reflection sentence",
   "aggressiveness": 10,
   "settings": {
     "spikeThreshold": number,
@@ -233,8 +253,17 @@ Answer ONLY with valid JSON in this format (no Markdown blocks):
     "indicators": [ { "type": "NAME", "period": number } ],
     "risk_management": { "position_size": number, "max_positions": number },
     "entry_condition_hints": "optional free-text hint"
+  },
+  "strategySwitch": {
+    "fromStrategyType": "scalping",
+    "toStrategyType": "momentum",
+    "reason": "scalping WR 28% in VOLATILE over 30 trades"
   }
 }
+
+"strategySwitch" is OPTIONAL. Only include it if the bot's current strategy type
+is consistently underperforming and a different type is clearly better supported by
+the data. Do not switch lightly; switching resets warmup and indicator state.
 
 REGIME CLASSIFICATION:
 - RANGING: Price moves in a tight range, no clear direction
@@ -358,6 +387,7 @@ export class OllamaAgent {
 
   private botManager: BotManager | null = null;
   private onAdvice: ((botId: string, advice: OllamaAdvice) => void) | null = null;
+  private broadcast: ((eventName: string, data: any) => void) | null = null;
 
   private adviceHistory: OllamaAdvice[] = [];
   private maxHistoryLength = 100;
@@ -386,9 +416,11 @@ export class OllamaAgent {
   connect(
     botManager: BotManager,
     onAdvice: (botId: string, advice: OllamaAdvice) => void,
+    broadcast?: (eventName: string, data: any) => void,
   ): void {
     this.botManager = botManager;
     this.onAdvice = onAdvice;
+    this.broadcast = broadcast ?? null;
   }
 
   start(): void {
@@ -557,6 +589,24 @@ export class OllamaAgent {
 
     const recentPrices = allHistory.filter((p: PricePoint) => p.timestamp >= cutoff);
 
+    // ADR-011 Phase D: generate new lessons first (broadcast via SSE), then fetch
+    // the full current set (existing + new) for prompt and bonus-confidence check.
+    let lessons: LessonEntry[] = [];
+    try {
+      const newLessons = generateLessons(state.id);
+      if (newLessons.length > 0) {
+        console.log(`[OllamaAgent] Generated ${newLessons.length} new lessons for Bot ${state.name}`);
+        for (const lesson of newLessons) {
+          this.broadcast?.('agent_lesson', { type: 'agent_lesson', botId: state.id, lesson });
+        }
+      }
+      const maxLessons = parseInt(process.env.AI_LESSONS_MAX_PER_BOT ?? '5', 10);
+      const lookbackDays = parseInt(process.env.AI_LESSONS_LOOKBACK_DAYS ?? '7', 10);
+      lessons = getLessonsForBot(state.id, maxLessons, lookbackDays);
+    } catch (err) {
+      console.warn(`[OllamaAgent] Lessons-Generator Fehler: ${(err as Error).message}`);
+    }
+
     if (recentPrices.length < 10) {
       const msg = `Skipped: Not enough data (${recentPrices.length}/10)`;
       console.log(`[OllamaAgent] Bot ${state.name}: ${msg}`);
@@ -599,6 +649,14 @@ export class OllamaAgent {
     const regimePerf = getRegimePerformance(state.id);
     const recentAdvices = getRecentAdvicesWithOutcomes(state.id, 5);
 
+    // ADR-011 Phase A: time-window + drift for prompt
+    const minSamples = parseInt(process.env.AI_TIMEWINDOW_MIN_SAMPLES ?? '5', 10);
+    const driftThreshold = parseInt(process.env.AI_DRIFT_THRESHOLD_PCT ?? '20', 10);
+    const hourPerf: TimeWindowPerformance[] = getTimeWindowPerformance(state.id, 'hour_of_day', minSamples);
+    const dayPerf: TimeWindowPerformance[] = getTimeWindowPerformance(state.id, 'weekday', minSamples);
+    const hourDrift: TimeWindowDrift[] = detectTimeWindowDrift(state.id, 'hour_of_day', driftThreshold, minSamples);
+    const dayDrift: TimeWindowDrift[] = detectTimeWindowDrift(state.id, 'weekday', driftThreshold, minSamples);
+
     // Open position state for the prompt
     let openPositionBlock: string | undefined;
     try {
@@ -635,6 +693,7 @@ export class OllamaAgent {
       state,
       botTokenMint,
       openPositionBlock,
+      { hourPerf, dayPerf, hourDrift, dayDrift, lessons },
     );
 
     const activeStrategyType = (state as any).strategyType ?? 'scalping';
@@ -652,7 +711,7 @@ export class OllamaAgent {
       throw err;
     }
 
-    const advice = this.parseResponse(response, settings);
+    const advice = this.parseResponse(response, settings, lessons);
 
     if (!advice) {
       logger.warn(state.id, 'AI_AGENT', "Analysis failed: No valid JSON received.");
@@ -699,6 +758,24 @@ export class OllamaAgent {
       if (advice.strategyAdjustments) {
         bot.applyStrategyAdjustments(advice.strategyAdjustments);
       }
+      // ADR-011 Phase B: strategy switch with safety gate
+      if (advice.strategySwitch) {
+        const sw = advice.strategySwitch;
+        const allowAuto = (process.env.AI_ALLOW_STRATEGY_SWITCH ?? '0') === '1';
+        const minConf = parseFloat(process.env.AI_MIN_SWITCH_CONFIDENCE ?? '0.7');
+        if (!allowAuto) {
+          console.log(`[OllamaAgent] Strategy-Switch vorgeschlagen (${sw.fromStrategyType} → ${sw.toStrategyType}), aber AI_ALLOW_STRATEGY_SWITCH=0. UI-Confirmation erforderlich.`);
+          logger.info(state.id, 'AI_AGENT', `Strategy switch proposed but disabled (${sw.fromStrategyType} → ${sw.toStrategyType}). UI confirmation required.`);
+        } else if (advice.confidence < minConf) {
+          console.log(`[OllamaAgent] Strategy-Switch blockiert: confidence ${(advice.confidence * 100).toFixed(0)}% < MIN_SWITCH_CONFIDENCE ${(minConf * 100).toFixed(0)}%`);
+          logger.info(state.id, 'AI_AGENT', `Strategy switch blocked: confidence below threshold.`);
+        } else {
+          const result = await bot.applyStrategySwitch(sw.toStrategyType, sw.reason);
+          if (result) {
+            this.broadcast?.('state', this.botManager?.getAllStates());
+          }
+        }
+      }
       console.log(`[OllamaAgent] Bot ${state.name} aktualisiert. Regime=${advice.regime}, Conf=${(advice.confidence * 100).toFixed(0)}%, Aggr=${advice.aggressiveness ?? '-'}%`);
       logger.action(state.id, 'AI_AGENT', `AI Updated! Regime: ${advice.regime}, Grund: ${advice.reason}`);
     } else {
@@ -719,6 +796,13 @@ export class OllamaAgent {
     state: BotState,
     tokenMint?: string,
     openPositionBlock?: string,
+    extra?: {
+      hourPerf: TimeWindowPerformance[];
+      dayPerf: TimeWindowPerformance[];
+      hourDrift: TimeWindowDrift[];
+      dayDrift: TimeWindowDrift[];
+      lessons: LessonEntry[];
+    },
   ): Promise<string> {
     // ASCII sparkline replaces verbose raw price samples (~310 token savings)
     const priceValues = recentPrices.map(p => p.price);
@@ -736,10 +820,12 @@ export class OllamaAgent {
     if (sells.length >= 2) {
       const sellPnls = sells.map(t => t.pnlPercent ?? 0);
       const winPnls = sellPnls.filter(p => p > 0);
-      const lossPnls = sellPnls.filter(p => p <= 0);
-      const avgWin = winPnls.length > 0 ? winPnls.reduce((a, b) => a + b, 0) / winPnls.length : 0;
-      const avgLoss = lossPnls.length > 0 ? Math.abs(lossPnls.reduce((a, b) => a + b, 0) / lossPnls.length) : 0;
-      const profitFactor = avgLoss > 0 ? (avgWin / avgLoss).toFixed(2) : '∞';
+      const lossPnls = sellPnls.filter(p => p < 0);
+      const sumWin = winPnls.reduce((a, b) => a + b, 0);
+      const sumLoss = Math.abs(lossPnls.reduce((a, b) => a + b, 0));
+      const avgWin = winPnls.length > 0 ? sumWin / winPnls.length : 0;
+      const avgLoss = lossPnls.length > 0 ? sumLoss / lossPnls.length : 0;
+      const profitFactor = sumLoss > 0 ? (sumWin / sumLoss).toFixed(2) : '∞';
       let maxConsecWins = 0, maxConsecLosses = 0, curW = 0, curL = 0;
       for (const p of sellPnls) {
         if (p > 0) { curW++; curL = 0; maxConsecWins = Math.max(maxConsecWins, curW); }
@@ -777,6 +863,47 @@ export class OllamaAgent {
           : 'no trade outcome';
         return `- ${dt} | ${a.regime} conf:${(a.confidence * 100).toFixed(0)}% aggr:${a.aggressivenessAdvice ?? '-'}% → ${outcome}`;
       }).join('\n');
+    }
+
+    // ADR-011 Phase C: time-window + drift + lessons blocks
+    const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const topHours = (extra?.hourPerf ?? []).slice(0, 5);
+    const topDays = (extra?.dayPerf ?? []).slice(0, 5);
+    const driftAlerts = [...(extra?.hourDrift ?? []), ...(extra?.dayDrift ?? [])].slice(0, 3);
+
+    let timeWindowBlock = 'No time-window data (need ≥ min-sample trades per bucket).';
+    if (topHours.length > 0 || topDays.length > 0) {
+      const lines: string[] = [];
+      if (topHours.length > 0) {
+        lines.push('Hours (UTC):');
+        for (const h of topHours) {
+          lines.push(`- ${String(h.bucket).padStart(2, '0')}:00: WR ${h.winRate}% (n=${h.tradeCount}, avg PnL ${h.avgPnl.toFixed(2)}%)`);
+        }
+      }
+      if (topDays.length > 0) {
+        lines.push('Weekdays (UTC):');
+        for (const d of topDays) {
+          const name = WEEKDAY_NAMES[d.bucket] ?? `d${d.bucket}`;
+          lines.push(`- ${name}: WR ${d.winRate}% (n=${d.tradeCount}, avg PnL ${d.avgPnl.toFixed(2)}%)`);
+        }
+      }
+      timeWindowBlock = lines.join('\n');
+    }
+
+    let driftBlock = 'No drift alerts.';
+    if (driftAlerts.length > 0) {
+      driftBlock = driftAlerts.map(d => {
+        const tag = d.sampleSize >= 20 ? 'CRITICAL' : 'WARN';
+        const dir = d.delta > 0 ? 'outperforming' : 'underperforming';
+        return `- [${tag}] bucket ${d.bucket}: ${d.windowWR}% vs bot overall ${d.overallWR}% (Δ ${d.delta > 0 ? '+' : ''}${d.delta}%, n=${d.sampleSize}) — ${dir}`;
+      }).join('\n');
+    }
+
+    let lessonsBlock = 'No specific lessons yet.';
+    if ((extra?.lessons ?? []).length > 0) {
+      lessonsBlock = (extra?.lessons ?? []).map((l, idx) =>
+        `${idx + 1}. [${l.category}] ${l.lesson}`
+      ).join('\n');
     }
 
     const strategyInfo = state.strategyType
@@ -905,6 +1032,15 @@ ${tradesBlock}
 
 REGIME PERFORMANCE (historical):
 ${regimePerfBlock}
+
+TIME-WINDOW PERFORMANCE (per-hour / per-weekday buckets):
+${timeWindowBlock}
+
+DRIFT ALERTS (bucket WR vs bot overall):
+${driftBlock}
+
+LESSONS LEARNED (recurring patterns):
+${lessonsBlock}
 
 RECENT ANALYSES + OUTCOMES:
 ${recentAdvicesBlock}
@@ -1079,7 +1215,7 @@ ${formatCandleRows(m15Candles, 5)}`;
     return data.message.content;
   }
 
-  private parseResponse(raw: string, currentSettings: PatternSettings): OllamaAdvice | null {
+  private parseResponse(raw: string, currentSettings: PatternSettings, lessons: LessonEntry[] = []): OllamaAdvice | null {
     try {
       const jsonMatch = raw.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
@@ -1100,12 +1236,17 @@ ${formatCandleRows(m15Candles, 5)}`;
           risk_management?: { position_size?: number };
           entry_condition_hints?: string;
         };
+        strategySwitch?: {
+          fromStrategyType?: string;
+          toStrategyType?: string;
+          reason?: string;
+        };
       };
 
       const regime = (['RANGING', 'TRENDING', 'DEAD', 'VOLATILE'].includes(parsed.regime ?? ''))
         ? parsed.regime as OllamaAdvice['regime']
         : 'RANGING';
-      const confidence = Math.max(0, Math.min(1, parsed.confidence ?? 0.5));
+      let confidence = Math.max(0, Math.min(1, parsed.confidence ?? 0.5));
 
       const newSettings: Partial<PatternSettings> = {};
       const s = parsed.settings;
@@ -1141,6 +1282,32 @@ ${formatCandleRows(m15Candles, 5)}`;
 
       const strategyAdjustments = parsed.strategyAdjustments;
 
+      // ADR-011 Phase B: optional strategy switch
+      let strategySwitch: OllamaAdvice['strategySwitch'] | undefined;
+      const sw = parsed.strategySwitch;
+      if (sw && typeof sw.toStrategyType === 'string' && sw.toStrategyType.length > 0) {
+        strategySwitch = {
+          fromStrategyType: sw.fromStrategyType ?? 'unknown',
+          toStrategyType: sw.toStrategyType,
+          reason: sw.reason ?? 'no reason provided',
+        };
+      }
+
+      // ADR-011 Phase D: Bonus-Confidence when reason/analysis cites a known lesson.
+      const bonusEnv = parseFloat(process.env.AI_REFLECTION_BONUS_CONFIDENCE ?? '0.1');
+      const bonus = Number.isFinite(bonusEnv) ? bonusEnv : 0.1;
+      const reflectionText = `${parsed.reason ?? ''} ${parsed.analysis ?? ''}`.toLowerCase();
+      if (bonus > 0 && lessons.length > 0 && reflectionText.length > 0) {
+        const cited = lessons.some(l => {
+          // Substring match on first 6 normalized words of the lesson
+          const head = l.lesson.toLowerCase().split(/\s+/).slice(0, 6).join(' ');
+          return head.length >= 6 && reflectionText.includes(head);
+        });
+        if (cited) {
+          confidence = Math.min(1, confidence + bonus);
+        }
+      }
+
       return {
         adjustedSettings: changedSettings,
         previousSettings,
@@ -1151,6 +1318,7 @@ ${formatCandleRows(m15Candles, 5)}`;
         timestamp: Date.now(),
         aggressiveness,
         strategyAdjustments,
+        strategySwitch,
       };
     } catch (err) {
       console.warn('[OllamaAgent] JSON Parse Fehler:', (err as Error).message);

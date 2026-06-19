@@ -164,6 +164,7 @@ export class Trader {
       totalInvested += p.amount * p.entryPrice;
       totalAmount += p.amount;
     }
+    if (totalAmount <= 0) return null;
     return {
       entryPrice: totalInvested / totalAmount,
       entryTime,
@@ -430,21 +431,28 @@ export class Trader {
   }
 
   private async sell(result: PatternResult, settings: Record<string, number>): Promise<TradeLogEntry | null> {
-    const pos = this.getAggregatedPosition()!;
+    const pos = this.getAggregatedPosition();
+    if (!pos) return null;
     this.isSwapping = true;
     let tradeId: number | null = null;
+    let sellAmount = pos.amount;
     try {
       if (!this.paperMode) {
         const pk = this.keypair!.publicKey.toBase58();
         await getWalletLock(pk).runExclusive(async () => {
           await this.syncBalances();
-          
+
           if (this.balanceToken <= 0) {
             throw new Error('SELL_SKIPPED');
           }
-          
-          tradeId = insertPendingTrade(this.botId, 'SELL', result.currentPrice, pos.amount, null, this.paperMode);
-          
+
+          if (this.balanceToken < pos.amount * 0.99) {
+            console.warn(`[Trader] Sell amount mismatch: tracked=${pos.amount.toFixed(6)}, wallet=${this.balanceToken.toFixed(6)} — using wallet balance`);
+            sellAmount = this.balanceToken;
+          }
+
+          tradeId = insertPendingTrade(this.botId, 'SELL', result.currentPrice, sellAmount, null, this.paperMode);
+
           const amountLamports = Math.floor(this.balanceToken * Math.pow(10, this.targetDecimals));
           const swapResult = await this.executeLiveSwap(this.targetMint, CONFIG.SOL_MINT, amountLamports);
           if (!swapResult.success) {
@@ -456,13 +464,13 @@ export class Trader {
       }
 
       const pnlPercent = ((result.currentPrice - pos.entryPrice) / pos.entryPrice) * 100 - (CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT * 100);
-      let solReturn = pos.amount * result.currentPrice;
+      let solReturn = sellAmount * result.currentPrice;
       if (this.paperMode) {
-        const entryCost = pos.amount * pos.entryPrice;
-        solReturn -= entryCost * CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT * 2;
+        const entryCost = sellAmount * pos.entryPrice;
+        solReturn -= entryCost * CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT;
       }
       this.balanceSOL += solReturn;
-      this.balanceToken -= pos.amount;
+      this.balanceToken -= sellAmount;
       this.positions = [];
       this.totalTrades++;
       this.totalPnlPercent += pnlPercent;
@@ -476,7 +484,7 @@ export class Trader {
         floor: result.floor,
         spikePercent: result.spikePercent,
         peakPrice: result.peakPrice,
-        amount: pos.amount,
+        amount: sellAmount,
         pnlPercent,
         settings,
       };

@@ -15,19 +15,29 @@ import gsap from "gsap";
 
 // GSAP mit erweiterten Methoden für Lag-Smoothing
 const gsapWithLag = gsap as typeof gsap & {
-  lagSmoothing?: (threshold: number) => void;
+  lagSmoothing?: (threshold: number, adjustedThreshold?: number) => void;
 };
 
 // Konfiguriere GSAP für optimale Background-Tab Performance
 export function configureGSAP(): void {
-  // Deaktiviere Lag-Smoothing (Catch-Up für verpasste Frames)
-  // 0 = keine Kompensation, Animationen laufen normal weiter
+  // Lag-Smoothing mit Threshold: verhindert massives Catch-Up nach Backgrounding,
+  // springt aber bei kurzen Aussetzern (GC, Main-Thread Spike) nicht direkt zum End-State.
+  // 500ms Threshold, 33ms adjusted ≈ 2 Frames Catch-Up max.
   if (typeof gsapWithLag.lagSmoothing === "function") {
-    gsapWithLag.lagSmoothing(0);
+    gsapWithLag.lagSmoothing(500, 33);
   }
 
   // Setze feste Frame-Rate für konsistente Performance
   gsap.ticker.fps(60);
+
+  // Ticker pausiert automatisch, wenn keine sichtbaren Tweens laufen
+  // (spart CPU auf inaktiven Tabs / wenn Dashboard offen aber keine Trades)
+  const tickerWithLagSleep = gsap.ticker as typeof gsap.ticker & {
+    lagSleep?: (enable: boolean) => void;
+  };
+  if (typeof tickerWithLagSleep.lagSleep === "function") {
+    tickerWithLagSleep.lagSleep(true);
+  }
 
   console.log("[GSAP] Configured for background tab optimization");
 }
@@ -95,8 +105,7 @@ export function safeTo(
 ): gsap.core.Tween {
   return gsap.to(target, {
     ...vars,
-    overwrite: true, // Überschreibt existierende Animationen
-    force3D: true,   // GPU-Beschleunigung
+    overwrite: true,
   });
 }
 
@@ -111,9 +120,27 @@ export function safeFromTo(
   return gsap.fromTo(target, fromVars, {
     ...toVars,
     overwrite: true,
-    force3D: true,
   });
 }
 
 // Typ-Exporte
 export type { gsap };
+
+/**
+ * Responsive Animation-Setup mit prefers-reduced-motion Support.
+ * Wrapper um gsap.matchMedia(): Animationen werden automatisch revertiert wenn
+ * sich Media-Query-Status ändert. Reduzierte Nutzer bekommen gar keine Tweens.
+ *
+ * Verwendung:
+ *   useEffect(() => {
+ *     const mm = createResponsiveMM();
+ *     mm.add({ reduceMotion: "(prefers-reduced-motion: reduce)" }, (ctx) => {
+ *       const { reduceMotion } = ctx.conditions as { reduceMotion: boolean };
+ *       gsap.to(el, { x: 100, duration: reduceMotion ? 0 : 0.4 });
+ *     });
+ *     return () => mm.revert();
+ *   }, []);
+ */
+export function createResponsiveMM(): gsap.MatchMedia {
+  return gsap.matchMedia();
+}

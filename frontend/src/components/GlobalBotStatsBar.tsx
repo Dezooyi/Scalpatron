@@ -223,19 +223,12 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
                   )}
                   <span className="text-[8px] font-bold uppercase tracking-widest whitespace-nowrap opacity-70">Trend {trendLabels[selectedTrendTimeframe]}</span>
                 </div>
-                <div className="flex items-center">
+                <div className="flex items-center gap-1.5">
                   <span className={`text-[8px] font-bold uppercase tracking-wider ${trendBuckets[selectedTrendTimeframe] >= 0 ? "text-emerald-400" : "text-red-400"}`}>TOTAL PNL</span>
+                  <span className={`text-base font-black tabular-nums tracking-tight ${trendBuckets[selectedTrendTimeframe] >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {trendBuckets[selectedTrendTimeframe] > 0 ? '+' : ''}{trendBuckets[selectedTrendTimeframe].toFixed(2)}%
+                  </span>
                 </div>
-              </div>
-
-              {/* Subtle Divider */}
-              <div className="w-px h-6 bg-zinc-300/50 dark:bg-white/10 mx-1 relative z-10" />
-
-              {/* Right side: Value */}
-              <div className="flex flex-col justify-center items-end relative z-10">
-                <span className={`text-sm font-black tabular-nums tracking-tighter ${trendBuckets[selectedTrendTimeframe] >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  {trendBuckets[selectedTrendTimeframe] > 0 ? '+' : ''}{trendBuckets[selectedTrendTimeframe].toFixed(2)}%
-                </span>
               </div>
             </button>
           </PopoverTrigger>

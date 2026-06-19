@@ -9,6 +9,7 @@ import {
 } from "@/lib/animationConfig";
 import { configureGSAP } from "@/lib/gsapConfig";
 import { useAnimationVisibility } from "@/hooks/useAnimationVisibility";
+import { useAtTop } from "@/hooks/useAtTop";
 import {
   Play,
   Square,
@@ -35,6 +36,7 @@ import {
   ArrowDown,
   Puzzle,
   Check,
+  Wand2,
 } from "lucide-react";
 import {
   XAxis,
@@ -47,6 +49,8 @@ import {
 } from "recharts";
 import Documentation from "@/components/Documentation";
 import GlobalSettings from "@/components/GlobalSettings";
+import { SelfCorrectionInsightsTab } from "@/components/tabs/SelfCorrectionInsightsTab";
+import { AdvisorTab, type AdvisorSuggestion } from "@/components/tabs/AdvisorTab";
 import { LogFeedList } from "@/components/LogFeedList";
 import type { LogFeedRowData, BadgeVariant } from "@/components/LogFeedList";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -340,7 +344,8 @@ export default function App() {
   
   // Hook for managing animations based on tab visibility
   useAnimationVisibility();
-  
+  const isAtTop = useAtTop();
+
   const [bots, setBots] = useState<BotState[]>([]);
   const [activeTab, setActiveTab] = useState("dashboard");
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
@@ -411,6 +416,7 @@ export default function App() {
   const [newBotTradeSize, setNewBotTradeSize] = useState(1);
   const [newBotAggressiveness, setNewBotAggressiveness] = useState(10);
   const [isCreateBotDialogOpen, setIsCreateBotDialogOpen] = useState(false);
+  const [pendingAdvisorToken, setPendingAdvisorToken] = useState<{ name: string; symbol: string; priceUsd?: number; volume24h?: number; liquidity?: number } | null>(null);
 
   // Global Settings (cached for CreateBot dialog defaults)
   const [globalSettings, setGlobalSettings] = useState({ initialSOL: 10, tradeSize: 1, paperMode: true });
@@ -421,7 +427,9 @@ export default function App() {
   const [botSettingsSaveStatus, setBotSettingsSaveStatus] = useState<"idle" | "saved" | "error">("idle");
   const [tradeFlash, setTradeFlash] = useState<Record<string, "buy" | "sell" | null>>({});
   const [aiFlash, setAiFlash] = useState<Record<string, boolean>>({});
+  const aiFlashTimeoutRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const prevTradeCountRef = useRef<Record<string, number>>({});
+  const lastTickPulseRef = useRef<number>(0);
 
   // Throttling refs for SSE updates to prevent excessive re-renders
   const sseThrottleRef = useRef<Record<string, number>>({});
@@ -515,9 +523,12 @@ export default function App() {
       setServerStatus("connected");
       setIsConnecting(false);
     };
+    // Close immediately on error — prevents the browser's built-in reconnect loop from
+    // accumulating open HTTP connections and listener callbacks in memory.
     sse.onerror = () => {
       setServerStatus("disconnected");
       setIsConnecting(false);
+      sse.close();
     };
 
     // Throttled bot state update - batches rapid SSE updates to prevent excessive re-renders
@@ -537,13 +548,16 @@ export default function App() {
         });
       }
 
-      // Preserve priceHistory from current state when updating via SSE
+      // Preserve priceHistory from current state when updating via SSE (cap at 500 to prevent unbounded growth)
       setBots(prevBots => {
         const priceHistoryMap = new Map(prevBots.map(b => [b.id, b.priceHistory || []]));
-        const updatedWithHistory = orderedData.map(bot => ({
-          ...bot,
-          priceHistory: priceHistoryMap.get(bot.id) || []
-        }));
+        const updatedWithHistory = orderedData.map(bot => {
+          const hist = priceHistoryMap.get(bot.id) || [];
+          return {
+            ...bot,
+            priceHistory: hist.length > 500 ? hist.slice(-500) : hist
+          };
+        });
         
         if (now - lastUpdate >= minInterval) {
           // Immediate update if throttle interval has passed
@@ -605,7 +619,12 @@ export default function App() {
         // unabhängig davon ob adjustedSettings (scalping) oder strategyAdjustments (indicator)
         if (data.botId && data.advice) {
           setAiFlash((f) => ({ ...f, [data.botId]: true }));
-          setTimeout(() => setAiFlash((f) => ({ ...f, [data.botId]: false })), 1500);
+          // Clear any existing timeout for this bot before creating a new one
+          if (aiFlashTimeoutRef.current[data.botId]) clearTimeout(aiFlashTimeoutRef.current[data.botId]);
+          aiFlashTimeoutRef.current[data.botId] = setTimeout(() => {
+            setAiFlash((f) => ({ ...f, [data.botId]: false }));
+            delete aiFlashTimeoutRef.current[data.botId];
+          }, 1500);
         }
 
         // Settings Changes speichern für animiertes Badge + Live Feed Inline-Anzeige
@@ -697,6 +716,10 @@ export default function App() {
           logBufferRef.current[entry.botId] = [];
         }
         logBufferRef.current[entry.botId].unshift(entry); // Newest first
+        // Cap per-bot buffer to prevent unbounded growth between 500ms flushes
+        if (logBufferRef.current[entry.botId].length > 200) {
+          logBufferRef.current[entry.botId].length = 200;
+        }
 
         if (!logFlushIntervalRef.current) {
           logFlushIntervalRef.current = setInterval(flushLogs, 500);
@@ -715,11 +738,13 @@ export default function App() {
         clearInterval(logFlushIntervalRef.current);
         logFlushIntervalRef.current = null;
       }
-      // Cleanup agent history debounce timer
       if (agentHistoryDebounceRef.current) {
         clearTimeout(agentHistoryDebounceRef.current);
         agentHistoryDebounceRef.current = null;
       }
+      // Clear all pending aiFlash timeouts
+      Object.values(aiFlashTimeoutRef.current).forEach(clearTimeout);
+      aiFlashTimeoutRef.current = {};
     };
   }, []);
 
@@ -786,6 +811,29 @@ export default function App() {
       fetchAllHistories();
     }
   }, [bots.length]); // Only re-fetch when bot count changes
+
+  // Periodically re-fetch price history for the selected running bot so the chart stays live.
+  // priceHistory is deliberately excluded from SSE (memory optimization), so polling is the only
+  // way to update the chart after the bot has been started (especially for newly created bots).
+  const selectedBotStatus = bots.find(b => b.id === selectedBotId)?.status;
+  useEffect(() => {
+    if (!selectedBotId || selectedBotStatus !== 'running') return;
+
+    const fetchSelectedHistory = async () => {
+      try {
+        const res = await fetch(`${getApiBase()}/api/bots/${selectedBotId}/history?limit=100`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const history: number[] = (data.history || []).map((item: { price: number }) => item.price);
+        // Only update botPriceHistories (targeted update) — avoids triggering a full bots.map re-render.
+        setBotPriceHistories(prev => ({ ...prev, [selectedBotId]: history }));
+      } catch { /* ignore */ }
+    };
+
+    fetchSelectedHistory();
+    const interval = setInterval(fetchSelectedHistory, 3000);
+    return () => clearInterval(interval);
+  }, [selectedBotId, selectedBotStatus]);
 
   // Fetch Global Settings on mount
   useEffect(() => {
@@ -885,17 +933,21 @@ export default function App() {
     // sequential visual feedback via GSAP
     const botChips = document.querySelectorAll('.bot-chip-main');
     if (botChips.length > 0) {
-      gsap.to(botChips, {
-        scale: 1.02,
-        borderColor: targetStatus === "running" ? "rgba(16, 185, 129, 0.5)" : "rgba(239, 68, 68, 0.4)",
-        backgroundColor: targetStatus === "running" ? "rgba(16, 185, 129, 0.05)" : "rgba(239, 68, 68, 0.05)",
-        duration: 0.4,
-        stagger: 0.08,
-        ease: "power2.out",
-        yoyo: true,
-        repeat: 1,
-        overwrite: "auto"
-      });
+      const ringColor = targetStatus === "running" ? "rgba(16, 185, 129, 0.55)" : "rgba(239, 68, 68, 0.5)";
+      gsap.fromTo(
+        botChips,
+        { boxShadow: `0 0 0 0px ${ringColor}` },
+        {
+          boxShadow: `0 0 0 6px ${ringColor.replace(/[\d.]+\)$/, "0)")}`,
+          scale: 1.015,
+          duration: 0.4,
+          stagger: 0.06,
+          ease: "power2.out",
+          yoyo: true,
+          repeat: 1,
+          overwrite: "auto",
+        }
+      );
     }
 
     // Optimistic update for all bots
@@ -1097,16 +1149,44 @@ export default function App() {
           aggressiveness: newBotAggressiveness,
           tradingMode: newBotTradingMode,
           strategyId: newBotStrategyId || undefined,
+          ...(pendingAdvisorToken ? {
+            tokenName: pendingAdvisorToken.name,
+            tokenSymbol: pendingAdvisorToken.symbol,
+            tokenPriceUsd: pendingAdvisorToken.priceUsd,
+            tokenVolume24h: pendingAdvisorToken.volume24h,
+            tokenLiquidity: pendingAdvisorToken.liquidity,
+          } : {}),
         }),
       });
 
       if (res.ok) {
         const newBot = await res.json();
-        // Auto-select the newly created bot
         if (newBot && newBot.id) {
+          setBots(prev => {
+            if (prev.some(b => b.id === newBot.id)) return prev;
+            return [...prev, newBot];
+          });
           setSelectedBotId(newBot.id);
         }
-        // Smoothly close the dialog
+        // Immediately inject known token info into tokens state (Advisor path),
+        // then sync from server to cover both Advisor and manual creation paths.
+        if (pendingAdvisorToken) {
+          setTokens(prev => {
+            const mint = newBotMintAddress.trim();
+            if (prev.some(t => t.mintAddress === mint)) return prev;
+            return [...prev, {
+              mintAddress: mint,
+              name: pendingAdvisorToken.name,
+              symbol: pendingAdvisorToken.symbol,
+              decimals: 6,
+              priceUsd: pendingAdvisorToken.priceUsd,
+              volume24h: pendingAdvisorToken.volume24h,
+              liquidity: pendingAdvisorToken.liquidity,
+              isActive: true,
+            }];
+          });
+        }
+        fetchTokens();
         setIsCreateBotDialogOpen(false);
       }
     } catch (err) {
@@ -1120,6 +1200,24 @@ export default function App() {
     setNewBotTradingMode("fixed");
     setNewBotTradeSize(1);
     setNewBotAggressiveness(10);
+    setPendingAdvisorToken(null);
+  };
+
+  // ==================== SMART BOT ADVISOR ====================
+
+  const handleCreateFromAdvisor = (suggestion: AdvisorSuggestion) => {
+    setNewBotName(`${suggestion.tokenSymbol} ${suggestion.strategyName.split(' ')[0]}`);
+    setNewBotMintAddress(suggestion.mintAddress);
+    setNewBotStrategyId(suggestion.templateId);
+    setPendingAdvisorToken({
+      name: suggestion.tokenName,
+      symbol: suggestion.tokenSymbol,
+      priceUsd: suggestion.priceUsd,
+      volume24h: suggestion.volume24h,
+      liquidity: suggestion.liquidity,
+    });
+    setActiveTab("dashboard");
+    setIsCreateBotDialogOpen(true);
   };
 
   // ==================== STRATEGY ASSISTANT (KI AGENT) FUNCTIONS ====================
@@ -1479,6 +1577,9 @@ export default function App() {
   };
 
   const selectedBot = bots.find((b) => b.id === selectedBotId);
+  // Prefer botPriceHistories (kept fresh by the 3s poll) over selectedBot.priceHistory
+  // (embedded in bots, only updated on bots.length change). Falls back gracefully.
+  const selectedPriceHistory: number[] = botPriceHistories[selectedBotId ?? ''] ?? selectedBot?.priceHistory ?? [];
   const [backgroundPulseTrigger, setBackgroundPulseTrigger] = useState<"buy" | "sell" | "ai" | "tick" | false>(false);
   const prevBotPriceRef = useRef<Record<string, number>>({});
 
@@ -1528,13 +1629,22 @@ export default function App() {
         prevTradeCountRef.current[bot.id] = currTs;
         setBackgroundPulseTrigger(flashType);
       } else if (currPrice !== prevPrice && prevPrice > 0) {
-        // Price change detection (instead of tick count)
-        tickHappened = true;
+        // Price change detection: nur triggern, wenn relative Bewegung signifikant ist,
+        // sonst feuert der Pulse bei jedem Mikrotick (mehrere Bots * 2s Polling = viel Churn).
+        const relDelta = Math.abs(currPrice - prevPrice) / prevPrice;
+        if (relDelta >= 0.002) {
+          tickHappened = true;
+        }
       }
     });
 
-    if (tickHappened && !backgroundPulseTrigger) {
-      setBackgroundPulseTrigger("tick");
+    // Debounce tick-Pulse: max alle 2s, damit mehrere Bots nicht 10 Pulses/Sek auslösen
+    if (tickHappened) {
+      const now = Date.now();
+      if (now - lastTickPulseRef.current > 2000) {
+        lastTickPulseRef.current = now;
+        setBackgroundPulseTrigger("tick");
+      }
     }
 
     // Solo skip redundant renders
@@ -1578,59 +1688,58 @@ export default function App() {
     // Kill existing background pulse animations
     gsap.killTweensOf([circle1, circle2, circle3, container]);
 
-    const gradient = `radial-gradient(circle at center, ${color} 0%, ${color} 98%, transparent 100.1%)`;
+    // Color via CSS Variable - avoids rebuilding the radial-gradient string on every trigger
+    container.style.setProperty("--pulse-color", color);
 
     const tl = gsap.timeline();
 
-    // Start - alle Circles resetten
+    // Start - alle Circles resetten (autoAlpha statt opacity: 0 setzt auch
+    // visibility:hidden, damit die Compositor-Layer nicht unnötig evaluiert werden)
     tl.set([circle1, circle2, circle3], {
-      background: gradient,
       scale: animConfig.bgPulseInitialScale,
-      opacity: 0,
-      force3D: true,
+      autoAlpha: 0,
     });
 
-    tl.set(container, { opacity: 1, force3D: true });
+    tl.set(container, { autoAlpha: 1 });
 
     // Phase 1: Schnelle Expansion
     tl.to(circle1, {
       scale: animConfig.bgPulseExpand1Scale,
-      opacity: animConfig.bgPulseOpacity1,
+      autoAlpha: animConfig.bgPulseOpacity1,
       duration: animConfig.bgPulseExpandDuration,
       ease: animConfig.easeType,
-      overwrite: "auto",
     });
     tl.to(circle2, {
       scale: animConfig.bgPulseExpand2Scale,
-      opacity: animConfig.bgPulseOpacity2,
+      autoAlpha: animConfig.bgPulseOpacity2,
       duration: animConfig.bgPulseExpandDuration + 0.05,
-      ease: animConfig.easeType
+      ease: animConfig.easeType,
     }, "-=0.2");
     tl.to(circle3, {
       scale: animConfig.bgPulseExpand3Scale,
-      opacity: animConfig.bgPulseOpacity3,
+      autoAlpha: animConfig.bgPulseOpacity3,
       duration: animConfig.bgPulseExpandDuration + 0.1,
-      ease: animConfig.easeType
+      ease: animConfig.easeType,
     }, "-=0.25");
 
     // Phase 2: Langsame Expansion & Fade Out
     tl.to(circle1, {
       scale: animConfig.bgPulseBillow1Scale,
-      opacity: 0,
+      autoAlpha: 0,
       duration: animConfig.bgPulseBillowDuration,
       ease: "power2.inOut",
     });
     tl.to(circle2, {
       scale: animConfig.bgPulseBillow2Scale,
-      opacity: 0,
+      autoAlpha: 0,
       duration: animConfig.bgPulseBillowDuration + 0.3,
-      ease: "power2.inOut"
+      ease: "power2.inOut",
     }, "<0.1");
     tl.to(circle3, {
       scale: animConfig.bgPulseBillow3Scale,
-      opacity: 0,
+      autoAlpha: 0,
       duration: animConfig.bgPulseBillowDuration + 0.6,
-      ease: "power2.inOut"
+      ease: "power2.inOut",
     }, "<0.15");
 
   }, { dependencies: [backgroundPulseTrigger], scope: globalPulseContainerRef });
@@ -1644,9 +1753,9 @@ export default function App() {
         <div className="global-pulse-circle global-pulse-circle-3" ref={globalPulseCircle3Ref} />
       </div>
 
-      <div className="flex h-screen w-full bg-background text-foreground overflow-hidden relative">
+      <div className={`flex h-screen w-full text-foreground overflow-hidden relative ${theme === "light" ? "app-bg-light" : "app-bg-dark"}`}>
         {/* Top Navigation Bar - ersetzt Sidepanel */}
-        <header className="topbar animate-in fade-in duration-1000">
+        <header className="topbar animate-in fade-in duration-1000" data-at-top={isAtTop}>
           <div className="topbar-container">
             {/* Logo links mit Tooltip */}
             <div className="topbar-logo relative group cursor-help">
@@ -1726,6 +1835,39 @@ export default function App() {
                 <div className="nav-tooltip">
                   <span className="nav-tooltip-label">Strategy Assistant</span>
                   <span className="nav-tooltip-info">AI-powered analysis</span>
+                </div>
+              </div>
+
+              <div className="topbar-nav-item">
+                <button
+                  className={`topbar-nav-button ${activeTab === "selfcorrection" ? "active" : ""}`}
+                  onClick={() => {
+                    setActiveTab("selfcorrection");
+                    setSelectedBotId(null);
+                  }}
+                >
+                  <Puzzle className="h-4 w-4" />
+                </button>
+                <div className="nav-tooltip">
+                  <span className="nav-tooltip-label">Self-Correction</span>
+                  <span className="nav-tooltip-info">Insights & Lessons (ADR-011)</span>
+                </div>
+              </div>
+
+              {/* Smart Bot Advisor Button */}
+              <div className="topbar-nav-item">
+                <button
+                  className={`topbar-nav-button ${activeTab === "advisor" ? "active" : ""}`}
+                  onClick={() => {
+                    setActiveTab("advisor");
+                    setSelectedBotId(null);
+                  }}
+                >
+                  <Wand2 className="h-4 w-4" />
+                </button>
+                <div className="nav-tooltip">
+                  <span className="nav-tooltip-label">Smart Advisor</span>
+                  <span className="nav-tooltip-info">Token + Strategy Recommendations</span>
                 </div>
               </div>
 
@@ -1954,6 +2096,7 @@ export default function App() {
                   backgroundPulseTrigger={backgroundPulseTrigger}
                   onSelectBot={setSelectedBotId}
                   onReorderBots={handleReorderBots}
+                  onToggleBotStatus={toggleBotStatus}
                 />
 
                 {/* Detail View — always rendered, animates on bot change */}
@@ -2735,7 +2878,7 @@ export default function App() {
                                       <div className="flex flex-wrap gap-1.5">
                                         <span className="inline-flex items-center gap-1 bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 px-2 py-0.5 rounded text-xs-custom font-mono">
                                           <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
-                                          {selectedBot.priceHistory?.length ?? 0} Ticks
+                                          {selectedPriceHistory.length} Ticks
                                         </span>
                                         <span className="inline-flex items-center gap-1 bg-muted text-muted-foreground border border-border px-2 py-0.5 rounded text-xs-custom font-mono">
                                           Last: ${(selectedBot.stats?.lastPrice ?? 0).toFixed(6)}
@@ -3679,12 +3822,12 @@ export default function App() {
                             <div className="flex items-center gap-2 px-4 pt-3 pb-2 border-b border-border/30">
                               <Activity className="h-3.5 w-3.5 text-primary" />
                               <span className="text-xs font-semibold tracking-wide text-zinc-300">Price Chart</span>
-                              <span className="ml-auto text-xs-custom font-mono text-zinc-500">{selectedBot.priceHistory?.length ?? 0} ticks</span>
+                              <span className="ml-auto text-xs-custom font-mono text-zinc-500">{selectedPriceHistory.length} ticks</span>
                             </div>
                             <div className="h-[280px] p-1">
-                              {selectedBot.priceHistory && selectedBot.priceHistory.length > 0 ? (
+                              {selectedPriceHistory.length > 0 ? (
                                 <ResponsiveContainer width="100%" height="100%">
-                                  <AreaChart data={selectedBot.priceHistory.map((price, i) => ({ index: i, price }))}>
+                                  <AreaChart data={selectedPriceHistory.map((price, i) => ({ index: i, price }))}>
                                     <defs>
                                       <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
                                         <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.3} />
@@ -4611,6 +4754,26 @@ export default function App() {
                   </CardContent>
                 </Card>
               </div>
+            ) : activeTab === "selfcorrection" ? (
+              // ADR-011 SELF-CORRECTION INSIGHTS
+              <div className="space-y-6 max-w-7xl mx-auto">
+                <div className="flex items-center gap-3 mb-6">
+                  <Puzzle className="h-8 w-8 text-primary" />
+                  <div>
+                    <h1 className="text-3xl font-bold tracking-tighter">Self-Correction Insights</h1>
+                    <p className="text-muted-foreground mt-1">
+                      Time-window performance, drift detection and lessons-learned memory (ADR-011).
+                    </p>
+                  </div>
+                </div>
+                <SelfCorrectionInsightsTab bots={bots} getApiBase={getApiBase} />
+              </div>
+            ) : activeTab === "advisor" ? (
+              // SMART BOT ADVISOR
+              <AdvisorTab
+                getApiBase={getApiBase}
+                onCreateFromAdvisor={handleCreateFromAdvisor}
+              />
             ) : activeTab === "docs" ? (
               // DOCS VIEW
               <Documentation />

@@ -290,6 +290,7 @@ export function hasCrossover(seriesA: number[], seriesB: number[]): boolean {
   const n = Math.min(seriesA.length, seriesB.length);
   if (n < 2) return false;
   const i = n - 1;
+  if (isNaN(seriesA[i]) || isNaN(seriesB[i]) || isNaN(seriesA[i - 1]) || isNaN(seriesB[i - 1])) return false;
   return seriesA[i - 1] < seriesB[i - 1] && seriesA[i] >= seriesB[i];
 }
 
@@ -297,5 +298,6 @@ export function hasCrossunder(seriesA: number[], seriesB: number[]): boolean {
   const n = Math.min(seriesA.length, seriesB.length);
   if (n < 2) return false;
   const i = n - 1;
+  if (isNaN(seriesA[i]) || isNaN(seriesB[i]) || isNaN(seriesA[i - 1]) || isNaN(seriesB[i - 1])) return false;
   return seriesA[i - 1] > seriesB[i - 1] && seriesA[i] <= seriesB[i];
 }

@@ -23,6 +23,7 @@ export interface GeckoTokenData {
 }
 
 const GECKO_BASE = 'https://api.geckoterminal.com/api/v2';
+const GECKO_HEADERS = { Accept: 'application/json;version=20230302' };
 const CACHE_TTL_MS = 60_000; // Refresh OHLCV every 60s
 const POOL_CACHE_PERMANENT = true; // Pool address doesn't change
 
@@ -38,7 +39,7 @@ class GeckoTerminalFeed {
     }
     try {
       const url = `${GECKO_BASE}/networks/solana/tokens/${mintAddress}/pools?page=1`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+      const res = await fetch(url, { headers: GECKO_HEADERS, signal: AbortSignal.timeout(6000) });
       if (!res.ok) return null;
       const json = await res.json();
       const pools = json?.data;
@@ -64,7 +65,7 @@ class GeckoTerminalFeed {
   ): Promise<GeckoOHLCV[]> {
     try {
       const url = `${GECKO_BASE}/networks/solana/pools/${poolAddress}/ohlcv/${timeframe}?aggregate=${aggregate}&limit=${limit}&currency=usd`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+      const res = await fetch(url, { headers: GECKO_HEADERS, signal: AbortSignal.timeout(6000) });
       if (!res.ok) return [];
       const json = await res.json();
       const raw: [number, string, string, string, string, string][] =

@@ -28,7 +28,7 @@ function EquityCurveChartBase({ trades, height = 200 }: EquityCurveChartProps) {
 
   if (data.length === 0) {
     return (
-      <div className="flex items-center justify-center h-[200px] text-[11px] text-zinc-500">
+      <div className="flex items-center justify-center h-[200px] text-[11px] text-zinc-600 dark:text-zinc-500">
         Keine realisierten Trades im Zeitraum
       </div>
     );
@@ -40,7 +40,7 @@ function EquityCurveChartBase({ trades, height = 200 }: EquityCurveChartProps) {
   return (
     <div className="w-full" style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -18 }}>
+        <AreaChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
           <defs>
             <linearGradient id="equityGrad" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={isPositive ? "#4ADE80" : "#F87171"} stopOpacity={0.35} />

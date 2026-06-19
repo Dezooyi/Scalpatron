@@ -1,94 +1,112 @@
-# Solana BotTrader — Projektkontext für Claude Code
+# CLAUDE.md
 
-## Übersicht
-Node.js TypeScript Trading Bot für Solana SPL Tokens (primär UGOR).
-Phase 1–6: Range Spike Scalper. Phase 7: Multi-Strategy Architecture mit JSON-gesteuertem Strategy-System und lernender KI.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Aktueller Stand
-- [x] Phase 1: tsconfig.json + .env + src/config.ts + src/wallet.ts
-  - Bot-Wallet: 5AiQFtjk2U6EzvqzUxX1MQghTQZTWU1rkZ6oxx2eCBPg (Devnet)
-- [x] Phase 2: priceFeed.ts (DexScreener polling, kein API-Key)
-- [x] Phase 3: patternDetector.ts (Floor-Median + Spike-Erkennung)
-- [x] Phase 4: trader.ts (Paper-Trading mit PnL-Tracking)
-- [x] Phase 5: dashboard.ts (Terminal-UI, Settings-Editor, Sparkline-Chart)
-- [x] Phase 6: agent.ts (Correction Agent, Auto-Optimierung der Thresholds)
-- [x] Web-Interface: server.ts + frontend/src/App.tsx (React, SSE, REST API)
-- [x] BotManager + BotInstance + SQLite (db.ts) + Backtester
-- [x] Memory-Optimierung: PriceHistory aus SSE entfernt, separate REST API
-- [x] Phase 7 (2026-03-16): Multi-Strategy Architecture
-  - strategyTypes.ts — TypeScript-Interfaces für JSON Strategy Schema
-  - indicatorEngine.ts — EMA/SMA/RSI/MACD/BB/ATR/STOCH/VWAP (zero external deps)
-  - candleAggregator.ts — Tick→OHLCV Aggregation für alle Timeframes
-  - strategyEngine.ts — JSON-gesteuerte Signalgenerierung (delegiert scalping an PatternDetector)
-  - strategyTemplates/*.json — 6 Built-in Templates (scalping, ema_trend, rsi_mean_reversion, breakout, momentum, dca)
-  - db.ts: strategies-Tabelle + Outcome-Tracking (agent_history erweitert)
-  - botInstance.ts: StrategyEngine-Integration + AI-Feedback-Loop (updateAgentOutcome bei SELL)
-  - ollamaAgent.ts: Strategie-aware Prompt, System-Role Fix, Aggressiveness (5–80%), lernende Feedback-Schleife
-  - server.ts: Strategy CRUD Endpoints + Regime-Performance Endpoint
-  - frontend/App.tsx: Strategy Picker, AI Aggr. Anzeige, Regime Performance Tabelle
-- [x] Dokumentation: docs/ — architecture, modules, configuration, strategy, multi-strategy, operations
-- [x] AI Prompt Enrichment (2026-03-20): Tier 1+2 vollständig implementiert
-  - mathUtils.ts: `calculatePreProcessedIndicators` — Stochastic K/D, Richtungspfeile (↑↓→), BB %B + Band-Breite, ATR expanding/contracting, 3-Wert-Serien-Snippets; `buildAsciiSparkline` (Unicode ▁▂▃▄▅▆▇█)
-  - mathUtils.ts: Import von `technicalindicators` ersetzt durch eigenes `indicatorEngine.ts` (zero external deps)
-  - ollamaAgent.ts: Sparkline statt roher Preis-Samples (~310 Token gespart), kompakte Candle-Tabellen (5m last 10 + 15m last 5), Trade Pattern Stats (Profit Factor, Max Consecutive Wins/Losses), DexScreener multi-window (priceChange 5m/1h/6h/24h, buy/sell ratio 1h+24h), Open Position State (Entry-Preis, Alter, unrealisierter PnL), GeckoTerminal real volume block (geckt cached, graceful fallback), System Prompt mit Indikator-Format-Erklärungen
-  - geckoTerminalFeed.ts: Neues Modul — GeckoTerminal OHLCV (free API, kein Key), Pool-Auflösung, 5m/15m Candles mit echtem USD Volume, gecachter Singleton nach macroFeed.ts Muster
-- [x] Frontend-Bugfixes (2026-03-20):
-  - LiveClusterPricePanel: priceHistory lokal verwaltet (PricePoint[]), live via lastPrice aus SSE erweitert (max 300), an ScannerPulse als number[] übergeben — ScannerPulse zeigt jetzt echte Preisbars
-  - LiveFeedListCard: price-Werte aus API-Response + SSE-Append + seeded Fallback explizit zu Number() konvertiert (SQLite gibt numerische Felder als String zurück → toFixed-Crash behoben)
+## Project Overview
+Solana SPL Token trading bot (Node.js + TypeScript). Runs in paper-trading mode by default. Web dashboard on port 3000 + React frontend on Vite dev server (port 5173). Targets UGOR token on Devnet. AI decision layer via local Ollama.
 
-## Token
-- UGOR Mint: UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW
-- SOL Mint: So11111111111111111111111111111111111111112
+## Commands
 
-## Kern-Konzepte Phase 7
-- **JSON Strategy Config**: Jede Strategie = JSON mit indicators, entry_conditions, exit_conditions, risk_management
-- **StrategyEngine**: Aggregiert Ticks → Candles → Indikatoren → Entry/Exit Conditions → Signal
-- **PatternDetector**: Bleibt als Fallback für strategy_type='scalping' unverändert
-- **AI Aggressiveness**: Zwei-Ebenen — User-Slider (maxAggressiveness, harter Deckel) + AI-Wert (5–80% Softcap)
-- **Feedback-Loop**: SELL-PnL → updateAgentOutcome() → nächster LLM-Zyklus sieht Win-Rate pro Regime
-- **Ollama**: System-Prompt im `system`-Role, Daten im `user`-Role (korrekte Rollentrennung)
-
-## Dateien (vollständig)
-**Core (Legacy):** src/config.ts · src/wallet.ts · src/priceFeed.ts · src/patternDetector.ts
-src/trader.ts · src/agent.ts · src/dashboard.ts · src/logger.ts · src/index.ts
-
-**Web/Bot-Management:** src/server.ts · src/botInstance.ts · src/botManager.ts · src/db.ts
-src/priceRecorder.ts · src/backtester.ts · src/ollamaAgent.ts
-
-**Phase 7 (Multi-Strategy):** src/strategyTypes.ts · src/indicatorEngine.ts · src/candleAggregator.ts
-src/strategyEngine.ts · src/strategyTemplates/*.json
-
-**AI Prompt Infrastructure:** src/geckoTerminalFeed.ts · src/utils/mathUtils.ts
-
-**Frontend:** frontend/src/App.tsx · frontend/src/components/LiveClusterPricePanel.tsx
-frontend/src/components/ScannerPulse.tsx · frontend/src/components/LiveFeedListCard.tsx
-
-## Dokumentation
-docs/README.md · docs/architecture.md · docs/modules.md · docs/configuration.md
-docs/strategy.md · docs/multi-strategy.md · docs/operations.md · docs/memory-optimization.md
-
-## Stack
-Node.js v22.22.0 · TypeScript · npx tsx · Windows 11 / Linux (Nobara)
-Devnet RPC: https://api.devnet.solana.com
-Jupiter Ultra: https://lite.jup.ag/ultra/v1/
-DexScreener: https://api.dexscreener.com/latest/dex/tokens/ (Preis-Feed, kein Key)
-Ollama: lokal, Standard-Port 11434
-
-## Starten
+### Backend
 ```bash
-npx tsx src/index.ts    # Bot mit Dashboard
+npx tsx src/index.ts          # Start bot + API server (port 3000)
 ```
 
-## REST API Highlights
-- `GET /api/strategies/templates` — Built-in Strategy Templates
-- `PUT /api/bots/:id/strategy` — Strategie einem Bot zuweisen
-- `GET /api/agent/regime-performance` — Win-Rate/PnL pro Markt-Regime
-- `POST /api/agent/trigger` — Sofort-Analyse auslösen
+### Frontend
+```bash
+cd frontend && npm run dev    # Vite dev server (port 5173)
+cd frontend && npm run build  # Production build
+cd frontend && npm run lint   # ESLint
+```
 
-## Nächste Schritte
-- Backtester auf StrategyEngine migrieren (aktuell noch PatternDetector)
-- WebSocket-Feed für echte Volumen-Daten (VWAP aktuell ungenau)
-- max_positions > 1 in Trader implementieren (für DCA-Strategie)
-- Grid-Strategie spezifische Execution-Logik
-- Live-Trading via Jupiter Ultra (Mainnet)
-- ONNX-Runtime für ML-Strategie
+### Tests
+Tests are standalone scripts (no test runner), each executed individually:
+```bash
+npx tsx src/__tests__/patternDetector.test.ts
+npx tsx src/__tests__/patternDetectorTakeProfit.test.ts
+npx tsx src/__tests__/traderSell.test.ts
+npx tsx src/__tests__/traderPositionSize.test.ts
+npx tsx src/__tests__/traderVerify.test.ts
+npx tsx src/__tests__/wallet.test.ts
+npx tsx src/__tests__/walletLock.test.ts
+npx tsx src/__tests__/dbLifecycle.test.ts
+```
+Tests use `process.exit(1)` on failure and print `PASS`/`FAIL` per assertion to stdout.
+
+## Architecture
+
+### Data Flow
+```
+PriceFeed (DexScreener polling, per-mint singleton)
+  → BotInstance.onTick()
+    → StrategyEngine (JSON-configured) or PatternDetector (scalping fallback)
+      → Trader.buy() / Trader.sell()  (paper or live via Jupiter Ultra)
+        → updateAgentOutcome() on SELL → DB persisted
+  → OllamaAgent (async, on interval) reads DB state, returns aggressiveness
+```
+
+### Key Modules
+- **`src/botInstance.ts`** — Per-bot runtime: owns PriceFeed subscription, PatternDetector/StrategyEngine, Trader, OllamaAgent cycle
+- **`src/botManager.ts`** — CRUD for BotInstances, persists to SQLite
+- **`src/server.ts`** — HTTP server (no framework), SSE broadcast loop, all REST endpoints
+- **`src/db.ts`** — SQLite via `better-sqlite3` (synchronous). DB at `data/scalpatron.db`; test DBs at `data/test/`
+- **`src/strategyEngine.ts`** — JSON strategy → candles → indicators → BUY/SELL/HOLD; delegates `strategy_type='scalping'` to PatternDetector
+- **`src/indicatorEngine.ts`** — All technical indicators (EMA/SMA/RSI/MACD/BB/ATR/STOCH/VWAP) with zero external deps
+- **`src/candleAggregator.ts`** — Tick stream → OHLCV candles for any timeframe
+- **`src/ollamaAgent.ts`** — Builds prompt (system/user role split), calls Ollama, parses aggressiveness (5–80%)
+- **`src/geckoTerminalFeed.ts`** / **`src/macroFeed.ts`** — Cached singleton feeds for external OHLCV/macro data
+- **`src/utils/mathUtils.ts`** — Pre-processed indicator helpers, ASCII sparkline builder
+
+### Strategy System
+Each strategy is a JSON object (see `src/strategyTypes.ts` for schema). Six built-in templates in `src/strategyTemplates/*.json`. Stored in DB `strategies` table; assigned per-bot via `PUT /api/bots/:id/strategy`.
+
+### AI Aggressiveness — Two Layers
+- User slider sets `maxAggressiveness` (hard ceiling, stored in DB)
+- OllamaAgent sets `aiAggressiveness` (5–80% softcap, can never exceed user ceiling)
+- Feedback loop: every SELL outcome writes to `agent_history`, next LLM prompt includes win-rate per market regime
+
+### Frontend Stack
+React 19 + Vite 8 + TailwindCSS v4 + Radix UI + Recharts + GSAP. No Redux. State is local React state + SSE stream from `/api/events`.
+
+## Key Constants
+- UGOR Mint: `UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW`
+- SOL Mint: `So11111111111111111111111111111111111111112`
+- Bot Wallet (Devnet): `5AiQFtjk2U6EzvqzUxX1MQghTQZTWU1rkZ6oxx2eCBPg`
+- Roundtrip cost constant: `CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT = 0.02` (2%) — used in PnL calculations
+
+## Important Patterns
+
+**ESM imports require `.js` extension** even for `.ts` source files:
+```ts
+import { Trader } from '../trader.js';  // correct
+import { Trader } from '../trader';     // will fail at runtime
+```
+
+**SQLite returns numeric columns as strings** — always coerce with `Number()` before calling `.toFixed()` or arithmetic on values read from DB queries.
+
+**PriceFeed is a per-mint singleton** — multiple bots on the same mint share one polling instance; `PriceFeed.getInstance()` with a mint returns the same object.
+
+**SSE performance** — `priceHistory` was deliberately removed from SSE payloads. Fetch historical prices via `GET /api/bots/:id/history` instead. See `docs/memory-optimization.md`.
+
+**Stale price guard (ADR-010)** — trading is blocked when `feedStaleMs > CONFIG.PRICE_FEED_MAX_STALE_AGE_MS`. After a long outage (`> PRICE_FEED_LONG_OUTAGE_MS`), history is flushed and re-warmup is triggered on first recovered tick.
+
+## Configuration (`.env`)
+| Variable | Default | Description |
+|---|---|---|
+| `SOLANA_RPC_URL` | devnet | RPC endpoint |
+| `WALLET_PRIVATE_KEY` | — | Base58 keypair |
+| `PRICE_FEED_PROVIDER` | `dexscreener` | `dexscreener` / `birdeye` / `custom` |
+| `PRICE_FEED_TICKRATE_MS` | `2000` | Poll interval |
+| `OLLAMA_URL` | `http://localhost:11434` | Local Ollama |
+| `OLLAMA_MODEL` | `qwen3.5:4b` | Model name |
+
+## REST API Highlights
+- `GET /api/bots` / `POST /api/bots` — list / create bots
+- `GET /api/bots/:id/history` — price history (not in SSE)
+- `GET /api/strategies/templates` — built-in strategy templates
+- `PUT /api/bots/:id/strategy` — assign strategy to bot
+- `GET /api/agent/regime-performance` — win-rate/PnL per market regime
+- `POST /api/agent/trigger` — force immediate AI analysis cycle
+
+## ADR Index
+Architecture Decision Records are in `docs/decisions/`. ADR-010 (stale price handling) is the most operationally significant one.

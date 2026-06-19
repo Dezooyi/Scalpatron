@@ -35,16 +35,16 @@ function PnLBarChartBase({ trades, maxBars = 50, height = 200 }: PnLBarChartProp
 
   if (data.length === 0) {
     return (
-      <div className="flex items-center justify-center h-[200px] text-[11px] text-zinc-500">
+      <div className="flex items-center justify-center h-[200px] text-[11px] text-zinc-600 dark:text-zinc-500">
         Keine realisierten Trades im Zeitraum
       </div>
     );
   }
 
   return (
-    <div className="w-full overflow-x-auto" style={{ height }}>
-      <ResponsiveContainer width="100%" height="100%" minWidth={Math.max(data.length * 12, 240)}>
-        <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -18 }}>
+    <div className="w-full overflow-hidden" style={{ height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.4 0 0 / 0.25)" vertical={false} />
           <XAxis dataKey="idx" tick={axisTick} tickLine={false} axisLine={false} minTickGap={20} />
           <YAxis tick={axisTick} tickLine={false} axisLine={false} width={42} tickFormatter={(v: number) => `${v.toFixed(0)}%`} />

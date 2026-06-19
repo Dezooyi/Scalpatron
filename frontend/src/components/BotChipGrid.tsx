@@ -65,6 +65,7 @@ export interface BotChipGridProps {
   backgroundPulseTrigger: "buy" | "sell" | "ai" | "tick" | false;
   onSelectBot: (id: string) => void;
   onReorderBots?: (botIds: string[]) => void;
+  onToggleBotStatus?: (id: string, currentStatus: string) => void;
 }
 
 // ─── Drag and Drop State ──────────────────────────────────────────────────────
@@ -102,15 +103,15 @@ const StrategyBadge = memo(({ strategyType, strategyName, strategyId, iconSize }
     desc = strategyName;
     if (isSniper) {
       colorCls = "bg-blue-500/20 text-blue-400 border-blue-500/50 shadow-[0_0_8px_rgba(59,130,246,0.3)]";
-      icon = <Zap className={`animate-pulse ${iconSize}`} />;
+      icon = <Zap className={iconSize} />;
       label = "Pulse Sniper";
     } else if (isRunner) {
       colorCls = "bg-orange-500/20 text-orange-400 border-orange-500/50 shadow-[0_0_8px_rgba(249,115,22,0.3)]";
-      icon = <TrendingUp className={`animate-pulse ${iconSize}`} />;
+      icon = <TrendingUp className={iconSize} />;
       label = "Asym Runner";
     } else if (isDip) {
       colorCls = "bg-purple-500/20 text-purple-400 border-purple-500/50 shadow-[0_0_8px_rgba(168,85,247,0.3)]";
-      icon = <ArrowDown className={`animate-pulse ${iconSize}`} />;
+      icon = <ArrowDown className={iconSize} />;
       label = "Dip Buyer";
     }
   }
@@ -135,6 +136,7 @@ interface StatusButtonProps {
   isRunning: boolean;
   status: string;
   size: "xl" | "l" | "m";
+  onToggle?: () => void;
 }
 
 const STATUS_SIZES = {
@@ -143,32 +145,37 @@ const STATUS_SIZES = {
   m: { wrapper: "w-4 h-4", play: "h-1.5 w-1.5", stop: "h-1 w-1", shadow: "shadow-[0_0_4px_rgba(16,185,129,0.05)]" },
 };
 
-const StatusButton = memo(({ isRunning, status, size }: StatusButtonProps) => {
+const StatusButton = memo(({ isRunning, status, size, onToggle }: StatusButtonProps) => {
   const tooltip = useTooltip();
-  const wrapperRef = useRef<HTMLSpanElement>(null);
+  const wrapperRef = useRef<HTMLButtonElement>(null);
   const iconRef = useRef<SVGSVGElement>(null);
   const s = STATUS_SIZES[size];
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    onToggle?.();
+  };
 
   // GSAP animation for play icon pulse
   // Note: Global pause/resume is handled by useAnimationVisibility in App.tsx
   // This animation uses overwrite: true to prevent queue buildup
   useGSAP(() => {
-    if (!isRunning || !iconRef.current) return;
-
+    if (!iconRef.current) return;
+    // Always kill first — prevents stale repeat:-1 tweens accumulating on rapid start/stop
     gsap.killTweensOf(iconRef.current);
 
-    // Continuous pulse animation for play icon
-    // Uses overwrite: true to prevent animation queue buildup
-    gsap.to(iconRef.current, {
-      scale: 1.1,
-      opacity: 0.8,
-      duration: 1,
-      ease: "power1.inOut",
-      repeat: -1,
-      yoyo: true,
-      force3D: true,
-      overwrite: true,
-    });
+    if (isRunning) {
+      gsap.to(iconRef.current, {
+        scale: 1.1,
+        opacity: 0.8,
+        duration: 1,
+        ease: "power1.inOut",
+        repeat: -1,
+        yoyo: true,
+        overwrite: true,
+      });
+    }
 
     return () => {
       gsap.killTweensOf(iconRef.current);
@@ -176,13 +183,17 @@ const StatusButton = memo(({ isRunning, status, size }: StatusButtonProps) => {
   }, [isRunning]);
 
   return (
-    <span
+    <button
+      type="button"
       ref={wrapperRef}
-      className={`flex items-center justify-center ${s.wrapper} rounded border cursor-help overflow-hidden ${isRunning
+      aria-label={isRunning ? `Bot stoppen (Status: ${status})` : `Bot starten (Status: ${status})`}
+      title={isRunning ? "Bot stoppen" : "Bot starten"}
+      className={`flex items-center justify-center ${s.wrapper} rounded border cursor-pointer overflow-hidden transition-colors hover:brightness-125 ${isRunning
         ? `bg-emerald-500/10 text-emerald-400 border-emerald-500/30 ${s.shadow}`
         : "bg-zinc-500/10 text-zinc-400 border-zinc-500/30"
         }`}
-      onMouseEnter={(e) => tooltip.show(`Status: ${status.toUpperCase()}`, e)}
+      onClick={handleClick}
+      onMouseEnter={(e) => tooltip.show(`Status: ${status.toUpperCase()} — Klick zum ${isRunning ? "Stoppen" : "Starten"}`, e)}
       onMouseMove={(e) => tooltip.move(e)}
       onMouseLeave={() => tooltip.hide()}
     >
@@ -191,7 +202,7 @@ const StatusButton = memo(({ isRunning, status, size }: StatusButtonProps) => {
       ) : (
         <Square className={`${s.stop} fill-current`} />
       )}
-    </span>
+    </button>
   );
 });
 StatusButton.displayName = "StatusButton";
@@ -210,6 +221,7 @@ interface BotChipProps {
   /** @deprecated Wird nicht mehr in BotChip verwendet, aber für API-Kompatibilität beibehalten */
   backgroundPulseTrigger?: "buy" | "sell" | "ai" | "tick" | false;
   onSelect: () => void;
+  onToggleStatus?: () => void;
   // Drag and Drop Props
   draggable?: boolean;
   onDragStart?: (e: React.DragEvent, botId: string) => void;
@@ -259,6 +271,7 @@ const BotChip = memo(({
   aiFlash,
   animConfig,
   onSelect,
+  onToggleStatus,
   draggable = false,
   onDragStart,
   onDragOver,
@@ -269,7 +282,8 @@ const BotChip = memo(({
   isDragOver = false,
 }: BotChipProps) => {
   const animEnabled = animConfig.enabled;
-  const chipRef = useRef<HTMLButtonElement>(null);
+  const chipRef = useRef<HTMLDivElement>(null);
+  const tradeFlashOverlayRef = useRef<HTMLDivElement>(null);
   const eventBadgeRef = useRef<HTMLDivElement>(null);
   const aiFlashInnerRef = useRef<HTMLDivElement>(null);
   const aiFlashOuterRef = useRef<HTMLDivElement>(null);
@@ -277,54 +291,115 @@ const BotChip = memo(({
   const tickFlashOuterRef = useRef<HTMLDivElement>(null);
   const tickBorderBeamRef = useRef<HTMLDivElement>(null);
   const aiBorderBeamRef = useRef<HTMLDivElement>(null);
+  const startFlashInnerRef = useRef<HTMLDivElement>(null);
+  const startFlashOuterRef = useRef<HTMLDivElement>(null);
+  const startBorderBeamRef = useRef<HTMLDivElement>(null);
   const prevIsSelected = useRef<boolean>(isSelected);
   const prevAiFlash = useRef<boolean>(aiFlash);
   const prevTradeFlash = useRef<"buy" | "sell" | null>(tradeFlash);
   const prevPrice = useRef<number>(bot.stats?.lastPrice ?? 0);
+  const prevStatus = useRef<string>(bot.status);
+  const lastTickPulseTimeRef = useRef<number>(0);
 
-  // Tick pulse animation (Pulse + Beam)
+  // Tick pulse animation (Pulse + Beam) - low-overhead, reuses existing tweens
   useEffect(() => {
     const currentPrice = bot.stats?.lastPrice ?? 0;
     if (currentPrice !== prevPrice.current && prevPrice.current > 0 && animEnabled && chipRef.current) {
+      // Throttle: skip pulse if last one was within 800ms for this chip
+      const now = performance.now();
+      if (now - lastTickPulseTimeRef.current < 800) {
+        prevPrice.current = currentPrice;
+        return;
+      }
+      lastTickPulseTimeRef.current = now;
+
+      // Single, cheap tween: only scale + opacity, GPU-friendly
+      // Skill gsap-performance: "Reuse timelines where possible; avoid creating new timelines every frame"
       gsap.to(chipRef.current, {
         scale: sizeVariant === "xl" ? 1.003 : 1.005,
-        duration: 0.1,
+        duration: 0.15,
+        yoyo: true,
+        repeat: 1,
+        ease: "power1.out",
+        overwrite: true,
+      });
+
+      // Inner + Outer: explizit killen statt overwrite-auto (Pool bleibt klein)
+      if (tickFlashInnerRef.current) {
+        const inner = tickFlashInnerRef.current;
+        gsap.killTweensOf(inner);
+        gsap.fromTo(
+          inner,
+          { opacity: 0.2, scale: 1 },
+          { opacity: 0, scale: 1.1, duration: 0.6, ease: "power1.out" }
+        );
+      }
+      if (tickFlashOuterRef.current) {
+        const outer = tickFlashOuterRef.current;
+        gsap.killTweensOf(outer);
+        gsap.fromTo(
+          outer,
+          { opacity: 0.2, scale: 1 },
+          { opacity: 0, scale: 1.2, duration: 0.9, ease: "power1.out" }
+        );
+      }
+
+      // Tick-Beam bewusst weggelassen: conic-gradient + --beam-angle ist der teuerste
+      // Per-Tick-Cost (Gradient-Recompile + Mask-Layer-Repaint). Scale + Inner/Outer
+      // Pulse reichen als visuelles Feedback bei Preisbewegung. Beams bleiben fuer
+      // AI- und Trade-Flash (seltene Events) erhalten.
+    }
+    prevPrice.current = currentPrice;
+  }, [bot.stats?.lastPrice, animEnabled, sizeVariant]);
+
+  // Start flash animation (Pulse + Beam) — stärker & langsamer als Tick, rein weiß
+  // Triggert beim Übergang stopped -> running (genau wie Tick bei Preisänderung)
+  useEffect(() => {
+    const wasStopped = prevStatus.current !== "running";
+    const isNowRunning = bot.status === "running";
+
+    if (wasStopped && isNowRunning && animEnabled && chipRef.current) {
+      // Scale-Pulse (größer als Tick: 1.015 / 1.025)
+      gsap.to(chipRef.current, {
+        scale: sizeVariant === "xl" ? 1.015 : 1.025,
+        duration: 0.25,
         yoyo: true,
         repeat: 1,
         ease: "power2.out",
         overwrite: true,
-        force3D: true
       });
 
-      if (tickFlashInnerRef.current && tickFlashOuterRef.current) {
-        const inner = tickFlashInnerRef.current;
-        const outer = tickFlashOuterRef.current;
+      // Inner + Outer Pulse (breiter & länger als Tick)
+      if (startFlashInnerRef.current && startFlashOuterRef.current) {
+        const inner = startFlashInnerRef.current;
+        const outer = startFlashOuterRef.current;
         gsap.killTweensOf([inner, outer]);
-        gsap.set([inner, outer], { opacity: 0.2, scale: 1 });
-        gsap.to(inner, { opacity: 0, scale: 1.1, duration: 0.8, ease: "power2.out" });
-        gsap.to(outer, { opacity: 0, scale: 1.2, duration: 1.2, ease: "power2.out" });
+        gsap.set([inner, outer], { opacity: 0.85, scale: 1 });
+        // Tick-Vergleich: inner 0.8s, outer 1.2s — Start: 1.6s / 2.4s
+        gsap.to(inner, { opacity: 0, scale: 1.25, duration: 1.6, ease: "power2.out" });
+        gsap.to(outer, { opacity: 0, scale: 1.4, duration: 2.4, ease: "power2.out" });
       }
 
-      // Tick Border Beam Animation
-      if (tickBorderBeamRef.current) {
-        const beam = tickBorderBeamRef.current;
+      // Border Beam — langsamer rotierend (Tick: 1.0s, Start: 1.8s) und heller
+      if (startBorderBeamRef.current) {
+        const beam = startBorderBeamRef.current;
         gsap.killTweensOf(beam);
         gsap.timeline()
           .set(beam, { opacity: 0, "--beam-angle": "0deg" })
-          .to(beam, { opacity: 1, duration: 0.2 })
-          .to(beam, { "--beam-angle": "360deg", duration: 1.0, ease: "power2.inOut" }, "<")
-          .to(beam, { opacity: 0, duration: 0.4 }, "-=0.3");
+          .to(beam, { opacity: 1, duration: 0.4 })
+          .to(beam, { "--beam-angle": "360deg", duration: 1.8, ease: "power2.inOut" }, "<")
+          .to(beam, { opacity: 0, duration: 0.8 }, "-=0.4");
       }
     }
-    prevPrice.current = currentPrice;
-  }, [bot.stats?.lastPrice, animEnabled, sizeVariant]);
+    prevStatus.current = bot.status;
+  }, [bot.status, animEnabled, sizeVariant]);
 
   // Selection state animation
   useGSAP(() => {
     if (!animEnabled || !chipRef.current) return;
     const element = chipRef.current;
     if (isSelected && !prevIsSelected.current) {
-      gsap.fromTo(element, { opacity: 0.8, scale: 0.98 }, { opacity: 1, scale: 1, duration: 0.4, ease: "power2.out", force3D: true });
+      gsap.fromTo(element, { opacity: 0.8, scale: 0.98 }, { opacity: 1, scale: 1, duration: 0.4, ease: "power2.out"});
     }
     prevIsSelected.current = isSelected;
   }, [isSelected, animEnabled]);
@@ -340,39 +415,36 @@ const BotChip = memo(({
       const inner = aiFlashInnerRef.current;
       const outer = aiFlashOuterRef.current;
       const beam = aiBorderBeamRef.current;
-      
+
       gsap.killTweensOf([inner, outer, beam]);
-      
+
       const tl = gsap.timeline();
-      tl.set([inner, outer], { opacity: 0, scale: 0.95 })
-        .to(inner, { opacity: isAiUpdate ? 0.7 : 0.85, scale: 1.1, duration: 0.3, ease: "power2.out" })
-        .to(outer, { opacity: isAiUpdate ? 0.4 : 0.6, scale: 1.25, duration: 0.5, ease: "power2.out" }, "-=0.2")
-        .to([inner, outer], { opacity: 0, scale: 1.5, duration: 1.5, ease: "power1.inOut" });
+      tl.set([inner, outer], { autoAlpha: 0, scale: 0.95 })
+        .to(inner, { autoAlpha: isAiUpdate ? 0.7 : 0.85, scale: 1.1, duration: 0.3, ease: "power2.out" })
+        .to(outer, { autoAlpha: isAiUpdate ? 0.4 : 0.6, scale: 1.25, duration: 0.5, ease: "power2.out" }, "-=0.2")
+        .to([inner, outer], { autoAlpha: 0, scale: 1.5, duration: 1.0, ease: "power1.out" });
 
       gsap.timeline()
-        .set(beam, { opacity: 0, "--beam-angle": "0deg" })
-        .to(beam, { opacity: 1, duration: 0.3 })
-        .to(beam, { "--beam-angle": "360deg", duration: isAiUpdate ? 1.2 : 1.5, ease: "power2.inOut" }, "<")
-        .to(beam, { opacity: 0, duration: 0.6 }, "-=0.4");
+        .set(beam, { autoAlpha: 0, "--beam-angle": "0deg" })
+        .to(beam, { autoAlpha: 1, duration: 0.3 })
+        .to(beam, { "--beam-angle": "360deg", duration: isAiUpdate ? 1.0 : 1.2, ease: "power1.inOut" }, "<")
+        .to(beam, { autoAlpha: 0, duration: 0.5 }, "-=0.4");
     }
 
-    // Shadow pulse logic (Trade only)
-    if (isTradeUpdate && chipRef.current) {
-      const baseColor = tradeFlash === "buy" ? "rgb(34, 197, 94)" : "rgb(239, 68, 68)";
-      const element = chipRef.current;
-      gsap.killTweensOf(element, "boxShadow");
-
-      import("../lib/animationConfig").then(({ getBoxShadowValues }) => {
-        const pulseShadow = getBoxShadowValues(animConfig, baseColor, "pulse");
-        const holdShadow = getBoxShadowValues(animConfig, baseColor, "hold");
-
-        gsap.timeline()
-          .to(element, { boxShadow: pulseShadow, duration: animConfig.pulseDuration, ease: animConfig.easeType, force3D: true, overwrite: true })
-          .to(element, { boxShadow: holdShadow, duration: animConfig.holdDuration, ease: animConfig.easeType, force3D: true })
-          .to(element, { boxShadow: "0 0 0 0 rgba(0,0,0,0)", duration: animConfig.fadeDuration, ease: animConfig.easeType, force3D: true });
-      });
-    } else if (!tradeFlash && prevTradeFlash.current && chipRef.current) {
-      gsap.to(chipRef.current, { boxShadow: "0 0 0 0 rgba(0,0,0,0)", duration: 0.5, force3D: true });
+    // Trade-flash overlay: animate opacity only (compositor-only, no paint).
+    // Replaces boxShadow animation which forced a repaint on every frame.
+    if (isTradeUpdate && tradeFlashOverlayRef.current) {
+      const overlay = tradeFlashOverlayRef.current;
+      const buyColor = "rgba(34,197,94,0.25)";
+      const sellColor = "rgba(239,68,68,0.25)";
+      gsap.killTweensOf(overlay);
+      gsap.set(overlay, { backgroundColor: tradeFlash === "buy" ? buyColor : sellColor, opacity: 0 });
+      gsap.timeline()
+        .to(overlay, { opacity: 1, duration: animConfig.pulseDuration, ease: animConfig.easeType, overwrite: true })
+        .to(overlay, { opacity: animConfig.holdIntensity * 0.6, duration: animConfig.holdDuration, ease: animConfig.easeType })
+        .to(overlay, { opacity: 0, duration: animConfig.fadeDuration, ease: animConfig.easeType });
+    } else if (!tradeFlash && prevTradeFlash.current && tradeFlashOverlayRef.current) {
+      gsap.to(tradeFlashOverlayRef.current, { opacity: 0, duration: 0.5 });
     }
 
     prevAiFlash.current = aiFlash;
@@ -382,20 +454,20 @@ const BotChip = memo(({
   // Auxiliary GSAP hooks
   useGSAP(() => {
     if (!isDeleting || !chipRef.current) return;
-    gsap.to(chipRef.current, { opacity: 0, scale: 0.9, duration: 0.3, ease: "power2.in", force3D: true });
+    gsap.to(chipRef.current, { opacity: 0, scale: 0.9, duration: 0.3, ease: "power2.in"});
   }, [isDeleting]);
 
   useGSAP(() => {
     if (!chipRef.current) return;
-    gsap.to(chipRef.current, { opacity: isDragging ? 0.5 : 1, scale: isDragging ? 0.95 : 1, duration: 0.2, ease: "power2.out", force3D: true });
+    gsap.to(chipRef.current, { opacity: isDragging ? 0.5 : 1, scale: isDragging ? 0.95 : 1, duration: 0.2, ease: "power2.out"});
   }, [isDragging]);
 
   useGSAP(() => {
     if (!chipRef.current) return;
     if (isDragOver) {
-      gsap.to(chipRef.current, { borderColor: "rgba(139, 92, 246, 0.5)", borderWidth: 2, borderStyle: "dashed", duration: 0.2, ease: "power2.out", force3D: true });
+      gsap.to(chipRef.current, { borderColor: "rgba(139, 92, 246, 0.5)", borderWidth: 2, borderStyle: "dashed", duration: 0.2, ease: "power2.out"});
     } else {
-      gsap.to(chipRef.current, { borderColor: "", borderWidth: "", borderStyle: "", duration: 0.2, ease: "power2.out", force3D: true });
+      gsap.to(chipRef.current, { borderColor: "", borderWidth: "", borderStyle: "", duration: 0.2, ease: "power2.out"});
     }
   }, [isDragOver]);
 
@@ -411,7 +483,7 @@ const BotChip = memo(({
 
   useGSAP(() => {
     if (!animEnabled || !eventBadgeRef.current || !showEventIndicator) return;
-    gsap.fromTo(eventBadgeRef.current, { opacity: 0, scale: 0.5 }, { opacity: 1, scale: 1, duration: 0.4, ease: "back.out(1.7)", force3D: true });
+    gsap.fromTo(eventBadgeRef.current, { opacity: 0, scale: 0.5 }, { opacity: 1, scale: 1, duration: 0.4, ease: "back.out(1.7)"});
   }, [showEventIndicator, animEnabled]);
 
   const eventColor = lastEvent === "BUY" ? "bg-green-500/40 text-green-400 border-green-500/30" : lastEvent === "SELL" ? "bg-red-500/40 text-red-400 border-red-500/30" : "bg-zinc-500/40 text-zinc-400 border-zinc-500/30";
@@ -508,9 +580,46 @@ const BotChip = memo(({
         </>
       )}
 
-      <button
+      {/* Start flash pulses and beam (stärker & langsamer als Tick, rein weiß) */}
+      {animEnabled && (
+        <>
+          <div
+            ref={startFlashInnerRef}
+            className="absolute -inset-2 z-0 rounded-lg pointer-events-none opacity-0"
+            style={{ background: `radial-gradient(circle at center, rgba(255,255,255,0.95) 0%, transparent 50%)` }}
+          />
+          <div
+            ref={startFlashOuterRef}
+            className="absolute -inset-4 z-0 rounded-lg pointer-events-none opacity-0"
+            style={{ background: `radial-gradient(circle at center, rgba(255,255,255,0.55) 0%, transparent 70%)` }}
+          />
+
+          {/* Start Border Beam (White, heller & breiter als Tick) */}
+          <div
+            ref={startBorderBeamRef}
+            className="absolute -inset-[2px] rounded-lg pointer-events-none z-20 opacity-0"
+            style={{
+              border: '2px solid transparent',
+              background: `conic-gradient(from var(--beam-angle, 0deg), transparent 0deg, rgba(255,255,255,1) 50deg, transparent 90deg) border-box`,
+              WebkitMask: 'linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0)',
+              WebkitMaskComposite: 'destination-out' as unknown as string,
+              maskComposite: 'exclude' as unknown as string,
+            }}
+          />
+        </>
+      )}
+
+      <div
         ref={chipRef}
+        role="button"
+        tabIndex={0}
         onClick={onSelect}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelect();
+          }
+        }}
         draggable={draggable}
         onDragStart={(e) => onDragStart?.(e, bot.id)}
         onDragOver={(e) => onDragOver?.(e, bot.id)}
@@ -530,6 +639,12 @@ const BotChip = memo(({
           willChange: "transform, opacity"
         }}
       >
+        {/* Trade-flash overlay: opacity-only animation (compositor, no paint) */}
+        <div
+          ref={tradeFlashOverlayRef}
+          className="absolute inset-0 rounded-lg pointer-events-none opacity-0"
+        />
+
         {/* Drag Handle Indicator */}
         {draggable && (
           <div className="absolute top-1 left-1 flex gap-0.5 opacity-0 hover:opacity-100 transition-opacity">
@@ -559,7 +674,7 @@ const BotChip = memo(({
               </div>
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">
-                  <StatusButton isRunning={isRunning} status={bot.status} size="l" />
+                  <StatusButton isRunning={isRunning} status={bot.status} size="l" onToggle={onToggleStatus} />
                   <div className="flex flex-col min-w-0">
                     <div className="flex items-center gap-2 truncate">
                       <span className="text-xl font-black text-primary uppercase shrink-0">{tokenSymbol}</span>
@@ -570,7 +685,7 @@ const BotChip = memo(({
 
               </div>
 
-              <div className="grid grid-cols-5 gap-2 text-base font-light pt-1 border-t border-border/30 mt-0">
+              <div className="grid grid-cols-5 gap-2 text-base font-light pt-1 border-t border-border/30 mt-0 min-w-0">
                 {[
                   { label: "Trades", value: bot.stats?.totalTrades || 0, color: "text-2xl" },
                   { label: "Win/Loss", value: `${bot.stats?.wins || 0}/${bot.stats?.losses || 0}`, color: winRate !== null && winRate >= 50 ? "text-green-400" : "text-red-400" },
@@ -578,19 +693,19 @@ const BotChip = memo(({
                   { label: "Est. 24h", value: est24h, color: "" },
                   { label: "PnL %", value: pnlStr, color: pnlColor },
                 ].map(({ label, value, color }) => (
-                  <div key={label} className="flex flex-col items-start gap-1">
+                  <div key={label} className="flex flex-col items-start gap-1 min-w-0">
                     <span className="text-zinc-500 uppercase text-xs font-black tracking-tight whitespace-nowrap">{label}</span>
-                    <span className={`font-black leading-none text-xs ${color}`}>{value}</span>
+                    <span className={`font-black leading-none text-xs tabular-nums truncate max-w-full ${color}`}>{value}</span>
                   </div>
                 ))}
               </div>
 
-              <div className="mt-auto pt-3 border-t border-border/30 flex items-center justify-between text-sm font-mono text-zinc-500">
-                <span>${bot.stats?.lastPrice?.toFixed(6) || "—"}</span>
-                <span className="text-l font-mono text-zinc-500 truncate tabular-nums">{bot.mintAddress?.slice(0, 6)}…{bot.mintAddress?.slice(-4)}</span>
-                <span className="flex items-center gap-1">
+              <div className="mt-auto pt-3 border-t border-border/30 flex items-center justify-between gap-1 text-sm font-mono text-zinc-500 min-w-0">
+                <span className="truncate shrink min-w-0">${bot.stats?.lastPrice?.toFixed(6) || "—"}</span>
+                <span className="text-l font-mono text-zinc-500 truncate tabular-nums shrink-0">{bot.mintAddress?.slice(0, 6)}…{bot.mintAddress?.slice(-4)}</span>
+                <span className="flex items-center gap-1 shrink-0">
                   <TrendIcon className={`h-3 w-3 ${trendColor}`} />
-                  <span>{bot.totalTicks || 0} ticks</span>
+                  <span className="tabular-nums">{bot.totalTicks || 0} ticks</span>
                 </span>
               </div>
             </>
@@ -601,7 +716,7 @@ const BotChip = memo(({
             <>
               <div className="flex items-center justify-between gap-2 animate-in fade-in duration-1600">
                 <div className="flex items-center gap-2 min-w-0">
-                  <StatusButton isRunning={isRunning} status={bot.status} size="l" />
+                  <StatusButton isRunning={isRunning} status={bot.status} size="l" onToggle={onToggleStatus} />
                   <div className="flex flex-col min-w-0">
                     <div className="flex items-center gap-1.5 truncate">
                       <span className="text-sm font-black text-primary uppercase shrink-0">{tokenSymbol}</span>
@@ -615,7 +730,7 @@ const BotChip = memo(({
                 </div>
               </div>
 
-              <div className="grid grid-cols-5 gap-1 text-[var(--ds-font-size-lr)] font-mono mt-0 border-t border-border/30 pt-1">
+              <div className="grid grid-cols-5 gap-1 text-[var(--ds-font-size-lr)] font-mono mt-0 border-t border-border/30 pt-1 min-w-0">
                 {[
                   { label: "Trades", value: `${bot.stats?.totalTrades || 0}`, color: "" },
                   { label: "W/L", value: `${bot.stats?.wins || 0}/${bot.stats?.losses || 0}`, color: "" },
@@ -623,20 +738,20 @@ const BotChip = memo(({
                   { label: "Est. 24h", value: String(est24h), color: "" },
                   { label: "PnL", value: pnlStr, color: pnlColor },
                 ].map(({ label, value, color }) => (
-                  <div key={label} className="flex flex-col items-start gap-0.5">
+                  <div key={label} className="flex flex-col items-start gap-0.5 min-w-0">
                     <span className="text-zinc-500 uppercase text-xs font-bold tracking-tight whitespace-nowrap">{label}</span>
-                    <span className={`font-bold text-l leading-none ${color}`}>{value}</span>
+                    <span className={`font-bold text-l leading-none tabular-nums truncate max-w-full ${color}`}>{value}</span>
                   </div>
                 ))}
               </div>
 
-              <div className="flex items-center justify-between gap-1 pt-1.5 border-t border-border/30 mt-1.5">
-                <div className="flex items-baseline gap-1">
-                  <span className="text-xs font-mono text-muted-foreground">${bot.stats?.lastPrice?.toFixed(5) || "—"}</span>
-                  <span className={`text-xs font-bold ${trendColor}`}>{trendDirection}</span>
+              <div className="flex items-center justify-between gap-1 pt-1.5 border-t border-border/30 mt-1.5 min-w-0">
+                <div className="flex items-baseline gap-1 shrink min-w-0">
+                  <span className="text-xs font-mono text-muted-foreground truncate">${bot.stats?.lastPrice?.toFixed(5) || "—"}</span>
+                  <span className={`text-xs font-bold shrink-0 ${trendColor}`}>{trendDirection}</span>
                 </div>
-                <span className="text-xs font-mono text-zinc-500 truncate tabular-nums">{bot.mintAddress?.slice(0, 6)}…{bot.mintAddress?.slice(-4)}</span>
-                <span className="text-zinc-400 text-xs font-mono uppercase tracking-tighter tabular-nums"><BotUptime startTime={bot.startTime} isRunning={isRunning} /></span>
+                <span className="text-xs font-mono text-zinc-500 truncate tabular-nums shrink-0">{bot.mintAddress?.slice(0, 6)}…{bot.mintAddress?.slice(-4)}</span>
+                <span className="text-zinc-400 text-xs font-mono uppercase tracking-tighter tabular-nums truncate shrink-0"><BotUptime startTime={bot.startTime} isRunning={isRunning} /></span>
               </div>
             </>
           )}
@@ -646,7 +761,7 @@ const BotChip = memo(({
             <>
               <div className="flex items-center justify-between gap-2 opacity-75 animate-in fade-in duration-2100">
                 <div className="flex items-center gap-2 min-w-0">
-                  <StatusButton isRunning={isRunning} status={bot.status} size="m" />
+                  <StatusButton isRunning={isRunning} status={bot.status} size="m" onToggle={onToggleStatus} />
                   <span className="text-l font-black text-primary uppercase shrink-0">{tokenSymbol}</span>
                   <span className={`font-light text-l truncate ${isSniper ? "text-blue-400 font-bold" : isRunner ? "text-orange-400 font-bold" : isDip ? "text-purple-400 font-bold" : ""}`}>{bot.name}</span>
                 </div>
@@ -655,7 +770,7 @@ const BotChip = memo(({
                 </div>
               </div>
 
-              <div className="grid grid-cols-5 gap-1 text-xs font-mono mt-1 border-t border-border/30 pt-1.5">
+              <div className="grid grid-cols-5 gap-1 text-xs font-mono mt-1 border-t border-border/30 pt-1.5 min-w-0">
                 {[
                   { label: "Trades", value: `${bot.stats?.totalTrades || 0}`, color: "" },
                   { label: "W/L", value: `${bot.stats?.wins || 0}/${bot.stats?.losses || 0}`, color: "" },
@@ -663,16 +778,16 @@ const BotChip = memo(({
                   { label: "Est. 24h", value: String(est24h), color: "" },
                   { label: "PnL", value: pnlStr, color: pnlColor },
                 ].map(({ label, value, color }) => (
-                  <div key={label} className="flex flex-col items-start gap-0.5">
+                  <div key={label} className="flex flex-col items-start gap-0.5 min-w-0">
                     <span className="text-zinc-500 uppercase text-xs font-bold leading-none tracking-tighter whitespace-nowrap">{label}</span>
-                    <span className={`font-black text-[var(--ds-font-size-l)] leading-none tabular-nums ${color}`}>{value}</span>
+                    <span className={`font-black text-[var(--ds-font-size-l)] leading-none tabular-nums truncate max-w-full ${color}`}>{value}</span>
                   </div>
                 ))}
               </div>
             </>
           )}
         </div>
-      </button>
+      </div>
     </div>
   );
 });
@@ -691,6 +806,7 @@ export const BotChipGrid = memo(({
   backgroundPulseTrigger,
   onSelectBot,
   onReorderBots,
+  onToggleBotStatus,
 }: BotChipGridProps) => {
   const gridRef = useRef<HTMLDivElement>(null);
   const gridColumns = useGridColumns(gridRef);
@@ -843,6 +959,7 @@ export const BotChipGrid = memo(({
             animConfig={animConfig}
             backgroundPulseTrigger={backgroundPulseTrigger}
             onSelect={() => handleSelectBot(bot.id)}
+            onToggleStatus={onToggleBotStatus ? () => onToggleBotStatus(bot.id, bot.status) : undefined}
             draggable={true}
             onDragStart={handleDragStart}
             onDragOver={(e) => handleDragOver(e, bot.id, botIndex)}

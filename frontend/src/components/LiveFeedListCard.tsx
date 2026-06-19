@@ -274,7 +274,7 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
           accent: "purple" as const,
           mainContent: <span className="font-bold text-purple-400">Strategy Config Updated</span>,
           expandedContent: (
-            <div className="bg-purple-500/10 border border-purple-500/30 rounded px-2 py-1.5 mt-1 animate-in fade-in slide-in-from-top-2 duration-300 -ml-16 mb-1">
+            <div className="bg-purple-500/10 border border-purple-500/30 rounded px-2 py-1.5 mt-1 animate-in fade-in slide-in-from-top-2 duration-300 mb-1">
               <div className="text-[9px] font-bold uppercase tracking-wider mb-1.5 flex items-center justify-between text-purple-400">
                 <span className="flex items-center gap-1"><BrainCircuit className="h-3 w-3" /> AI Updated</span>
                 <div className="flex items-center gap-1.5">

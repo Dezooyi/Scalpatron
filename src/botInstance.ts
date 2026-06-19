@@ -2,7 +2,7 @@ import { PriceFeed, PricePoint } from './priceFeed.js';
 import { PatternDetector, PatternSettings } from './patternDetector.js';
 import { Trader, TraderStats, type TradeLogEntry } from './trader.js';
 import { logger } from './appLogger.js';
-import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt } from './db.js';
+import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, listStrategies, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt } from './db.js';
 import { PriceRecorder } from './priceRecorder.js';
 import { StrategyEngine } from './strategyEngine.js';
 import type { StrategyConfig, IndicatorConfig } from './strategyTypes.js';
@@ -306,6 +306,53 @@ export class BotInstance {
     } catch (e) {
       console.warn(`[BotInstance] Fehler beim Speichern der AI Adjustments: ${(e as Error).message}`);
     }
+  }
+
+  /**
+   * ADR-011 Phase B: switch the bot's strategy type to a different one.
+   * Looks up the first available template of the requested type, or falls back
+   * to a fresh template-derived config if none exist. Returns the new strategy type
+   * (or null on failure).
+   *
+   * Does not affect open positions (strategy switch only impacts future entries).
+   */
+  public async applyStrategySwitch(toStrategyType: string, reason?: string): Promise<string | null> {
+    const currentType = this.activeStrategyConfig?.strategy_type ?? 'scalping';
+    if (toStrategyType === currentType) return currentType;
+
+    // 1) Try to load any existing template of the requested type
+    const candidates = listStrategies(toStrategyType);
+    let newConfig: StrategyConfig | null = candidates[0] ?? null;
+
+    // 2) Fall back: derive from built-in template (loaded via strategyEngine)
+    if (!newConfig) {
+      try {
+        const { loadBuiltinTemplates } = await import('./strategyEngine.js');
+        const templates = await loadBuiltinTemplates();
+        const tpl = templates.find((t) => t.strategy_type === toStrategyType);
+        if (tpl) newConfig = tpl as StrategyConfig;
+      } catch (e) {
+        console.warn(`[BotInstance] applyStrategySwitch: template load failed: ${(e as Error).message}`);
+      }
+    }
+
+    if (!newConfig) {
+      console.warn(`[BotInstance] applyStrategySwitch: no template for type "${toStrategyType}"`);
+      logger.warn(this.id, 'AI_AGENT', `Strategy switch failed: no template for ${toStrategyType}`);
+      return null;
+    }
+
+    this.updateStrategy(newConfig);
+    try {
+      db.prepare('UPDATE bots SET strategyId = ? WHERE id = ?').run(newConfig.id ?? null, this.id);
+    } catch { /* best effort */ }
+    logger.action(
+      this.id,
+      'AI_AGENT',
+      `Strategy switched: ${currentType} → ${toStrategyType}${reason ? ` (${reason})` : ''}`,
+    );
+    console.log(`[BotInstance] ${this.name} strategy switched: ${currentType} → ${toStrategyType}`);
+    return toStrategyType;
   }
 
   /** Returns latest indicator values for live UI display */

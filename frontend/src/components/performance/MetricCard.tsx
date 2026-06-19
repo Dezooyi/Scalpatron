@@ -5,11 +5,11 @@ import { useTooltip } from "@/components/GlobalTooltip";
 export type MetricTone = "positive" | "negative" | "neutral" | "primary" | "warning";
 
 const TONE_VALUE: Record<MetricTone, string> = {
-  positive: "text-emerald-400",
-  negative: "text-red-400",
-  neutral: "text-zinc-200 dark:text-zinc-100",
+  positive: "text-emerald-600 dark:text-emerald-400",
+  negative: "text-red-600 dark:text-red-400",
+  neutral: "text-zinc-900 dark:text-zinc-100",
   primary: "text-primary",
-  warning: "text-amber-400",
+  warning: "text-amber-600 dark:text-amber-400",
 };
 
 interface MetricCardProps {
@@ -54,9 +54,9 @@ function MetricCardBase({
   return (
     <div
       {...interactiveProps}
-      className={`group relative flex flex-col gap-0.5 ${padding} rounded-md border border-white/10 dark:border-white/5 bg-white/5 dark:bg-zinc-500/5 backdrop-blur-md transition-colors duration-200 hover:border-white/20 dark:hover:border-white/15 ${hint ? "cursor-help" : ""} ${className}`}
+      className={`group relative flex flex-col gap-0.5 ${padding} rounded-md border border-zinc-300/60 dark:border-white/5 bg-white/40 dark:bg-zinc-500/5 backdrop-blur-md transition-colors duration-200 hover:border-zinc-400 dark:hover:border-white/15 ${hint ? "cursor-help" : ""} ${className}`}
     >
-      <div className="flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400 opacity-80">
+      <div className="flex items-center gap-1.5 text-zinc-700 dark:text-zinc-400 opacity-80">
         <Icon className={`h-3 w-3 shrink-0 ${iconColor}`} />
         <span className="text-[8px] font-bold uppercase tracking-widest truncate">{label}</span>
       </div>
@@ -64,7 +64,7 @@ function MetricCardBase({
         {value}
       </div>
       {sub && (
-        <span className="text-[9px] font-mono text-zinc-500 dark:text-zinc-500 leading-none truncate">{sub}</span>
+        <span className="text-[9px] font-mono text-zinc-600 dark:text-zinc-500 leading-none truncate">{sub}</span>
       )}
     </div>
   );

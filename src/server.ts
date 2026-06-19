@@ -2,8 +2,10 @@ import http from 'http';
 import type { BotManager } from './botManager.js';
 import { PriceRecorder } from './priceRecorder.js';
 import { logger } from './appLogger.js';
-import { TokenService, isValidMintAddress } from './tokenService.js';
-import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder, getTradesForPerformance } from './db.js';
+import { getAdvisorSuggestions } from './advisorEngine.js';
+import { TokenService, isValidMintAddress, saveTokenToDb } from './tokenService.js';
+import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder, getTradesForPerformance, getTimeWindowPerformance, detectTimeWindowDrift, getLessonsForBot } from './db.js';
+import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder, getTradesForPerformance, getTimeWindowPerformance, detectTimeWindowDrift, getLessonsForBot, saveUiSettings, loadUiSettings, type UiSettings } from './db.js';
 import { loadBuiltinTemplates } from './strategyEngine.js';
 import { PriceFeed } from './priceFeed.js';
 import type { OllamaAgent } from './ollamaAgent.js';
@@ -339,6 +341,33 @@ export class BotServer {
       parseBody(req).then((config) => {
         try {
           const bot = this.botManager.createBot(config);
+          // Auto-add token to whitelist so name resolves in the dashboard grid.
+          const mint: string = config.mintAddress ?? '';
+          if (mint && isValidMintAddress(mint)) {
+            const existing = this.tokenService.getToken(mint);
+            if (!existing) {
+              // If name/symbol were passed directly (e.g. from Advisor), save immediately.
+              // Otherwise fall back to async DexScreener lookup.
+              const knownName: string = config.tokenName ?? '';
+              const knownSymbol: string = config.tokenSymbol ?? '';
+              if (knownName && knownSymbol) {
+                saveTokenToDb({
+                  mintAddress: mint,
+                  name: knownName,
+                  symbol: knownSymbol,
+                  decimals: 6,
+                  priceUsd: config.tokenPriceUsd ?? undefined,
+                  volume24h: config.tokenVolume24h ?? undefined,
+                  liquidity: config.tokenLiquidity ?? undefined,
+                  createdAt: Date.now(),
+                  isActive: true,
+                });
+              } else {
+                this.tokenService.addToken(mint).catch(() => {});
+              }
+            }
+          }
+          this.broadcast('state', this.botManager.getAllStates());
           res.writeHead(201, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(bot.getState()));
         } catch (e: any) {
@@ -997,6 +1026,41 @@ export class BotServer {
       return;
     }
 
+    // ==================== UI SETTINGS API ====================
+
+    // GET /api/settings/ui - UI-spezifische Einstellungen laden
+    if (pathname === '/api/settings/ui' && req.method === 'GET') {
+      try {
+        const settings = loadUiSettings() ?? {};
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(settings));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // PUT /api/settings/ui - UI-spezifische Einstellungen speichern
+    if (pathname === '/api/settings/ui' && req.method === 'PUT') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const incoming = JSON.parse(body) as UiSettings;
+          const current = loadUiSettings() ?? {};
+          const merged = { ...current, ...incoming };
+          saveUiSettings(merged);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, settings: merged }));
+        } catch (e: any) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
+
     // ==================== STRATEGY API ====================
 
     // GET /api/strategies/templates — built-in templates
@@ -1119,6 +1183,73 @@ export class BotServer {
       return;
     }
 
+    // GET /api/agent/insights?botId=… — ADR-011 aggregated insights
+    if (pathname === '/api/agent/insights' && req.method === 'GET') {
+      try {
+        const botId = urlObj.searchParams.get('botId');
+        if (!botId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'botId query param required' }));
+          return;
+        }
+        const minSamples = parseInt(process.env.AI_TIMEWINDOW_MIN_SAMPLES ?? '5', 10);
+        const driftThreshold = parseInt(process.env.AI_DRIFT_THRESHOLD_PCT ?? '20', 10);
+        const hourPerf = getTimeWindowPerformance(botId, 'hour_of_day', minSamples);
+        const dayPerf = getTimeWindowPerformance(botId, 'weekday', minSamples);
+        const hourDrift = detectTimeWindowDrift(botId, 'hour_of_day', driftThreshold, minSamples);
+        const dayDrift = detectTimeWindowDrift(botId, 'weekday', driftThreshold, minSamples);
+        const lessons = getLessonsForBot(botId, 5, parseInt(process.env.AI_LESSONS_LOOKBACK_DAYS ?? '7', 10));
+        const allowSwitch = (process.env.AI_ALLOW_STRATEGY_SWITCH ?? '0') === '1';
+        const minSwitchConf = parseFloat(process.env.AI_MIN_SWITCH_CONFIDENCE ?? '0.7');
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          botId,
+          timeWindows: { hour: hourPerf, weekday: dayPerf },
+          drift: { hour: hourDrift, weekday: dayDrift },
+          lessons,
+          safety: { allowAutoSwitch: allowSwitch, minSwitchConfidence: minSwitchConf },
+        }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // POST /api/agent/confirm-switch — manually approve/reject a proposed strategy switch
+    if (pathname === '/api/agent/confirm-switch' && req.method === 'POST') {
+      const body = await parseBody(req).catch(() => null);
+      if (!body || typeof body.botId !== 'string' || typeof body.toStrategyType !== 'string') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'botId and toStrategyType required' }));
+        return;
+      }
+      const { botId, toStrategyType, approved } = body as { botId: string; toStrategyType: string; approved: boolean };
+      const bot = this.botManager.getBot(botId);
+      if (!bot) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Bot not found' }));
+        return;
+      }
+      if (!approved) {
+        logger.info(botId, 'AI_AGENT', `Strategy switch to ${toStrategyType} rejected by user.`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, applied: false }));
+        return;
+      }
+      const result = await bot.applyStrategySwitch(toStrategyType, 'user-confirmed via UI');
+      if (!result) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `No template for ${toStrategyType}` }));
+        return;
+      }
+      this.broadcast('state', this.botManager.getAllStates());
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, applied: true, strategyType: result }));
+      return;
+    }
+
     // GET /api/performance — bestätigte Trades für Performance-Analyse (alle Bots, zeitgefiltert)
     // Query-Parameter: from=<ms>, to=<ms>, botIds=<comma-separierte IDs>, mode=paper|live
     if (pathname === '/api/performance' && req.method === 'GET') {
@@ -1138,6 +1269,20 @@ export class BotServer {
         const trades = getTradesForPerformance(from, to, botIds, mode);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ trades }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/advisor/suggestions — Top-3 token+strategy recommendations from GeckoTerminal trending
+    if (pathname === '/api/advisor/suggestions' && req.method === 'GET') {
+      try {
+        const forceRefresh = urlObj.searchParams.get('refresh') === '1';
+        const result = await getAdvisorSuggestions(forceRefresh);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
       } catch (e: any) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));

@@ -120,19 +120,19 @@ function PerformanceSectionBase({ bots, tokens, selectedBotId, onSelectBot }: Pe
               <div className="flex items-center justify-center w-6 h-6 rounded-md border border-primary/30 bg-primary/10 shrink-0">
                 <BarChart3 className="h-3 w-3 text-primary" />
               </div>
-              <span className="text-xs font-black tracking-tight text-zinc-100 truncate">
+              <span className="text-xs font-black tracking-tight text-zinc-900 dark:text-zinc-100 truncate">
                 Bot Performance
               </span>
-              <span className="text-[9px] font-bold uppercase tracking-widest text-zinc-500 hidden sm:inline">
+              <span className="text-[9px] font-bold uppercase tracking-widest text-zinc-600 dark:text-zinc-500 hidden sm:inline">
                 · {timeframeLabel}
               </span>
               {error && (
-                <span className="inline-flex items-center gap-1 text-[9px] text-red-400">
+                <span className="inline-flex items-center gap-1 text-[9px] text-red-600 dark:text-red-400">
                   <AlertCircle className="h-2.5 w-2.5" /> Offline
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-zinc-500 group-hover:text-primary transition-colors shrink-0">
+            <div className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-zinc-600 dark:text-zinc-500 group-hover:text-primary transition-colors shrink-0">
               {viewMode === "collapsed" ? (
                 <>
                   Details <ChevronDown className="h-3.5 w-3.5" />

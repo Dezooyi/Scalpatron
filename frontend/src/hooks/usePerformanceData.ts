@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { BotState } from "@/App";
 import {
   type PerformanceTrade,
@@ -32,6 +32,10 @@ function getApiBase(): string {
  * Holt Trades vom Backend (/api/performance) und wendet die Filter an.
  * Zeitfenster + Bot-Auswahl werden serverseitig gefiltert (über Query-Params),
  * Status/Modus/Strategie/Outcome clientseitig anhand der Live-Bot-Metadaten.
+ *
+ * Der Fetch wird auch dann neu ausgelöst, wenn sich die Bot-Liste ändert
+ * (neuer Bot erstellt / gelöscht), damit die Performance-Tabelle nicht bis zum
+ * nächsten 15s-Polling-Intervall veraltet bleibt.
  */
 export function usePerformanceData(
   bots: BotState[],
@@ -41,9 +45,11 @@ export function usePerformanceData(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Dependency-Key für den Fetch: ändert sich nur bei relevanten Filter-Wechseln
-  const fetchKey = `${filters.timeframe}|${[...filters.botIds].sort().join(",")}|${filters.mode}`;
-  const fetchKeyRef = useRef(fetchKey);
+  // Dependency-Key für den Fetch: ändert sich bei Filter-Wechseln
+  // sowie bei jeder Änderung der Bot-Liste.
+  const fetchKey =
+    `${filters.timeframe}|${[...filters.botIds].sort().join(",")}|${filters.mode}` +
+    `|${bots.map((b) => b.id).sort().join(",")}`;
 
   useEffect(() => {
     let cancelled = false;
@@ -90,7 +96,6 @@ export function usePerformanceData(
     };
 
     run();
-    fetchKeyRef.current = fetchKey;
 
     // Live-Polling für aktualisierte Metriken
     const interval = setInterval(run, POLL_INTERVAL_MS);

@@ -173,7 +173,9 @@ export class StrategyEngine {
 
         if (totalConditions > 0 && passedConditions.length === totalConditions) {
           this.inPosition = true;
-          this.entryPrice = aggregatedEntryPrice > 0 ? ((aggregatedEntryPrice * openPositionsCount) + currentPrice) / (openPositionsCount + 1) : currentPrice;
+          // For scale-in: use the authoritative weighted avg from Trader stats (updated next tick).
+          // Exit logic already reads aggregatedEntryPrice from stats directly, not this field.
+          this.entryPrice = aggregatedEntryPrice > 0 ? aggregatedEntryPrice : currentPrice;
           this.peakPrice = currentPrice; 
           base.signal = 'BUY';
           base.spikePercent = floor > 0 ? ((currentPrice - floor) / floor) * 100 : 0;

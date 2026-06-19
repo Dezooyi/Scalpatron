@@ -17,6 +17,7 @@ import { pauseAllAnimations, resumeAllAnimations } from "../lib/gsapConfig";
 export interface AnimationVisibilityState {
   isVisible: boolean;
   wasHidden: boolean;
+  prefersReducedMotion: boolean;
   pauseAnimations: () => void;
   resumeAnimations: () => void;
   clearPendingAnimations: (target: object | object[] | string) => void;
@@ -28,6 +29,9 @@ export interface AnimationVisibilityState {
 export function useAnimationVisibility(): AnimationVisibilityState {
   const [isVisible, setIsVisible] = useState(!document.hidden);
   const [wasHidden, setWasHidden] = useState(false);
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(
+    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
 
   // Pause alle Animationen
   const pauseAnimations = useCallback(() => {
@@ -53,20 +57,31 @@ export function useAnimationVisibility(): AnimationVisibilityState {
         setWasHidden(true);
         setIsVisible(false);
         pauseAllAnimations();
-        
+
         // Optional: Töte alle "pending" Animationen um Queue buildup zu verhindern
         // Dies wird automatisch durch gsap.globalTimeline.pause() gehandhabt
       } else {
         // Tab wird wieder sichtbar
         setIsVisible(true);
         resumeAllAnimations();
-        
+
         // Reset wasHidden nach kurzer Verzögerung
         setTimeout(() => {
           setWasHidden(false);
         }, 100);
       }
     };
+
+    // prefers-reduced-motion Listener (Skill gsap-core: respect user preference)
+    const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const handleMotionChange = (e: MediaQueryListEvent) => {
+      setPrefersReducedMotion(e.matches);
+      if (e.matches) {
+        // Reduced motion aktiv: alle laufenden Tweens killen
+        gsap.globalTimeline.getChildren(true, true, true).forEach((t) => t.kill());
+      }
+    };
+    motionQuery.addEventListener("change", handleMotionChange);
 
     // Event Listener registrieren
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -78,12 +93,14 @@ export function useAnimationVisibility(): AnimationVisibilityState {
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      motionQuery.removeEventListener("change", handleMotionChange);
     };
   }, []);
 
   return {
     isVisible,
     wasHidden,
+    prefersReducedMotion,
     pauseAnimations,
     resumeAnimations,
     clearPendingAnimations,
@@ -166,8 +183,7 @@ export function createSafeAnimation(
 ): gsap.core.Tween {
   return gsap.to(target, {
     ...vars,
-    overwrite: true,  // Verhindert Queue buildup
-    force3D: true,    // GPU-Beschleunigung
+    overwrite: true,
   });
 }
 
@@ -179,7 +195,6 @@ export function createSafeTimeline(vars?: gsap.TimelineVars): gsap.core.Timeline
     ...vars,
     defaults: {
       overwrite: true,
-      force3D: true,
     },
   });
 }

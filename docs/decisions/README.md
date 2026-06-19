@@ -20,6 +20,7 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 | [008](adr-008-global-wallet-lock.md) | Globales Wallet-Lock über Live-Trader | Akzeptiert | Wallet |
 | [009](adr-009-preflight-and-tx-verification.md) | Preflight & Tx-Verifikation vor State-Mutation | Akzeptiert | Trade-Code |
 | [010](adr-010-stale-price-isolation.md) | Stale-Price-Isolation & Outage-Circuit-Breaker | Akzeptiert | Price Feed |
+| [011](adr-011-self-correction-workflow.md) | Self-Correction & Adaptives Lernen im AI Agent | Vorgeschlagen | AI Agent |
 
 > **Status-Werte:** `Vorgeschlagen` → `Akzeptiert` → `Veraltet` / `Ersetzt durch ADR-0XXX`
 > Ein `Vorgeschlagen`-ADR beschreibt einen geplanten, noch **nicht** implementierten Change.
@@ -39,6 +40,13 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 - Neue Defaults: `spikeThreshold=1.0%`, `sellDropThreshold=5%`, `cooldownTicks=15`
 - Fee-aware PnL: `pnlPercent -= ESTIMATED_ROUNDTRIP_COST_PCT * 100`
 - Paper: `solReturn` reduziert um geschätzte Roundtrip-Kosten
+
+### ADR-011 — Self-Correction & Adaptives Lernen
+- Time-Window-Performance (Hour-of-Day + Weekday) mit `minSampleSize`-Guard
+- Strategie-Switching als Eskalationsstufe (User-Gate, Default aus)
+- Chain-of-Thought-Reflexion im System-Prompt (mandatory)
+- Lessons-Learned-Memory mit Severity-Decay (7d gleitend)
+- Bonus-Confidence bei explizitem Lessons-Reference im Reason
 
 ---
 

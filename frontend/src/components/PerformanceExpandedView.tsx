@@ -47,10 +47,10 @@ type Tone = "pos" | "neg" | "neutral" | "primary";
 
 function toneText(t: Tone): string {
   switch (t) {
-    case "pos": return "text-emerald-400";
-    case "neg": return "text-red-400";
+    case "pos": return "text-emerald-600 dark:text-emerald-400";
+    case "neg": return "text-red-600 dark:text-red-400";
     case "primary": return "text-primary";
-    default: return "text-zinc-100 dark:text-zinc-50";
+    default: return "text-zinc-900 dark:text-zinc-50";
   }
 }
 
@@ -62,9 +62,9 @@ function signTone(v: number): Tone {
 
 function SectionHead({ icon: Icon, title }: { icon: LucideIcon; title: string }) {
   return (
-    <div className="flex items-center gap-1.5 mb-1 pb-2 border-b border-white/15 dark:border-white/15">
+    <div className="flex items-center gap-1.5 mb-1 pb-2 border-b border-zinc-300/60 dark:border-white/15">
       <Icon className="h-3.5 w-3.5 text-primary/80 shrink-0" />
-      <h4 className="text-xs font-bold uppercase tracking-[0.22em] text-zinc-200 dark:text-zinc-200 truncate">
+      <h4 className="text-xs font-bold uppercase tracking-[0.22em] text-zinc-900 dark:text-zinc-200 truncate">
         {title}
       </h4>
     </div>
@@ -90,10 +90,10 @@ function StatRow({ label, value, tone = "neutral", sub, hint, emphasize = false 
       onMouseLeave={hint ? () => tooltip.hide() : undefined}
     >
       <div className="flex flex-col min-w-0 gap-0.5">
-        <span className={`truncate ${emphasize ? "text-sm font-bold text-zinc-100" : "text-[13px] font-medium text-zinc-300 dark:text-zinc-300"}`}>
+        <span className={`truncate ${emphasize ? "text-sm font-bold text-zinc-900 dark:text-zinc-100" : "text-[13px] font-medium text-zinc-700 dark:text-zinc-300"}`}>
           {label}
         </span>
-        {sub && <span className="text-[11px] font-mono text-zinc-400 dark:text-zinc-400 truncate">{sub}</span>}
+        {sub && <span className="text-[11px] font-mono text-zinc-600 dark:text-zinc-400 truncate">{sub}</span>}
       </div>
       <span
         className={`${emphasize ? "text-3xl" : "text-xl"} font-black tabular-nums tracking-tight whitespace-nowrap ${toneText(tone)}`}
@@ -137,7 +137,7 @@ function PerformanceExpandedViewBase({
   return (
     <div className={`flex flex-col gap-6 ${opacity}`}>
       {/* Filter */}
-      <FilterBar filters={filters} onChange={onFiltersChange} bots={bots} tokenSymbol={tokenSymbol} />
+      <FilterBar filters={filters} onChange={onFiltersChange} bots={bots} tokenSymbol={tokenSymbol} variant="extended" />
 
       {/* Typografisches Stat-Sheet — Sektionen mit Label/Wert-Zeilen, keine Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-x-6 gap-y-5">
@@ -255,7 +255,7 @@ function PerformanceExpandedViewBase({
         <button
           type="button"
           onClick={onCollapse}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-white/10 dark:border-white/5 bg-white/5 dark:bg-black/20 hover:border-white/20 transition-colors text-[10px] font-bold uppercase tracking-widest text-zinc-400 hover:text-zinc-200"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-zinc-300/60 dark:border-white/5 bg-white/40 dark:bg-black/20 hover:border-zinc-400 dark:hover:border-white/20 transition-colors text-[10px] font-bold uppercase tracking-widest text-zinc-700 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200"
         >
           <ChevronUp className="h-3.5 w-3.5" />
           Kompakt
