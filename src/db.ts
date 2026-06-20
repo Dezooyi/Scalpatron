@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { randomUUID } from 'crypto';
 import type { StrategyConfig } from './strategyTypes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -124,7 +125,7 @@ export function initDB() {
       createdAt INTEGER NOT NULL,
       category TEXT NOT NULL CHECK (category IN ('time_window','regime','strategy','param_drift','streak')),
       lesson TEXT NOT NULL,
-      evidenceJSON TEXT, -- Renamed from 'evidence' to match ADR-011 'evidenceJSON'
+      evidence TEXT, -- JSON object with data supporting the lesson (ADR-011)
       severity REAL NOT NULL DEFAULT 0.5,
       FOREIGN KEY (botId) REFERENCES bots(id) ON DELETE CASCADE
     );
@@ -174,6 +175,8 @@ export function initDB() {
     `ALTER TABLE trades ADD COLUMN status TEXT DEFAULT 'CONFIRMED'`,
     // trades: paper/live mode pro Trade (1 = paper, 0 = live) für exakte Performance-Analyse
     `ALTER TABLE trades ADD COLUMN paperMode INTEGER NOT NULL DEFAULT 1`,
+    // ADR-012: manual trigger aggressiveness (0-100)
+    `ALTER TABLE agent_history ADD COLUMN forceMultiplier INTEGER DEFAULT NULL`,
   ];
   for (const sql of migrations) {
     try { db.exec(sql); } catch (_) { /* column already exists */ }
@@ -193,12 +196,25 @@ export function saveAgentHistory(
   applied: boolean,
   aggressivenessAdvice?: number,
   strategyId?: string,
+  forceMultiplier?: number,
 ): void {
   const stmt = db.prepare(`
-    INSERT INTO agent_history (botId, timestamp, regime, confidence, reason, analysis, adjustedSettings, applied, aggressivenessAdvice, strategyId)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO agent_history (botId, timestamp, regime, confidence, reason, analysis, adjustedSettings, applied, aggressivenessAdvice, strategyId, forceMultiplier)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  stmt.run(botId, Date.now(), regime, confidence, reason, analysis ?? '', JSON.stringify(adjustedSettings), applied ? 1 : 0, aggressivenessAdvice ?? null, strategyId ?? null);
+  stmt.run(
+    botId,
+    Date.now(),
+    regime,
+    confidence,
+    reason,
+    analysis ?? '',
+    JSON.stringify(adjustedSettings),
+    applied ? 1 : 0,
+    aggressivenessAdvice ?? null,
+    strategyId ?? null,
+    forceMultiplier ?? null,
+  );
 }
 
 interface AgentHistoryEntry {
@@ -216,6 +232,7 @@ interface AgentHistoryEntry {
   outcomeTotalPnl: number;
   outcomeWins: number;
   strategyId: string | null;
+  forceMultiplier: number | null;
 }
 
 export function getAgentHistory(botId?: string, limit = 50): AgentHistoryEntry[] {
@@ -673,12 +690,10 @@ export interface LessonEntry {
   botId: string;
   createdAt: number;
   category: 'time_window' | 'regime' | 'strategy' | 'param_drift' | 'streak';
-  lesson: string; 
-  evidenceJSON: string | null; // JSON object with data supporting the lesson
+  lesson: string;
+  evidence: string | null; // JSON object with data supporting the lesson
   severity: number;
 }
-
-import { randomUUID } from 'crypto';
 
 export function insertLesson(
   botId: string,
@@ -686,25 +701,25 @@ export function insertLesson(
   lesson: string,
   evidence: object | null = null,
   severity = 0.5,
-): string {
+): number {
   const result = db.prepare(`
-    INSERT INTO lessons_learned (id, botId, createdAt, category, lesson, evidenceJSON, severity)
+    INSERT INTO lessons_learned (botId, createdAt, category, lesson, evidence, severity)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(randomUUID(), botId, Date.now(), category, lesson, evidence ? JSON.stringify(evidence) : null, severity);
-  return (result.lastInsertRowid as number).toString(); // Note: lastInsertRowid is for INTEGER PKs, but this is for confirmation. The actual ID is the UUID.
+  `).run(botId, Date.now(), category, lesson, evidence ? JSON.stringify(evidence) : null, severity);
+  return result.lastInsertRowid as number;
 }
 
 export function getLessonsForBot(botId: string, limit = 5, lookbackDays = 7): LessonEntry[] {
   const since = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
   const rows = db.prepare(`
-    SELECT id, botId, createdAt, category, lesson, evidenceJSON, severity
+    SELECT id, botId, createdAt, category, lesson, evidence, severity
     FROM lessons_learned
     WHERE botId = ? AND createdAt >= ?
     ORDER BY severity DESC, createdAt DESC
     LIMIT ?
   `).all(botId, since, limit) as LessonEntry[];
 
-  return rows as LessonEntry[];
+  return rows;
 }
 
 export function countLessonsForBot(botId: string, lookbackDays = 7): number {

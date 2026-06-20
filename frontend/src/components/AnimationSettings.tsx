@@ -21,10 +21,11 @@ type Props = {
   onConfigChange?: (config: AnimationConfig) => void;
 };
 
-const initialConfig = loadAnimationConfig();
-
 export default function AnimationSettings({ onConfigChange }: Props) {
-  const [config, setConfig] = useState<AnimationConfig>(initialConfig);
+  // Lazy initializer: read fresh from localStorage on every mount.
+  // AnimationSettings is conditionally mounted (settings tab), so a module-level
+  // snapshot would go stale across tab switches and silently revert saved values.
+  const [config, setConfig] = useState<AnimationConfig>(() => loadAnimationConfig());
   const [saved, setSaved] = useState(false);
   const [expandedSection, setExpandedSection] = useState<"trade" | "background" | "botchip">("trade");
 

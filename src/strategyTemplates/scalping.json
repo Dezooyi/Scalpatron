@@ -23,8 +23,8 @@
   },
   "scalping_settings": {
     "floorWindow": 20,
-    "spikeThreshold": 0.3,
-    "sellDropThreshold": 0.15,
+    "spikeThreshold": 3.0,
+    "sellDropThreshold": 5.0,
     "cooldownTicks": 5
   },
   "isTemplate": true,

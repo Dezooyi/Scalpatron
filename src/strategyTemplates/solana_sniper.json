@@ -10,8 +10,8 @@
   "execution": { "order_type": "market", "slippage_tolerance": 0.01 },
   "scalping_settings": {
     "floorWindow": 15,
-    "spikeThreshold": 0.05,
-    "sellDropThreshold": 0.025,
+    "spikeThreshold": 5.0,
+    "sellDropThreshold": 4.0,
     "cooldownTicks": 20
   },
   "isTemplate": true,

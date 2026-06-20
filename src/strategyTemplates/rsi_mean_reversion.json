@@ -16,11 +16,11 @@
     { "left": "price", "operator": "<=", "right": "BB_lower" }
   ],
   "exit_conditions": [
-    { "type": "take_profit", "value": 0.035 },
-    { "type": "stop_loss", "value": 0.02 },
+    { "type": "take_profit", "value": 0.07 },
+    { "type": "stop_loss", "value": 0.03 },
     {
       "type": "indicator",
-      "condition": { "left": "RSI_14", "operator": ">=", "right": 55 }
+      "condition": { "left": "RSI_14", "operator": ">=", "right": 65 }
     },
     {
       "type": "indicator",

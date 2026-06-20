@@ -18,8 +18,8 @@
     { "left": "price", "operator": ">", "right": "EMA_26" }
   ],
   "exit_conditions": [
-    { "type": "take_profit", "value": 0.045 },
-    { "type": "stop_loss", "value": 0.02 },
+    { "type": "take_profit", "value": 0.08 },
+    { "type": "stop_loss", "value": 0.03 },
     {
       "type": "indicator",
       "condition": { "left": "MACD_histogram", "operator": "crossunder", "right": 0 }

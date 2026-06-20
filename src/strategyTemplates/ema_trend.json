@@ -17,8 +17,8 @@
     { "left": "RSI_14", "operator": "<", "right": 65 }
   ],
   "exit_conditions": [
-    { "type": "take_profit", "value": 0.04 },
-    { "type": "stop_loss", "value": 0.02 },
+    { "type": "take_profit", "value": 0.08 },
+    { "type": "stop_loss", "value": 0.03 },
     {
       "type": "indicator",
       "condition": { "left": "EMA_12", "operator": "crossunder", "right": "EMA_26" }

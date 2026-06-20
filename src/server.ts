@@ -4,7 +4,6 @@ import { PriceRecorder } from './priceRecorder.js';
 import { logger } from './appLogger.js';
 import { getAdvisorSuggestions } from './advisorEngine.js';
 import { TokenService, isValidMintAddress, saveTokenToDb } from './tokenService.js';
-import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder, getTradesForPerformance, getTimeWindowPerformance, detectTimeWindowDrift, getLessonsForBot } from './db.js';
 import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder, getTradesForPerformance, getTimeWindowPerformance, detectTimeWindowDrift, getLessonsForBot, saveUiSettings, loadUiSettings, type UiSettings } from './db.js';
 import { loadBuiltinTemplates } from './strategyEngine.js';
 import { PriceFeed } from './priceFeed.js';
@@ -410,6 +409,19 @@ export class BotServer {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));
       });
+      return;
+    }
+
+    // DELETE /api/bots — delete ALL bots at once
+    if (url === '/api/bots' && req.method === 'DELETE') {
+      const allBots = this.botManager.getAllBots();
+      for (const bot of allBots) {
+        this.botManager.deleteBot(bot.getState().id);
+        deleteBotOrder(bot.getState().id);
+      }
+      this.broadcast('state', []);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, deleted: allBots.length }));
       return;
     }
 
@@ -967,9 +979,24 @@ export class BotServer {
       }
       const body = await parseBody(req);
       const botId: string | undefined = body?.botId || undefined;
-      this.ollamaAgent.triggerAnalysis(botId);
+      // ADR-012: optional force multiplier (0..100) controls how aggressively
+      // the AI's recommendation is blended into current settings. Clamped
+      // server-side. Undefined => legacy behaviour (1:1 apply).
+      let forceMultiplier: number | undefined;
+      if (body && typeof body.forceMultiplier === 'number') {
+        const raw = body.forceMultiplier;
+        if (Number.isFinite(raw)) {
+          forceMultiplier = Math.max(0, Math.min(100, Math.round(raw)));
+        }
+      }
+      this.ollamaAgent.triggerAnalysis(botId, forceMultiplier);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, message: 'Analysis triggered', botId: botId ?? 'all' }));
+      res.end(JSON.stringify({
+        ok: true,
+        message: 'Analysis triggered',
+        botId: botId ?? 'all',
+        forceMultiplier: forceMultiplier ?? 100,
+      }));
       return;
     }
 
@@ -1211,8 +1238,9 @@ export class BotServer {
           safety: { allowAutoSwitch: allowSwitch, minSwitchConfidence: minSwitchConf },
         }));
       } catch (e: any) {
+        console.error(`[Server] /api/agent/insights failed for botId=${botId}:`, e);
         res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: e.message }));
+        res.end(JSON.stringify({ error: e.message ?? String(e) }));
       }
       return;
     }

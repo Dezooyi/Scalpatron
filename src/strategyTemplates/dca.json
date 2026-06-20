@@ -16,7 +16,7 @@
     { "left": "price", "operator": ">", "right": "EMA_20" }
   ],
   "exit_conditions": [
-    { "type": "take_profit", "value": 0.06 },
+    { "type": "take_profit", "value": 0.10 },
     { "type": "stop_loss", "value": 0.05 }
   ],
   "risk_management": {

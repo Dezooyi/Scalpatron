@@ -25,10 +25,10 @@ export interface PatternSettings {
 
 export const DEFAULT_SETTINGS: PatternSettings = {
   floorWindow: 20,
-  spikeThreshold: 1.0,
-  sellDropThreshold: 0.05,
+  spikeThreshold: 3.0,      // 3% spike to enter — covers 2% roundtrip fee with margin
+  sellDropThreshold: 5.0,   // 5% trailing stop — lets moves develop before exiting
   cooldownTicks: 15,
-  takeProfitThreshold: 0.10,
+  takeProfitThreshold: 0.10, // 10% take-profit — 8% net after 2% fee
 };
 
 export class PatternDetector {

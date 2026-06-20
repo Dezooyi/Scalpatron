@@ -707,6 +707,7 @@ const BotChip = memo(({
                   <TrendIcon className={`h-3 w-3 ${trendColor}`} />
                   <span className="tabular-nums">{bot.totalTicks || 0} ticks</span>
                 </span>
+                <span className="text-zinc-400 text-sm font-mono uppercase tracking-tighter tabular-nums shrink-0"><BotUptime startTime={bot.startTime} isRunning={isRunning} /></span>
               </div>
             </>
           )}
@@ -783,6 +784,10 @@ const BotChip = memo(({
                     <span className={`font-black text-[var(--ds-font-size-l)] leading-none tabular-nums truncate max-w-full ${color}`}>{value}</span>
                   </div>
                 ))}
+              </div>
+
+              <div className="flex items-center justify-end pt-1 mt-0.5 border-t border-border/30 text-xs font-mono text-zinc-500 min-w-0">
+                <span className="text-zinc-400 uppercase tracking-tighter tabular-nums truncate"><BotUptime startTime={bot.startTime} isRunning={isRunning} /></span>
               </div>
             </>
           )}

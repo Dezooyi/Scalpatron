@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { Moon, Sun, CheckCircle, XCircle, AlertTriangle, Settings, Server } from "lucide-react";
+import { Moon, Sun, CheckCircle, XCircle, AlertTriangle, Settings, Server, Trash2, ShieldAlert } from "lucide-react";
+import { useConfirm } from "@/components/ConfirmDialog";
 import AnimationSettings from "./AnimationSettings";
 import DesignSystemSettings from "./DesignSystemSettings";
 import type { AnimationConfig } from "@/lib/animationConfig";
@@ -50,6 +51,8 @@ type Props = {
 
 export default function GlobalSettings({ theme, onThemeChange, onSaved, onAnimConfigChange }: Props) {
   const [settings, setSettings] = useState<GlobalSettingsData>(DEFAULTS);
+  const [deleteAllStatus, setDeleteAllStatus] = useState<"idle" | "loading" | "done">("idle");
+  const confirm = useConfirm();
   const [apiUrl, setApiUrl] = useState(() => {
     const stored = localStorage.getItem(LS_API_URL_KEY);
     // Empty string = use Vite proxy (relative URLs). "http://localhost:3000" is the old default — treat as empty.
@@ -118,6 +121,24 @@ export default function GlobalSettings({ theme, onThemeChange, onSaved, onAnimCo
     } finally {
       setConnTesting(false);
       setTimeout(() => setConnStatus("idle"), 3000);
+    }
+  }
+
+  async function handleDeleteAllBots() {
+    const ok = await confirm({
+      title: "Delete All Bots",
+      message: "This will permanently delete ALL bots and their entire trade history. This cannot be undone.",
+      confirmLabel: "Delete All",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setDeleteAllStatus("loading");
+    try {
+      await fetch(`${apiUrl}/api/bots`, { method: "DELETE" });
+      setDeleteAllStatus("done");
+      setTimeout(() => setDeleteAllStatus("idle"), 2500);
+    } catch {
+      setDeleteAllStatus("idle");
     }
   }
 
@@ -279,6 +300,40 @@ export default function GlobalSettings({ theme, onThemeChange, onSaved, onAnimCo
 
       {/* Animation Settings */}
       <AnimationSettings onConfigChange={onAnimConfigChange} />
+
+      {/* Danger Zone */}
+      <Card className="border-red-500/30">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-red-400">
+            <ShieldAlert className="w-5 h-5" /> Danger Zone
+          </CardTitle>
+          <CardDescription>Destructive actions — cannot be undone</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">Delete All Bots</p>
+              <p className="text-sm text-muted-foreground">Permanently removes all bots and their trade history</p>
+            </div>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={deleteAllStatus === "loading"}
+              onClick={handleDeleteAllBots}
+              className="shrink-0"
+            >
+              {deleteAllStatus === "loading" ? (
+                <AlertTriangle className="w-4 h-4 mr-2 animate-pulse" />
+              ) : deleteAllStatus === "done" ? (
+                <CheckCircle className="w-4 h-4 mr-2" />
+              ) : (
+                <Trash2 className="w-4 h-4 mr-2" />
+              )}
+              {deleteAllStatus === "done" ? "Deleted" : "Delete All Bots"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

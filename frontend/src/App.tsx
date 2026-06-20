@@ -80,6 +80,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CreateBotDialog } from "@/components/CreateBotDialog";
+import { OracleAnalysisDialog } from "@/components/OracleAnalysisDialog";
 import { BotChipGrid } from "@/components/BotChipGrid";
 import { GlobalBotStatsBar } from "@/components/GlobalBotStatsBar";
 import { PerformanceSection } from "@/components/PerformanceSection";
@@ -373,9 +374,17 @@ export default function App() {
   const [selectedHistoryBot, setSelectedHistoryBot] = useState<string>("all");
   const [configStatus, setConfigStatus] = useState<string>("");
   const [isTriggering, setIsTriggering] = useState(false);
+  const [isOracleDialogOpen, setIsOracleDialogOpen] = useState(false);
   const [regimePerformance, setRegimePerformance] = useState<RegimePerformance[]>([]);
   const [strategyTemplates, setStrategyTemplates] = useState<StrategyTemplate[]>([]);
   const [newBotStrategyId, setNewBotStrategyId] = useState<string>("");
+
+  // Smart Advisor States (manuelle Aktualisierung — kein Auto-Fetch, persistent über Tab-Wechsel)
+  const [advisorSuggestions, setAdvisorSuggestions] = useState<AdvisorSuggestion[]>([]);
+  const [advisorHistory, setAdvisorHistory] = useState<AdvisorSuggestion[]>([]);
+  const [advisorLoading, setAdvisorLoading] = useState(false);
+  const [advisorError, setAdvisorError] = useState<string | null>(null);
+  const [advisorFetchedAt, setAdvisorFetchedAt] = useState<number | null>(null);
 
   // Strategien Tab State
   const [savedStrategies, setSavedStrategies] = useState<StrategyTemplate[]>([]);
@@ -415,6 +424,7 @@ export default function App() {
   const [newBotTradingMode, setNewBotTradingMode] = useState<"fixed" | "aggressive">("fixed");
   const [newBotTradeSize, setNewBotTradeSize] = useState(1);
   const [newBotAggressiveness, setNewBotAggressiveness] = useState(10);
+  const [newBotAutoStart, setNewBotAutoStart] = useState(false);
   const [isCreateBotDialogOpen, setIsCreateBotDialogOpen] = useState(false);
   const [pendingAdvisorToken, setPendingAdvisorToken] = useState<{ name: string; symbol: string; priceUsd?: number; volume24h?: number; liquidity?: number } | null>(null);
 
@@ -423,7 +433,7 @@ export default function App() {
 
   // Inline Bot Settings Panel
   const [botSettingsPanelId, setBotSettingsPanelId] = useState<string | null>(null);
-  const [botSettingsDraft, setBotSettingsDraft] = useState<{ floorWindow: number; spikeThreshold: number; sellDropThreshold: number; cooldownTicks: number; tradeSize: number; aggressiveness: number; tradingMode: "fixed" | "aggressive"; walletAddress: string; strategyConfigDraft: StrategyConfig | null }>({ floorWindow: 20, spikeThreshold: 0.3, sellDropThreshold: 0.15, cooldownTicks: 5, tradeSize: 1, aggressiveness: 10, tradingMode: "fixed", walletAddress: "", strategyConfigDraft: null });
+  const [botSettingsDraft, setBotSettingsDraft] = useState<{ floorWindow: number; spikeThreshold: number; sellDropThreshold: number; cooldownTicks: number; tradeSize: number; aggressiveness: number; tradingMode: "fixed" | "aggressive"; walletAddress: string; strategyConfigDraft: StrategyConfig | null; aggPreset: number }>({ floorWindow: 20, spikeThreshold: 0.3, sellDropThreshold: 0.15, cooldownTicks: 5, tradeSize: 1, aggressiveness: 10, tradingMode: "fixed", walletAddress: "", strategyConfigDraft: null, aggPreset: 50 });
   const [botSettingsSaveStatus, setBotSettingsSaveStatus] = useState<"idle" | "saved" | "error">("idle");
   const [tradeFlash, setTradeFlash] = useState<Record<string, "buy" | "sell" | null>>({});
   const [aiFlash, setAiFlash] = useState<Record<string, boolean>>({});
@@ -584,9 +594,6 @@ export default function App() {
     sse.addEventListener("state", (e) => {
       try {
         const data = JSON.parse(e.data);
-        console.log(
-          `[SSE] State received: ${data.length} bots.`,
-        );
         throttledSetBots(data);
       } catch (err) {
         console.error("SSE Parse Error", err);
@@ -668,7 +675,6 @@ export default function App() {
     sse.addEventListener("agent_status", (e) => {
       try {
         const data = JSON.parse(e.data);
-        console.log("[SSE] Agent Status:", data);
         setAgentStatus({
           running: data.running ?? false,
           analyzing: data.analyzing ?? false,
@@ -692,9 +698,21 @@ export default function App() {
       }
     });
 
-    const flushLogs = () => {
-      if (Object.keys(logBufferRef.current).length === 0) return;
+    // Tracks consecutive empty-buffer flushes to auto-stop the interval when idle
+    let emptyFlushCount = 0;
+    const MAX_EMPTY_FLUSHES = 3; // Stop interval after 3 empty checks (~9s idle)
 
+    const flushLogs = () => {
+      if (Object.keys(logBufferRef.current).length === 0) {
+        emptyFlushCount++;
+        if (emptyFlushCount >= MAX_EMPTY_FLUSHES && logFlushIntervalRef.current) {
+          clearInterval(logFlushIntervalRef.current);
+          logFlushIntervalRef.current = null;
+        }
+        return;
+      }
+
+      emptyFlushCount = 0;
       setTerminalLogs(prev => {
         const next = { ...prev };
         for (const [botId, newEntries] of Object.entries(logBufferRef.current)) {
@@ -716,13 +734,15 @@ export default function App() {
           logBufferRef.current[entry.botId] = [];
         }
         logBufferRef.current[entry.botId].unshift(entry); // Newest first
-        // Cap per-bot buffer to prevent unbounded growth between 500ms flushes
+        // Cap per-bot buffer to prevent unbounded growth between flushes
         if (logBufferRef.current[entry.botId].length > 200) {
           logBufferRef.current[entry.botId].length = 200;
         }
 
+        // Restart interval if it was stopped during an idle period
         if (!logFlushIntervalRef.current) {
-          logFlushIntervalRef.current = setInterval(flushLogs, 500);
+          emptyFlushCount = 0;
+          logFlushIntervalRef.current = setInterval(flushLogs, 3000);
         }
       } catch (err) {
         console.error("SSE Parse Error Terminal", err);
@@ -831,7 +851,7 @@ export default function App() {
     };
 
     fetchSelectedHistory();
-    const interval = setInterval(fetchSelectedHistory, 3000);
+    const interval = setInterval(fetchSelectedHistory, 10000);
     return () => clearInterval(interval);
   }, [selectedBotId, selectedBotStatus]);
 
@@ -1018,6 +1038,20 @@ export default function App() {
     }
   };
 
+  const deleteAllBots = async () => {
+    if (bots.length === 0) return;
+    const ok = await confirm({
+      title: "Delete All Bots",
+      message: `Permanently delete all ${bots.length} bot${bots.length !== 1 ? "s" : ""} and their trade history?`,
+      confirmLabel: "Delete All",
+      variant: "danger",
+    });
+    if (!ok) return;
+    await fetch(`${getApiBase()}/api/bots`, { method: "DELETE" });
+    setBots([]);
+    setSelectedBotId(null);
+  };
+
   // Handle Bot Reorder from Drag and Drop
   const handleReorderBots = useCallback(async (botIds: string[]) => {
     try {
@@ -1044,6 +1078,11 @@ export default function App() {
       setBotSettingsPanelId(null);
       return;
     }
+    const isScalping = !bot.strategyConfig || bot.strategyConfig.strategy_type === 'scalping';
+    const fw = bot.settings?.floorWindow ?? 20;
+    const computedPreset = isScalping
+      ? Math.round(Math.max(0, Math.min(1, (35 - fw) / 30)) * 99 + 1)
+      : 50;
     setBotSettingsDraft({
       ...bot.settings,
       tradeSize: bot.tradeSize ?? 1,
@@ -1051,6 +1090,7 @@ export default function App() {
       tradingMode: bot.tradingMode ?? "fixed",
       walletAddress: bot.walletAddress ?? "",
       strategyConfigDraft: bot.strategyConfig ? JSON.parse(JSON.stringify(bot.strategyConfig)) : null,
+      aggPreset: computedPreset,
     });
     setBotSettingsPanelId(bot.id);
     setBotSettingsSaveStatus("idle");
@@ -1188,6 +1228,14 @@ export default function App() {
         }
         fetchTokens();
         setIsCreateBotDialogOpen(false);
+
+        // Auto-start: wait 1s for the bot to fully register in backend, then start
+        if (newBotAutoStart && newBot?.id) {
+          const startId = newBot.id;
+          setTimeout(() => {
+            toggleBotStatus(startId, "stopped");
+          }, 1000);
+        }
       }
     } catch (err) {
       console.error("[Bot] Create error:", err);
@@ -1204,6 +1252,27 @@ export default function App() {
   };
 
   // ==================== SMART BOT ADVISOR ====================
+
+  // ==================== SMART BOT ADVISOR FUNCTIONS ====================
+
+  // Wird NUR durch Klick auf "Aktualisieren" getriggert — kein Auto-Fetch beim Tab-Öffnen.
+  const fetchAdvisorSuggestions = useCallback(async (forceRefresh = false) => {
+    setAdvisorLoading(true);
+    setAdvisorError(null);
+    try {
+      const url = `${getApiBase()}/api/advisor/suggestions${forceRefresh ? '?refresh=1' : ''}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setAdvisorSuggestions(data.suggestions ?? []);
+      setAdvisorHistory(data.history ?? []);
+      setAdvisorFetchedAt(data.fetchedAt ?? Date.now());
+    } catch (e) {
+      setAdvisorError(e instanceof Error ? e.message : 'Unbekannter Fehler');
+    } finally {
+      setAdvisorLoading(false);
+    }
+  }, []);
 
   const handleCreateFromAdvisor = (suggestion: AdvisorSuggestion) => {
     setNewBotName(`${suggestion.tokenSymbol} ${suggestion.strategyName.split(' ')[0]}`);
@@ -1365,19 +1434,22 @@ export default function App() {
     }
   };
 
-  // Trigger Analysis
-  const triggerAgentAnalysis = async () => {
+  // Trigger Analysis (ADR-012: accepts optional force multiplier 0-100)
+  const triggerAgentAnalysis = async (forceMultiplier?: number) => {
     setConfigStatus("Analysiere...");
     setIsTriggering(true);
     try {
+      const body: { botId?: string; forceMultiplier?: number } = {};
+      if (selectedBotId) body.botId = selectedBotId;
+      if (typeof forceMultiplier === "number") body.forceMultiplier = forceMultiplier;
       const res = await fetch(`${getApiBase()}/api/agent/trigger`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(selectedBotId ? { botId: selectedBotId } : {}),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       console.log("[Agent] Trigger response:", data);
-      setConfigStatus("Analyse gestartet!");
+      setConfigStatus(`Analyse gestartet! (force=${data.forceMultiplier ?? 100}%)`);
       // Warten und dann History neu laden (längeres Fenster für KI)
       setTimeout(async () => {
         await loadAgentHistory();
@@ -1742,7 +1814,11 @@ export default function App() {
       ease: "power2.inOut",
     }, "<0.15");
 
-  }, { dependencies: [backgroundPulseTrigger], scope: globalPulseContainerRef });
+  // Dependencies include the enable flags so toggling "All Animations" /
+  // "Background Pulse" in the settings immediately re-evaluates the guard.
+  // Without them the effect only re-runs on the next trigger event, so a toggle
+  // appeared to "not take effect" because the trigger is transient (resets to false).
+  }, { dependencies: [backgroundPulseTrigger, animConfig.enabled, animConfig.backgroundPulseEnabled], scope: globalPulseContainerRef });
 
   return (
     <>
@@ -1908,6 +1984,17 @@ export default function App() {
 
             {/* Rechts: Backend Status und Theme Toggle */}
             <div className="topbar-actions flex items-center gap-4">
+              {/* Delete All Bots — only shown when bots exist */}
+              {bots.length > 0 && (
+                <button
+                  className="flex items-center gap-1.5 text-red-400/70 hover:text-red-400 hover:bg-red-500/10 border border-red-500/20 hover:border-red-500/40 transition-colors px-2.5 py-1.5 rounded-md text-sm"
+                  onClick={deleteAllBots}
+                  title="Delete all bots"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              )}
+
               {/* Create Bot CTA */}
               <button
                 className="flex items-center gap-2 bg-primary/20 hover:bg-primary/30 text-primary border border-primary/30 hover:border-primary/50 transition-colors px-3 py-1.5 rounded-md text-sm font-bold"
@@ -1998,6 +2085,8 @@ export default function App() {
                     setNewBotStrategyId={setNewBotStrategyId}
                     showTokenWhitelist={showTokenWhitelist}
                     setShowTokenWhitelist={setShowTokenWhitelist}
+                    startAfterCreate={newBotAutoStart}
+                    setStartAfterCreate={setNewBotAutoStart}
                     onCreateBot={createDemoBot}
                   />
                 </div>
@@ -2280,13 +2369,24 @@ export default function App() {
                             const stratType = scd?.strategy_type ?? 'scalping';
 
                             // Helper: update an indicator field by indicator type name
+                            // Supports both exact type ("EMA_20") and base-type fallback ("EMA" when template uses generic names)
                             const updateIndicator = (indType: string, field: string, value: number) => {
                               setBotSettingsDraft((p) => {
                                 if (!p.strategyConfigDraft) return p;
-                                const indicators = p.strategyConfigDraft.indicators.map((ind) =>
-                                  ind.type === indType ? { ...ind, [field]: value } : ind
-                                );
-                                return { ...p, strategyConfigDraft: { ...p.strategyConfigDraft, indicators } };
+                                const inds = p.strategyConfigDraft.indicators;
+                                // Exact match
+                                if (inds.some(i => i.type === indType)) {
+                                  return { ...p, strategyConfigDraft: { ...p.strategyConfigDraft, indicators: inds.map(i => i.type === indType ? { ...i, [field]: value } : i) } };
+                                }
+                                // Fuzzy: "EMA_20" → base="EMA", targetPeriod=20
+                                const sep = indType.lastIndexOf('_');
+                                if (sep === -1) return p;
+                                const baseType = indType.slice(0, sep);
+                                const targetPeriod = parseInt(indType.slice(sep + 1));
+                                const withIdx = inds.map((ind, idx) => ({ ind, idx })).filter(({ ind }) => ind.type === baseType);
+                                if (withIdx.length === 0) return p;
+                                const targetIdx = withIdx.length === 1 ? withIdx[0].idx : withIdx.reduce((b, c) => Math.abs(((c.ind as { period?: number }).period ?? 0) - targetPeriod) < Math.abs(((b.ind as { period?: number }).period ?? 0) - targetPeriod) ? c : b).idx;
+                                return { ...p, strategyConfigDraft: { ...p.strategyConfigDraft, indicators: inds.map((ind, idx) => idx === targetIdx ? { ...ind, [field]: value } : ind) } };
                               });
                             };
 
@@ -2328,16 +2428,78 @@ export default function App() {
                               });
                             };
 
-                            // Get indicator by type
-                            const getInd = (type: string) => scd?.indicators?.find((i) => i.type === type);
+                            // Get indicator by type — exact match first, then fuzzy base-type + closest period
+                            // Needed because templates use "EMA"/"RSI" but UI keys use "EMA_20"/"RSI_14"
+                            const getInd = (typeKey: string): (typeof scd.indicators)[number] | undefined => {
+                              if (!scd?.indicators) return undefined;
+                              const exact = scd.indicators.find(i => i.type === typeKey);
+                              if (exact) return exact;
+                              const sep = typeKey.lastIndexOf('_');
+                              if (sep === -1) return undefined;
+                              const baseType = typeKey.slice(0, sep);
+                              const targetPeriod = parseInt(typeKey.slice(sep + 1));
+                              const candidates = scd.indicators.filter(i => i.type === baseType);
+                              if (candidates.length === 0) return undefined;
+                              if (candidates.length === 1) return candidates[0];
+                              return candidates.reduce((best, ind) => Math.abs(((ind as { period?: number }).period ?? 0) - targetPeriod) < Math.abs(((best as { period?: number }).period ?? 0) - targetPeriod) ? ind : best);
+                            };
                             // Get exit condition by type
                             const getExit = (type: string) => scd?.exit_conditions?.find((e) => e.type === type);
                             // Get entry condition by left operand
                             const getEntry = (left: string) => scd?.entry_conditions?.find((e) => e.left === left);
 
-                            const inputCls = "w-full bg-background border border-border rounded px-2 py-1.5 text-sm focus:outline-none focus:border-primary/50";
-                            const labelCls = "text-xs-custom font-bold uppercase text-muted-foreground";
-                            const descCls = "text-xs-custom text-muted-foreground/70";
+                            const labelCls = "text-[10px] font-bold uppercase text-muted-foreground tracking-wide";
+                            const descCls = "text-[10px] text-muted-foreground/60 mt-0.5";
+                            const aggPreset = botSettingsDraft.aggPreset ?? 50;
+                            const presetLabel = aggPreset <= 20 ? 'Konservativ' : aggPreset <= 40 ? 'Defensiv' : aggPreset <= 60 ? 'Ausgewogen' : aggPreset <= 80 ? 'Aggressiv' : 'Max-Aggro';
+                            const presetColor = aggPreset <= 33 ? 'text-blue-400' : aggPreset <= 66 ? 'text-yellow-400' : 'text-red-400';
+
+                            const applyPreset = (v: number) => {
+                              const t = (v - 1) / 99;
+                              const lerp = (a: number, b: number) => Math.round(a + (b - a) * t);
+                              const lerpF = (a: number, b: number, dp = 3) => parseFloat((a + (b - a) * t).toFixed(dp));
+                              setBotSettingsDraft((p) => {
+                                const base = { ...p, aggPreset: v };
+                                if (stratType === 'scalping') {
+                                  return { ...base, floorWindow: lerp(35, 5), spikeThreshold: lerpF(0.8, 0.1), sellDropThreshold: lerpF(0.12, 0.03), cooldownTicks: lerp(25, 2) };
+                                }
+                                if (!p.strategyConfigDraft) return base;
+                                const sc = p.strategyConfigDraft;
+                                if (stratType === 'trend') {
+                                  return { ...base, strategyConfigDraft: { ...sc, entry_conditions: sc.entry_conditions.map(e => e.left === 'RSI_14' ? { ...e, right: lerp(55, 80) } : e), exit_conditions: sc.exit_conditions.map(e => e.type === 'take_profit' ? { ...e, value: lerpF(0.025, 0.09) } : e.type === 'stop_loss' ? { ...e, value: lerpF(0.01, 0.05) } : e), risk_management: { ...sc.risk_management, position_size: lerpF(0.05, 0.30) }, execution: { ...sc.execution, slippage_tolerance: lerpF(0.001, 0.005) } }};
+                                }
+                                if (stratType === 'mean_reversion') {
+                                  return { ...base, strategyConfigDraft: { ...sc, entry_conditions: sc.entry_conditions.map(e => e.left === 'RSI_14' ? { ...e, right: lerp(25, 42) } : e), exit_conditions: sc.exit_conditions.map(e => e.type === 'take_profit' ? { ...e, value: lerpF(0.02, 0.09) } : e.type === 'stop_loss' ? { ...e, value: lerpF(0.01, 0.05) } : (e.type === 'indicator' && (e.condition as {left?:string})?.left === 'RSI_14') ? { ...e, condition: { ...(e.condition as object), right: lerp(58, 80) } } : e), risk_management: { ...sc.risk_management, position_size: lerpF(0.05, 0.28) } }};
+                                }
+                                if (stratType === 'breakout') {
+                                  return { ...base, strategyConfigDraft: { ...sc, indicators: sc.indicators.map(i => (i.type === 'BB' || i.type === 'BB_20') ? { ...i, std_dev: lerpF(2.8, 1.4) } : i), entry_conditions: sc.entry_conditions.map(e => e.left === 'RSI_14' ? { ...e, right: lerp(58, 40) } : e), exit_conditions: sc.exit_conditions.map(e => e.type === 'take_profit' ? { ...e, value: lerpF(0.03, 0.12) } : e.type === 'stop_loss' ? { ...e, value: lerpF(0.015, 0.05) } : e.type === 'trailing_stop' ? { ...e, trailing_pct: lerpF(0.008, 0.07) } : e), risk_management: { ...sc.risk_management, position_size: lerpF(0.05, 0.25) } }};
+                                }
+                                if (stratType === 'momentum') {
+                                  return { ...base, strategyConfigDraft: { ...sc, entry_conditions: sc.entry_conditions.map(e => e.left === 'RSI_14' ? { ...e, right: lerp(60, 82) } : e), exit_conditions: sc.exit_conditions.map(e => e.type === 'take_profit' ? { ...e, value: lerpF(0.03, 0.12) } : e.type === 'stop_loss' ? { ...e, value: lerpF(0.01, 0.05) } : e), risk_management: { ...sc.risk_management, position_size: lerpF(0.05, 0.25) } }};
+                                }
+                                if (stratType === 'dca') {
+                                  return { ...base, strategyConfigDraft: { ...sc, entry_conditions: sc.entry_conditions.map(e => e.left === 'RSI_14' ? { ...e, right: lerp(30, 50) } : e), exit_conditions: sc.exit_conditions.map(e => e.type === 'take_profit' ? { ...e, value: lerpF(0.04, 0.18) } : e.type === 'stop_loss' ? { ...e, value: lerpF(0.02, 0.10) } : e), risk_management: { ...sc.risk_management, position_size: lerpF(0.02, 0.12), max_positions: lerp(1, 5), max_drawdown: lerpF(0.08, 0.25) } }};
+                                }
+                                return base;
+                              });
+                            };
+
+                            const SR = (label: string, min: number, max: number, step: number, val: number, fmt: (n: number) => string, onChange: (n: number) => void, desc?: string) => (
+                              <div className="space-y-0.5">
+                                <div className="flex items-baseline justify-between gap-1">
+                                  <span className={labelCls}>{label}</span>
+                                  <span className="text-primary text-[11px] font-mono font-bold tabular-nums">{fmt(val)}</span>
+                                </div>
+                                <input type="range" min={min} max={max} step={step} value={val}
+                                  onChange={(e) => onChange(Number(e.target.value))}
+                                  className="w-full accent-primary cursor-pointer" style={{ height: '4px' }} />
+                                {desc && <p className={descCls}>{desc}</p>}
+                              </div>
+                            );
+
+                            const pct1 = (n: number) => `${n.toFixed(1)}%`;
+                            const pct0 = (n: number) => `${Math.round(n)}%`;
+                            const tick = (n: number) => `${Math.round(n)}`;
 
                             return (
                               <div className="animate-in slide-in-from-top-2 duration-200 border-b border-primary/10 bg-muted/20 px-6 py-4 space-y-4">
@@ -2356,421 +2518,189 @@ export default function App() {
                                   <span className="text-xs-custom text-zinc-500">{scd?.strategy_name ?? 'Range Spike Scalper'}</span>
                                 </div>
 
+                                {/* ── MASTER AGGRESSIVENESS PRESET ── */}
+                                <div className="space-y-1.5 pb-3 border-b border-border/30">
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">Preset</span>
+                                      <span className={`text-[10px] font-bold ${presetColor}`}>{presetLabel}</span>
+                                    </div>
+                                    <span className={`text-xs font-mono font-bold ${presetColor}`}>{aggPreset}</span>
+                                  </div>
+                                  <input
+                                    type="range" min={1} max={100} value={aggPreset}
+                                    onChange={(e) => applyPreset(Number(e.target.value))}
+                                    className="w-full cursor-pointer"
+                                    style={{ accentColor: aggPreset <= 33 ? '#60a5fa' : aggPreset <= 66 ? '#facc15' : '#f87171', height: '6px' }}
+                                  />
+                                  <div className="flex justify-between text-[9px] text-muted-foreground/40 select-none">
+                                    <span>Konservativ</span><span>Ausgewogen</span><span>Aggressiv</span>
+                                  </div>
+                                </div>
+
                                 {/* ── SCALPING PARAMS ── */}
                                 {stratType === 'scalping' && (
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Floor Window</label>
-                                      <input type="number" min={5} max={100} className={inputCls}
-                                        value={botSettingsDraft.floorWindow ?? ""}
-                                        onChange={(e) => setBotSettingsDraft((p) => ({ ...p, floorWindow: parseInt(e.target.value) || p.floorWindow }))} />
-                                      <p className={descCls}>Ticks (5–100)</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Spike Threshold</label>
-                                      <input type="number" min={0.1} max={5} step={0.05} className={inputCls}
-                                        value={botSettingsDraft.spikeThreshold ?? ""}
-                                        onChange={(e) => setBotSettingsDraft((p) => ({ ...p, spikeThreshold: parseFloat(e.target.value) || p.spikeThreshold }))} />
-                                      <p className={descCls}>% (0.1–5.0)</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Sell Drop Threshold</label>
-                                      <input type="number" min={0.05} max={1} step={0.01} className={inputCls}
-                                        value={botSettingsDraft.sellDropThreshold ?? ""}
-                                        onChange={(e) => setBotSettingsDraft((p) => ({ ...p, sellDropThreshold: parseFloat(e.target.value) || p.sellDropThreshold }))} />
-                                      <p className={descCls}>% (0.05–1.0)</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Cooldown Ticks</label>
-                                      <input type="number" min={0} max={50} className={inputCls}
-                                        value={botSettingsDraft.cooldownTicks ?? ""}
-                                        onChange={(e) => setBotSettingsDraft((p) => ({ ...p, cooldownTicks: parseInt(e.target.value) ?? p.cooldownTicks }))} />
-                                      <p className={descCls}>Ticks (0–50)</p>
-                                    </div>
+                                    {SR('Floor Window', 5, 100, 1, botSettingsDraft.floorWindow ?? 20, tick,
+                                      (n) => setBotSettingsDraft(p => ({ ...p, floorWindow: n })), 'Ticks (5–100)')}
+                                    {SR('Spike Threshold', 0.05, 5, 0.05, botSettingsDraft.spikeThreshold ?? 0.3, (n) => `${n.toFixed(2)}%`,
+                                      (n) => setBotSettingsDraft(p => ({ ...p, spikeThreshold: n })), '% Anstieg')}
+                                    {SR('Sell Drop', 0.02, 1, 0.01, botSettingsDraft.sellDropThreshold ?? 0.15, (n) => `${n.toFixed(2)}%`,
+                                      (n) => setBotSettingsDraft(p => ({ ...p, sellDropThreshold: n })), '% Rückgang')}
+                                    {SR('Cooldown', 0, 50, 1, botSettingsDraft.cooldownTicks ?? 5, tick,
+                                      (n) => setBotSettingsDraft(p => ({ ...p, cooldownTicks: n })), 'Ticks (0–50)')}
                                   </div>
                                 )}
 
                                 {/* ── EMA TREND PARAMS ── */}
                                 {stratType === 'trend' && scd && (
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>EMA Fast Period</label>
-                                      <input type="number" min={2} max={200} className={inputCls}
-                                        value={getInd('EMA_20')?.period ?? getInd('EMA')?.period ?? 20}
-                                        onChange={(e) => updateIndicator('EMA_20', 'period', parseInt(e.target.value) || 20)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>EMA Slow Period</label>
-                                      <input type="number" min={2} max={500} className={inputCls}
-                                        value={getInd('EMA_50')?.period ?? 50}
-                                        onChange={(e) => updateIndicator('EMA_50', 'period', parseInt(e.target.value) || 50)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>RSI Period</label>
-                                      <input type="number" min={2} max={50} className={inputCls}
-                                        value={getInd('RSI_14')?.period ?? 14}
-                                        onChange={(e) => updateIndicator('RSI_14', 'period', parseInt(e.target.value) || 14)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>RSI Max Entry</label>
-                                      <input type="number" min={30} max={90} step={1} className={inputCls}
-                                        value={typeof getEntry('RSI_14')?.right === 'number' ? getEntry('RSI_14')!.right as number : 65}
-                                        onChange={(e) => updateEntryCondition('RSI_14', parseFloat(e.target.value) || 65)} />
-                                      <p className={descCls}>Entry if RSI &lt; value</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Take Profit</label>
-                                      <input type="number" min={0.005} max={0.5} step={0.005} className={inputCls}
-                                        value={((getExit('take_profit')?.value ?? 0.04) * 100).toFixed(1)}
-                                        onChange={(e) => updateExitCondition('take_profit', 'value', (parseFloat(e.target.value) || 4) / 100)} />
-                                      <p className={descCls}>% profit target</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Stop Loss</label>
-                                      <input type="number" min={0.005} max={0.3} step={0.005} className={inputCls}
-                                        value={((getExit('stop_loss')?.value ?? 0.02) * 100).toFixed(1)}
-                                        onChange={(e) => updateExitCondition('stop_loss', 'value', (parseFloat(e.target.value) || 2) / 100)} />
-                                      <p className={descCls}>% max loss</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Position Size</label>
-                                      <input type="number" min={1} max={100} step={1} className={inputCls}
-                                        value={((scd.risk_management.position_size ?? 0.15) * 100).toFixed(0)}
-                                        onChange={(e) => updateRisk('position_size', (parseFloat(e.target.value) || 15) / 100)} />
-                                      <p className={descCls}>% of balance</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Slippage</label>
-                                      <input type="number" min={0.01} max={5} step={0.05} className={inputCls}
-                                        value={((scd.execution.slippage_tolerance ?? 0.002) * 100).toFixed(2)}
-                                        onChange={(e) => updateExecution('slippage_tolerance', (parseFloat(e.target.value) || 0.2) / 100)} />
-                                      <p className={descCls}>% max slippage</p>
-                                    </div>
+                                    {SR('EMA Fast', 2, 50, 1, (getInd('EMA_20') as {period?: number})?.period ?? 20, tick,
+                                      (n) => updateIndicator('EMA_20', 'period', n), 'Candles')}
+                                    {SR('EMA Slow', 10, 200, 1, (getInd('EMA_50') as {period?: number})?.period ?? 50, tick,
+                                      (n) => updateIndicator('EMA_50', 'period', n), 'Candles')}
+                                    {SR('RSI Period', 2, 30, 1, (getInd('RSI_14') as {period?: number})?.period ?? 14, tick,
+                                      (n) => updateIndicator('RSI_14', 'period', n), 'Candles')}
+                                    {SR('RSI Max Entry', 30, 90, 1, typeof getEntry('RSI_14')?.right === 'number' ? getEntry('RSI_14')!.right as number : 65, tick,
+                                      (n) => updateEntryCondition('RSI_14', n), 'Entry wenn RSI <')}
+                                    {SR('Take Profit', 0.5, 20, 0.5, (getExit('take_profit')?.value ?? 0.04) * 100, pct1,
+                                      (n) => updateExitCondition('take_profit', 'value', n / 100), '% Ziel')}
+                                    {SR('Stop Loss', 0.5, 15, 0.5, (getExit('stop_loss')?.value ?? 0.02) * 100, pct1,
+                                      (n) => updateExitCondition('stop_loss', 'value', n / 100), '% max Verlust')}
+                                    {SR('Position Size', 1, 50, 1, (scd.risk_management.position_size ?? 0.15) * 100, pct0,
+                                      (n) => updateRisk('position_size', n / 100), '% des Guthabens')}
+                                    {SR('Slippage', 0.05, 1, 0.05, (scd.execution.slippage_tolerance ?? 0.002) * 100, (n) => `${n.toFixed(2)}%`,
+                                      (n) => updateExecution('slippage_tolerance', n / 100), '% max Slippage')}
                                   </div>
                                 )}
 
                                 {/* ── RSI MEAN REVERSION PARAMS ── */}
                                 {stratType === 'mean_reversion' && scd && (
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>RSI Period</label>
-                                      <input type="number" min={2} max={50} className={inputCls}
-                                        value={getInd('RSI_14')?.period ?? 14}
-                                        onChange={(e) => updateIndicator('RSI_14', 'period', parseInt(e.target.value) || 14)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>BB Period</label>
-                                      <input type="number" min={5} max={200} className={inputCls}
-                                        value={getInd('BB_20')?.period ?? 20}
-                                        onChange={(e) => updateIndicator('BB_20', 'period', parseInt(e.target.value) || 20)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>BB Std Dev</label>
-                                      <input type="number" min={0.5} max={4} step={0.1} className={inputCls}
-                                        value={getInd('BB_20')?.std_dev ?? 2}
-                                        onChange={(e) => updateIndicator('BB_20', 'std_dev', parseFloat(e.target.value) || 2)} />
-                                      <p className={descCls}>Standard deviations</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>RSI Oversold Entry</label>
-                                      <input type="number" min={10} max={50} step={1} className={inputCls}
-                                        value={typeof getEntry('RSI_14')?.right === 'number' ? getEntry('RSI_14')!.right as number : 32}
-                                        onChange={(e) => updateEntryCondition('RSI_14', parseFloat(e.target.value) || 32)} />
-                                      <p className={descCls}>Entry if RSI &lt; value</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>RSI Overbought Exit</label>
-                                      <input type="number" min={50} max={90} step={1} className={inputCls}
-                                        value={(() => { const ec = scd.exit_conditions.find((e) => e.type === 'indicator' && e.condition?.left === 'RSI_14'); return ec?.condition?.right ?? 55; })()}
-                                        onChange={(e) => {
-                                          const val = parseFloat(e.target.value) || 55;
-                                          setBotSettingsDraft((p) => {
-                                            if (!p.strategyConfigDraft) return p;
-                                            const exit_conditions = p.strategyConfigDraft.exit_conditions.map((ec) =>
-                                              ec.type === 'indicator' && (ec.condition as { left: string })?.left === 'RSI_14'
-                                                ? { ...ec, condition: { ...(ec.condition as object), right: val } }
-                                                : ec
-                                            );
-                                            return { ...p, strategyConfigDraft: { ...p.strategyConfigDraft!, exit_conditions } };
-                                          });
-                                        }} />
-                                      <p className={descCls}>Exit if RSI &ge; value</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Take Profit</label>
-                                      <input type="number" min={0.005} max={0.5} step={0.005} className={inputCls}
-                                        value={((getExit('take_profit')?.value ?? 0.035) * 100).toFixed(1)}
-                                        onChange={(e) => updateExitCondition('take_profit', 'value', (parseFloat(e.target.value) || 3.5) / 100)} />
-                                      <p className={descCls}>% profit target</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Stop Loss</label>
-                                      <input type="number" min={0.005} max={0.3} step={0.005} className={inputCls}
-                                        value={((getExit('stop_loss')?.value ?? 0.02) * 100).toFixed(1)}
-                                        onChange={(e) => updateExitCondition('stop_loss', 'value', (parseFloat(e.target.value) || 2) / 100)} />
-                                      <p className={descCls}>% max loss</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Position Size</label>
-                                      <input type="number" min={1} max={100} step={1} className={inputCls}
-                                        value={((scd.risk_management.position_size ?? 0.12) * 100).toFixed(0)}
-                                        onChange={(e) => updateRisk('position_size', (parseFloat(e.target.value) || 12) / 100)} />
-                                      <p className={descCls}>% of balance</p>
-                                    </div>
+                                    {SR('RSI Period', 2, 30, 1, (getInd('RSI_14') as {period?: number})?.period ?? 14, tick,
+                                      (n) => updateIndicator('RSI_14', 'period', n), 'Candles')}
+                                    {SR('BB Period', 5, 100, 1, (getInd('BB_20') as {period?: number})?.period ?? 20, tick,
+                                      (n) => updateIndicator('BB_20', 'period', n), 'Candles')}
+                                    {SR('BB Std Dev', 0.5, 4, 0.1, (getInd('BB_20') as {std_dev?: number})?.std_dev ?? 2, (n) => n.toFixed(1),
+                                      (n) => updateIndicator('BB_20', 'std_dev', n), 'Standardabw.')}
+                                    {SR('RSI Oversold', 10, 50, 1, typeof getEntry('RSI_14')?.right === 'number' ? getEntry('RSI_14')!.right as number : 32, tick,
+                                      (n) => updateEntryCondition('RSI_14', n), 'Entry wenn RSI <')}
+                                    {SR('RSI Overbought', 50, 90, 1, (() => { const ec = scd.exit_conditions.find((e) => e.type === 'indicator' && e.condition?.left === 'RSI_14'); return (ec?.condition?.right ?? 55) as number; })(), tick,
+                                      (n) => { setBotSettingsDraft((p) => { if (!p.strategyConfigDraft) return p; const exit_conditions = p.strategyConfigDraft.exit_conditions.map((ec) => ec.type === 'indicator' && (ec.condition as { left: string })?.left === 'RSI_14' ? { ...ec, condition: { ...(ec.condition as object), right: n } } : ec); return { ...p, strategyConfigDraft: { ...p.strategyConfigDraft!, exit_conditions } }; }); }, 'Exit wenn RSI ≥')}
+                                    {SR('Take Profit', 0.5, 20, 0.5, (getExit('take_profit')?.value ?? 0.035) * 100, pct1,
+                                      (n) => updateExitCondition('take_profit', 'value', n / 100), '% Ziel')}
+                                    {SR('Stop Loss', 0.5, 15, 0.5, (getExit('stop_loss')?.value ?? 0.02) * 100, pct1,
+                                      (n) => updateExitCondition('stop_loss', 'value', n / 100), '% max Verlust')}
+                                    {SR('Position Size', 1, 50, 1, (scd.risk_management.position_size ?? 0.12) * 100, pct0,
+                                      (n) => updateRisk('position_size', n / 100), '% des Guthabens')}
                                   </div>
                                 )}
 
                                 {/* ── BREAKOUT PARAMS ── */}
                                 {stratType === 'breakout' && scd && (
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>BB Period</label>
-                                      <input type="number" min={5} max={200} className={inputCls}
-                                        value={getInd('BB_20')?.period ?? 20}
-                                        onChange={(e) => updateIndicator('BB_20', 'period', parseInt(e.target.value) || 20)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>BB Std Dev</label>
-                                      <input type="number" min={0.5} max={4} step={0.1} className={inputCls}
-                                        value={getInd('BB_20')?.std_dev ?? 2}
-                                        onChange={(e) => updateIndicator('BB_20', 'std_dev', parseFloat(e.target.value) || 2)} />
-                                      <p className={descCls}>Standard deviations</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>ATR Period</label>
-                                      <input type="number" min={2} max={100} className={inputCls}
-                                        value={getInd('ATR_14')?.period ?? 14}
-                                        onChange={(e) => updateIndicator('ATR_14', 'period', parseInt(e.target.value) || 14)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>RSI Min Entry</label>
-                                      <input type="number" min={30} max={80} step={1} className={inputCls}
-                                        value={typeof getEntry('RSI_14')?.right === 'number' ? getEntry('RSI_14')!.right as number : 50}
-                                        onChange={(e) => updateEntryCondition('RSI_14', parseFloat(e.target.value) || 50)} />
-                                      <p className={descCls}>Entry if RSI &gt; value</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Take Profit</label>
-                                      <input type="number" min={0.005} max={0.5} step={0.005} className={inputCls}
-                                        value={((getExit('take_profit')?.value ?? 0.05) * 100).toFixed(1)}
-                                        onChange={(e) => updateExitCondition('take_profit', 'value', (parseFloat(e.target.value) || 5) / 100)} />
-                                      <p className={descCls}>% profit target</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Stop Loss</label>
-                                      <input type="number" min={0.005} max={0.3} step={0.005} className={inputCls}
-                                        value={((getExit('stop_loss')?.value ?? 0.025) * 100).toFixed(1)}
-                                        onChange={(e) => updateExitCondition('stop_loss', 'value', (parseFloat(e.target.value) || 2.5) / 100)} />
-                                      <p className={descCls}>% max loss</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Trailing Stop</label>
-                                      <input type="number" min={0.005} max={0.2} step={0.005} className={inputCls}
-                                        value={((getExit('trailing_stop')?.trailing_pct ?? 0.015) * 100).toFixed(1)}
-                                        onChange={(e) => updateExitCondition('trailing_stop', 'trailing_pct', (parseFloat(e.target.value) || 1.5) / 100)} />
-                                      <p className={descCls}>% trail from peak</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Position Size</label>
-                                      <input type="number" min={1} max={100} step={1} className={inputCls}
-                                        value={((scd.risk_management.position_size ?? 0.1) * 100).toFixed(0)}
-                                        onChange={(e) => updateRisk('position_size', (parseFloat(e.target.value) || 10) / 100)} />
-                                      <p className={descCls}>% of balance</p>
-                                    </div>
+                                    {SR('BB Period', 5, 100, 1, (getInd('BB_20') as {period?: number})?.period ?? 20, tick,
+                                      (n) => updateIndicator('BB_20', 'period', n), 'Candles')}
+                                    {SR('BB Std Dev', 1, 4, 0.1, (getInd('BB_20') as {std_dev?: number})?.std_dev ?? 2, (n) => n.toFixed(1),
+                                      (n) => updateIndicator('BB_20', 'std_dev', n), 'Standardabw.')}
+                                    {SR('ATR Period', 2, 50, 1, (getInd('ATR_14') as {period?: number})?.period ?? 14, tick,
+                                      (n) => updateIndicator('ATR_14', 'period', n), 'Candles')}
+                                    {SR('RSI Min Entry', 30, 80, 1, typeof getEntry('RSI_14')?.right === 'number' ? getEntry('RSI_14')!.right as number : 50, tick,
+                                      (n) => updateEntryCondition('RSI_14', n), 'Entry wenn RSI >')}
+                                    {SR('Take Profit', 0.5, 25, 0.5, (getExit('take_profit')?.value ?? 0.05) * 100, pct1,
+                                      (n) => updateExitCondition('take_profit', 'value', n / 100), '% Ziel')}
+                                    {SR('Stop Loss', 0.5, 15, 0.5, (getExit('stop_loss')?.value ?? 0.025) * 100, pct1,
+                                      (n) => updateExitCondition('stop_loss', 'value', n / 100), '% max Verlust')}
+                                    {SR('Trailing Stop', 0.2, 15, 0.2, (getExit('trailing_stop')?.trailing_pct ?? 0.015) * 100, pct1,
+                                      (n) => updateExitCondition('trailing_stop', 'trailing_pct', n / 100), '% Trailing')}
+                                    {SR('Position Size', 1, 50, 1, (scd.risk_management.position_size ?? 0.1) * 100, pct0,
+                                      (n) => updateRisk('position_size', n / 100), '% des Guthabens')}
                                   </div>
                                 )}
 
                                 {/* ── MOMENTUM PARAMS ── */}
                                 {stratType === 'momentum' && scd && (
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>MACD Fast</label>
-                                      <input type="number" min={2} max={100} className={inputCls}
-                                        value={getInd('MACD')?.fast_period ?? 12}
-                                        onChange={(e) => updateIndicator('MACD', 'fast_period', parseInt(e.target.value) || 12)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>MACD Slow</label>
-                                      <input type="number" min={2} max={200} className={inputCls}
-                                        value={getInd('MACD')?.slow_period ?? 26}
-                                        onChange={(e) => updateIndicator('MACD', 'slow_period', parseInt(e.target.value) || 26)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>MACD Signal</label>
-                                      <input type="number" min={2} max={100} className={inputCls}
-                                        value={getInd('MACD')?.signal_period ?? 9}
-                                        onChange={(e) => updateIndicator('MACD', 'signal_period', parseInt(e.target.value) || 9)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>EMA Period</label>
-                                      <input type="number" min={2} max={500} className={inputCls}
-                                        value={getInd('EMA_50')?.period ?? 50}
-                                        onChange={(e) => updateIndicator('EMA_50', 'period', parseInt(e.target.value) || 50)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>RSI Max Entry</label>
-                                      <input type="number" min={30} max={90} step={1} className={inputCls}
-                                        value={typeof getEntry('RSI_14')?.right === 'number' ? getEntry('RSI_14')!.right as number : 70}
-                                        onChange={(e) => updateEntryCondition('RSI_14', parseFloat(e.target.value) || 70)} />
-                                      <p className={descCls}>Entry if RSI &lt; value</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Take Profit</label>
-                                      <input type="number" min={0.005} max={0.5} step={0.005} className={inputCls}
-                                        value={((getExit('take_profit')?.value ?? 0.045) * 100).toFixed(1)}
-                                        onChange={(e) => updateExitCondition('take_profit', 'value', (parseFloat(e.target.value) || 4.5) / 100)} />
-                                      <p className={descCls}>% profit target</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Stop Loss</label>
-                                      <input type="number" min={0.005} max={0.3} step={0.005} className={inputCls}
-                                        value={((getExit('stop_loss')?.value ?? 0.02) * 100).toFixed(1)}
-                                        onChange={(e) => updateExitCondition('stop_loss', 'value', (parseFloat(e.target.value) || 2) / 100)} />
-                                      <p className={descCls}>% max loss</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Position Size</label>
-                                      <input type="number" min={1} max={100} step={1} className={inputCls}
-                                        value={((scd.risk_management.position_size ?? 0.12) * 100).toFixed(0)}
-                                        onChange={(e) => updateRisk('position_size', (parseFloat(e.target.value) || 12) / 100)} />
-                                      <p className={descCls}>% of balance</p>
-                                    </div>
+                                    {SR('MACD Fast', 2, 30, 1, (getInd('MACD') as {fast_period?: number})?.fast_period ?? 12, tick,
+                                      (n) => updateIndicator('MACD', 'fast_period', n), 'Candles')}
+                                    {SR('MACD Slow', 10, 60, 1, (getInd('MACD') as {slow_period?: number})?.slow_period ?? 26, tick,
+                                      (n) => updateIndicator('MACD', 'slow_period', n), 'Candles')}
+                                    {SR('MACD Signal', 2, 20, 1, (getInd('MACD') as {signal_period?: number})?.signal_period ?? 9, tick,
+                                      (n) => updateIndicator('MACD', 'signal_period', n), 'Candles')}
+                                    {SR('EMA Period', 10, 200, 1, (getInd('EMA_50') as {period?: number})?.period ?? 50, tick,
+                                      (n) => updateIndicator('EMA_50', 'period', n), 'Candles')}
+                                    {SR('RSI Max Entry', 30, 90, 1, typeof getEntry('RSI_14')?.right === 'number' ? getEntry('RSI_14')!.right as number : 70, tick,
+                                      (n) => updateEntryCondition('RSI_14', n), 'Entry wenn RSI <')}
+                                    {SR('Take Profit', 0.5, 25, 0.5, (getExit('take_profit')?.value ?? 0.045) * 100, pct1,
+                                      (n) => updateExitCondition('take_profit', 'value', n / 100), '% Ziel')}
+                                    {SR('Stop Loss', 0.5, 15, 0.5, (getExit('stop_loss')?.value ?? 0.02) * 100, pct1,
+                                      (n) => updateExitCondition('stop_loss', 'value', n / 100), '% max Verlust')}
+                                    {SR('Position Size', 1, 50, 1, (scd.risk_management.position_size ?? 0.12) * 100, pct0,
+                                      (n) => updateRisk('position_size', n / 100), '% des Guthabens')}
                                   </div>
                                 )}
 
                                 {/* ── DCA PARAMS ── */}
                                 {stratType === 'dca' && scd && (
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>RSI Period</label>
-                                      <input type="number" min={2} max={50} className={inputCls}
-                                        value={getInd('RSI_14')?.period ?? 14}
-                                        onChange={(e) => updateIndicator('RSI_14', 'period', parseInt(e.target.value) || 14)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>EMA Period</label>
-                                      <input type="number" min={2} max={500} className={inputCls}
-                                        value={getInd('EMA_100')?.period ?? 100}
-                                        onChange={(e) => updateIndicator('EMA_100', 'period', parseInt(e.target.value) || 100)} />
-                                      <p className={descCls}>Candles</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>RSI Entry Threshold</label>
-                                      <input type="number" min={10} max={60} step={1} className={inputCls}
-                                        value={typeof getEntry('RSI_14')?.right === 'number' ? getEntry('RSI_14')!.right as number : 40}
-                                        onChange={(e) => updateEntryCondition('RSI_14', parseFloat(e.target.value) || 40)} />
-                                      <p className={descCls}>Entry if RSI &lt; value</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Max Positions</label>
-                                      <input type="number" min={1} max={20} step={1} className={inputCls}
-                                        value={scd.risk_management.max_positions ?? 5}
-                                        onChange={(e) => updateRisk('max_positions', parseInt(e.target.value) || 5)} />
-                                      <p className={descCls}>Concurrent DCA entries</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Take Profit</label>
-                                      <input type="number" min={0.005} max={0.5} step={0.005} className={inputCls}
-                                        value={((getExit('take_profit')?.value ?? 0.06) * 100).toFixed(1)}
-                                        onChange={(e) => updateExitCondition('take_profit', 'value', (parseFloat(e.target.value) || 6) / 100)} />
-                                      <p className={descCls}>% profit target</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Stop Loss</label>
-                                      <input type="number" min={0.005} max={0.5} step={0.005} className={inputCls}
-                                        value={((getExit('stop_loss')?.value ?? 0.05) * 100).toFixed(1)}
-                                        onChange={(e) => updateExitCondition('stop_loss', 'value', (parseFloat(e.target.value) || 5) / 100)} />
-                                      <p className={descCls}>% max loss</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Position Size</label>
-                                      <input type="number" min={1} max={100} step={1} className={inputCls}
-                                        value={((scd.risk_management.position_size ?? 0.05) * 100).toFixed(0)}
-                                        onChange={(e) => updateRisk('position_size', (parseFloat(e.target.value) || 5) / 100)} />
-                                      <p className={descCls}>% of balance per entry</p>
-                                    </div>
-                                    <div className="space-y-1">
-                                      <label className={labelCls}>Max Drawdown</label>
-                                      <input type="number" min={1} max={50} step={1} className={inputCls}
-                                        value={((scd.risk_management.max_drawdown ?? 0.15) * 100).toFixed(0)}
-                                        onChange={(e) => updateRisk('max_drawdown', (parseFloat(e.target.value) || 15) / 100)} />
-                                      <p className={descCls}>% stop trading threshold</p>
-                                    </div>
+                                    {SR('RSI Period', 2, 30, 1, (getInd('RSI_14') as {period?: number})?.period ?? 14, tick,
+                                      (n) => updateIndicator('RSI_14', 'period', n), 'Candles')}
+                                    {SR('EMA Period', 10, 300, 5, (getInd('EMA_100') as {period?: number})?.period ?? 100, tick,
+                                      (n) => updateIndicator('EMA_100', 'period', n), 'Candles')}
+                                    {SR('RSI Entry', 10, 60, 1, typeof getEntry('RSI_14')?.right === 'number' ? getEntry('RSI_14')!.right as number : 40, tick,
+                                      (n) => updateEntryCondition('RSI_14', n), 'Entry wenn RSI <')}
+                                    {SR('Max Positions', 1, 10, 1, scd.risk_management.max_positions ?? 5, tick,
+                                      (n) => updateRisk('max_positions', n), 'Gleichzeitige DCA')}
+                                    {SR('Take Profit', 0.5, 30, 0.5, (getExit('take_profit')?.value ?? 0.06) * 100, pct1,
+                                      (n) => updateExitCondition('take_profit', 'value', n / 100), '% Ziel')}
+                                    {SR('Stop Loss', 0.5, 20, 0.5, (getExit('stop_loss')?.value ?? 0.05) * 100, pct1,
+                                      (n) => updateExitCondition('stop_loss', 'value', n / 100), '% max Verlust')}
+                                    {SR('Position Size', 1, 25, 1, (scd.risk_management.position_size ?? 0.05) * 100, pct0,
+                                      (n) => updateRisk('position_size', n / 100), '% pro Einstieg')}
+                                    {SR('Max Drawdown', 1, 40, 1, (scd.risk_management.max_drawdown ?? 0.15) * 100, pct0,
+                                      (n) => updateRisk('max_drawdown', n / 100), '% Handelsstopp')}
                                   </div>
                                 )}
 
                                 {/* Trading Config Row */}
                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-3 border-t border-border/30">
-                                  {/* Trading Mode toggle */}
                                   <div className="space-y-1">
                                     <label className={labelCls}>Trading Mode</label>
                                     <div className="flex gap-1">
-                                      <button
-                                        type="button"
+                                      <button type="button"
                                         onClick={() => setBotSettingsDraft((p) => ({ ...p, tradingMode: "fixed" }))}
-                                        className={`flex-1 py-1 rounded text-xs-custom font-bold border transition-colors ${botSettingsDraft.tradingMode === "fixed" ? "bg-primary/20 border-primary/40 text-primary" : "bg-muted border-border text-muted-foreground"}`}
-                                      >
+                                        className={`flex-1 py-1 rounded text-xs-custom font-bold border transition-colors ${botSettingsDraft.tradingMode === "fixed" ? "bg-primary/20 border-primary/40 text-primary" : "bg-muted border-border text-muted-foreground"}`}>
                                         Fixed SOL
                                       </button>
-                                      <button
-                                        type="button"
+                                      <button type="button"
                                         onClick={() => setBotSettingsDraft((p) => ({ ...p, tradingMode: "aggressive" }))}
-                                        className={`flex-1 py-1 rounded text-xs-custom font-bold border transition-colors ${botSettingsDraft.tradingMode === "aggressive" ? "bg-primary/20 border-primary/40 text-primary" : "bg-muted border-border text-muted-foreground"}`}
-                                      >
+                                        className={`flex-1 py-1 rounded text-xs-custom font-bold border transition-colors ${botSettingsDraft.tradingMode === "aggressive" ? "bg-primary/20 border-primary/40 text-primary" : "bg-muted border-border text-muted-foreground"}`}>
                                         Aggressive
                                       </button>
                                     </div>
                                   </div>
 
-                                  {/* Trade Size (fixed mode) or Aggressiveness slider */}
                                   {botSettingsDraft.tradingMode === "fixed" ? (
                                     <div className="space-y-1">
-                                      <label className={labelCls}>SOL per Trade</label>
-                                      <input
-                                        type="number" min={0.01} step={0.1} className={inputCls}
-                                        value={botSettingsDraft.tradeSize ?? ""}
-                                        onChange={(e) => setBotSettingsDraft((p) => ({ ...p, tradeSize: parseFloat(e.target.value) || p.tradeSize }))}
-                                      />
-                                      <p className={descCls}>Fixed amount per trade</p>
+                                      {SR('SOL per Trade', 0.01, 10, 0.01, botSettingsDraft.tradeSize ?? 1, (n) => `${n.toFixed(2)} SOL`,
+                                        (n) => setBotSettingsDraft(p => ({ ...p, tradeSize: n })), 'Fixer Betrag pro Trade')}
                                     </div>
                                   ) : (
                                     <div className="space-y-1">
-                                      <label className={labelCls}>
-                                        Max Aggressiveness <span className="text-primary">{botSettingsDraft.aggressiveness}%</span>
-                                      </label>
-                                      <input
-                                        type="range" min={1} max={100}
-                                        value={botSettingsDraft.aggressiveness ?? 10}
-                                        onChange={(e) => setBotSettingsDraft((p) => ({ ...p, aggressiveness: parseInt(e.target.value) }))}
-                                        className="w-full accent-primary"
-                                      />
-                                      <p className={descCls}>AI operates within this limit</p>
+                                      {SR('Max Aggressiveness', 1, 100, 1, botSettingsDraft.aggressiveness ?? 10, (n) => `${n}%`,
+                                        (n) => setBotSettingsDraft(p => ({ ...p, aggressiveness: n })), 'KI operiert in diesem Limit')}
                                     </div>
                                   )}
 
-                                  {/* Wallet Address */}
                                   <div className="space-y-1">
                                     <label className={labelCls}>Wallet Address</label>
-                                    <input
-                                      type="text"
+                                    <input type="text"
                                       className="w-full bg-background border border-border rounded px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-primary/50"
                                       placeholder="Public key (display only)"
                                       value={botSettingsDraft.walletAddress ?? ""}
                                       onChange={(e) => setBotSettingsDraft((p) => ({ ...p, walletAddress: e.target.value }))}
                                     />
-                                    <p className={descCls}>For tracking & display</p>
+                                    <p className={descCls}>Für Tracking & Anzeige</p>
                                   </div>
                                 </div>
 
@@ -3575,7 +3505,7 @@ export default function App() {
                                         <BrainCircuit className="h-3.5 w-3.5" /> Oracle Analysis
                                       </div>
                                       <button
-                                        onClick={triggerAgentAnalysis}
+                                        onClick={() => setIsOracleDialogOpen(true)}
                                         disabled={isTriggering}
                                         onMouseEnter={(e) => tooltip.show(
                                           <div className="space-y-1">
@@ -4773,6 +4703,12 @@ export default function App() {
               <AdvisorTab
                 getApiBase={getApiBase}
                 onCreateFromAdvisor={handleCreateFromAdvisor}
+                suggestions={advisorSuggestions}
+                history={advisorHistory}
+                loading={advisorLoading}
+                error={advisorError}
+                fetchedAt={advisorFetchedAt}
+                onRefresh={() => fetchAdvisorSuggestions(true)}
               />
             ) : activeTab === "docs" ? (
               // DOCS VIEW
@@ -4882,6 +4818,22 @@ export default function App() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* ADR-012: Oracle Analysis Aggressiveness Dialog */}
+        <OracleAnalysisDialog
+          key={isOracleDialogOpen ? "open" : "closed"}
+          open={isOracleDialogOpen}
+          onOpenChange={setIsOracleDialogOpen}
+          bot={selectedBot}
+          latestAdvice={agentAdvice.find((a) => a.botId === selectedBot?.id)?.advice ?? null}
+          availableStrategies={[...strategyTemplates, ...savedStrategies]}
+          isTriggering={isTriggering}
+          initialMultiplier={botSettingsDraft.aggPreset}
+          onConfirm={(m) => {
+            setIsOracleDialogOpen(false);
+            void triggerAgentAnalysis(m);
+          }}
+        />
       </div>
     </>
   );

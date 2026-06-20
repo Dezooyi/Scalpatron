@@ -371,6 +371,41 @@ function calcMarketStats(prices: PricePoint[], settings: PatternSettings): Marke
   };
 }
 
+// --- ADR-012: Settings Mixer ---
+
+/**
+ * Linearly mix numeric PatternSettings between `current` and `target` by `mix`
+ * in [0, 1]. mix=0 keeps current, mix=1 returns target. Undefined target
+ * fields are kept at current value.
+ */
+function mixPatternSettings(
+  current: PatternSettings,
+  target: Partial<PatternSettings>,
+  mix: number,
+): Partial<PatternSettings> {
+  if (mix <= 0) return {};
+  if (mix >= 1) return { ...target };
+  const out: Partial<PatternSettings> = {};
+  const keys: (keyof PatternSettings)[] = [
+    'floorWindow',
+    'spikeThreshold',
+    'sellDropThreshold',
+    'cooldownTicks',
+    'takeProfitThreshold',
+  ];
+  for (const k of keys) {
+    const cur = current[k] as number;
+    const tgt = target[k] as number | undefined;
+    if (typeof tgt !== 'number' || !Number.isFinite(tgt)) continue;
+    if (typeof cur !== 'number' || !Number.isFinite(cur)) {
+      out[k] = tgt;
+      continue;
+    }
+    out[k] = cur + (tgt - cur) * mix;
+  }
+  return out;
+}
+
 // --- Main Agent Class ---
 
 import type { BotManager } from './botManager.js';
@@ -382,7 +417,7 @@ export class OllamaAgent {
   private running = false;
   analyzing = false;
 
-  private analysisQueue: string[] = [];
+  private analysisQueue: { botId: string; forceMultiplier?: number }[] = [];
   private drainingQueue = false;
 
   private botManager: BotManager | null = null;
@@ -510,9 +545,9 @@ export class OllamaAgent {
     } catch { return false; }
   }
 
-  private enqueueBot(botId: string): void {
-    if (!this.analysisQueue.includes(botId)) {
-      this.analysisQueue.push(botId);
+  private enqueueBot(botId: string, forceMultiplier?: number): void {
+    if (!this.analysisQueue.some((q) => q.botId === botId)) {
+      this.analysisQueue.push({ botId, forceMultiplier });
     }
   }
 
@@ -539,21 +574,21 @@ export class OllamaAgent {
 
     try {
       while (this.analysisQueue.length > 0) {
-        const botId = this.analysisQueue.shift();
-        if (!botId) continue;
-        
-        const bot = this.botManager?.getBot(botId);
+        const item = this.analysisQueue.shift();
+        if (!item) continue;
+
+        const bot = this.botManager?.getBot(item.botId);
         if (!bot) continue;
 
         this.analyzing = true;
         try {
-          await this.analyzeBot(bot);
+          await this.analyzeBot(bot, item.forceMultiplier);
         } catch (err) {
           console.error(`[OllamaAgent] Fehler bei Bot ${bot.name}:`, (err as Error).message);
         } finally {
           this.analyzing = false;
         }
-        
+
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
     } finally {
@@ -561,7 +596,7 @@ export class OllamaAgent {
     }
   }
 
-  private async analyzeBot(bot: BotInstance): Promise<void> {
+  private async analyzeBot(bot: BotInstance, forceMultiplier?: number): Promise<void> {
     const state = bot.getState();
     const botTokenMint = state.mintAddress;
     const settings = bot.getSettings();
@@ -611,7 +646,7 @@ export class OllamaAgent {
       const msg = `Skipped: Not enough data (${recentPrices.length}/10)`;
       console.log(`[OllamaAgent] Bot ${state.name}: ${msg}`);
       logger.info(state.id, 'AI_AGENT', msg);
-      
+
       saveAgentHistory(
         state.id,
         'SKIPPED',
@@ -621,7 +656,8 @@ export class OllamaAgent {
         null,
         false,
         undefined,
-        state.strategyId ?? undefined
+        state.strategyId ?? undefined,
+        forceMultiplier
       );
       return;
     }
@@ -729,7 +765,16 @@ export class OllamaAgent {
       return;
     }
 
-    const applied = this.config.autoApply && advice.confidence >= this.config.minConfidence;
+    const baseApplied = this.config.autoApply && advice.confidence >= this.config.minConfidence;
+    // ADR-012: force multiplier governs how aggressively the AI advice is
+    // blended with the bot's current settings. Undefined = legacy (1:1 apply).
+    // 0 = observe-only, 1-99 = linear mix, 100 = full apply.
+    const fm = typeof forceMultiplier === 'number' ? forceMultiplier : 100;
+    const observeOnly = fm <= 0;
+    const mix = Math.max(0, Math.min(100, fm)) / 100;
+    // When the user explicitly forces observe-only, we never apply
+    // regardless of autoApply / confidence.
+    const applied = baseApplied && !observeOnly;
 
     saveAgentHistory(
       state.id,
@@ -741,6 +786,7 @@ export class OllamaAgent {
       applied,
       advice.aggressiveness,
       (state as any).strategyId ?? undefined,
+      fm,
     );
 
     this.adviceHistory.unshift(advice);
@@ -749,21 +795,35 @@ export class OllamaAgent {
     this.onAdvice?.(state.id, advice);
 
     if (applied) {
-      if (Object.keys(advice.adjustedSettings).length > 0) {
-        bot.updateSettings(advice.adjustedSettings);
+      const mixedSettings = mixPatternSettings(settings, advice.adjustedSettings, mix);
+      if (Object.keys(mixedSettings).length > 0) {
+        bot.updateSettings(mixedSettings);
       }
       if (advice.aggressiveness !== undefined) {
-        bot.setAgentAggressiveness(advice.aggressiveness);
+        const curAggr = (state as any).aiAggressiveness ?? state.aggressiveness ?? 10;
+        const targetAggr = advice.aggressiveness;
+        const blendedAggr = Math.round(curAggr + (targetAggr - curAggr) * mix);
+        bot.setAgentAggressiveness(blendedAggr);
       }
-      if (advice.strategyAdjustments) {
+      // Strategy param tweaks are only applied when the user is willing to
+      // commit to a meaningful portion of the AI's recommendation (>= 50%).
+      if (advice.strategyAdjustments && mix >= 0.5) {
         bot.applyStrategyAdjustments(advice.strategyAdjustments);
       }
-      // ADR-011 Phase B: strategy switch with safety gate
+      // ADR-011 Phase B: strategy switch with safety gate.
+      // ADR-012: a switch is treated as a high-impact change. We only allow
+      // it when the user explicitly opted in via the slider (mix >= 0.9),
+      // independently of the legacy auto-switch env gate. mix < 0.9 keeps
+      // the switch proposal in agent_history (audit) but defers it to the
+      // normal UI confirmation flow.
       if (advice.strategySwitch) {
         const sw = advice.strategySwitch;
         const allowAuto = (process.env.AI_ALLOW_STRATEGY_SWITCH ?? '0') === '1';
         const minConf = parseFloat(process.env.AI_MIN_SWITCH_CONFIDENCE ?? '0.7');
-        if (!allowAuto) {
+        if (mix < 0.9) {
+          console.log(`[OllamaAgent] Strategy-Switch vorgeschlagen (${sw.fromStrategyType} → ${sw.toStrategyType}), aber Force-Multiplier ${(mix * 100).toFixed(0)}% < 90%. UI-Confirmation erforderlich.`);
+          logger.info(state.id, 'AI_AGENT', `Strategy switch deferred: force multiplier < 90% (${sw.fromStrategyType} → ${sw.toStrategyType}).`);
+        } else if (!allowAuto) {
           console.log(`[OllamaAgent] Strategy-Switch vorgeschlagen (${sw.fromStrategyType} → ${sw.toStrategyType}), aber AI_ALLOW_STRATEGY_SWITCH=0. UI-Confirmation erforderlich.`);
           logger.info(state.id, 'AI_AGENT', `Strategy switch proposed but disabled (${sw.fromStrategyType} → ${sw.toStrategyType}). UI confirmation required.`);
         } else if (advice.confidence < minConf) {
@@ -776,11 +836,14 @@ export class OllamaAgent {
           }
         }
       }
-      console.log(`[OllamaAgent] Bot ${state.name} aktualisiert. Regime=${advice.regime}, Conf=${(advice.confidence * 100).toFixed(0)}%, Aggr=${advice.aggressiveness ?? '-'}%`);
-      logger.action(state.id, 'AI_AGENT', `AI Updated! Regime: ${advice.regime}, Grund: ${advice.reason}`);
+      console.log(`[OllamaAgent] Bot ${state.name} aktualisiert. Regime=${advice.regime}, Conf=${(advice.confidence * 100).toFixed(0)}%, Aggr=${advice.aggressiveness ?? '-'}%, Force=${fm}%`);
+      logger.action(state.id, 'AI_AGENT', `AI Updated! Regime: ${advice.regime}, Grund: ${advice.reason}, Force=${fm}%`);
     } else {
-      console.log(`[OllamaAgent] Bot ${state.name} Analyse gespeichert (nicht angewendet: Conf=${(advice.confidence * 100).toFixed(0)}%)`);
-      logger.info(state.id, 'AI_AGENT', `Analyse fertig (nicht angewendet). Confidence: ${(advice.confidence * 100).toFixed(0)}%`);
+      const why = observeOnly
+        ? 'observe-only (force=0)'
+        : `Conf=${(advice.confidence * 100).toFixed(0)}% < minConfidence`;
+      console.log(`[OllamaAgent] Bot ${state.name} Analyse gespeichert (nicht angewendet: ${why}, Force=${fm}%)`);
+      logger.info(state.id, 'AI_AGENT', `Analyse fertig (nicht angewendet). ${why}, Force=${fm}%`);
     }
   }
 
@@ -1344,18 +1407,18 @@ ${formatCandleRows(m15Candles, 5)}`;
     };
   }
 
-  triggerAnalysis(botId?: string): void {
+  triggerAnalysis(botId?: string, forceMultiplier?: number): void {
     if (!this.botManager) return;
 
     if (botId) {
-      console.log(`[OllamaAgent] Manuelle Analyse für Bot ${botId} ausgelöst`);
-      logger.info(botId, 'AI_AGENT', 'Manual analysis queued.');
-      this.enqueueBot(botId);
+      console.log(`[OllamaAgent] Manuelle Analyse für Bot ${botId} ausgelöst (force=${forceMultiplier ?? 'default'})`);
+      logger.info(botId, 'AI_AGENT', `Manual analysis queued (force=${forceMultiplier ?? 'default'}).`);
+      this.enqueueBot(botId, forceMultiplier);
     } else {
       console.log('[OllamaAgent] Manuelle Analyse für ALLE Bots ausgelöst');
       logger.system('Manuelle Analyse-Anfrage für alle Bots erhalten.');
       for (const bot of this.botManager.getAllBots()) {
-        this.enqueueBot(bot.id);
+        this.enqueueBot(bot.id, forceMultiplier);
       }
     }
 

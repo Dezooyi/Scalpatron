@@ -524,12 +524,14 @@ function profileStrategyFit(
 // ---------------------------------------------------------------------------
 
 function composeBotConfig(match: StrategyMatch, pool: NormalizedPool): SuggestedBotConfig {
+  // Minimum TP must exceed roundtrip fee (2%) × safety factor so E[PnL] > 0 at ~50% WR.
+  // Formula: TP > SL + 2 × fee. With SL=3%, fee=2%: TP must be > 7% → use 8%+ minimum.
   const baseByType: Record<string, Omit<SuggestedBotConfig, 'advisoryOnly'>> = {
-    scalping:       { positionSizePct: 8,  aggressivenessPct: 10, slippageTolerancePct: 2.0, maxPositions: 1, stopLossPct: 3, scalpingSettings: { cooldownTicks: 5, spikeThreshold: 0.3, sellDropThreshold: 0.15, floorWindow: 20 } },
-    trend:          { positionSizePct: 12, aggressivenessPct: 15, slippageTolerancePct: 0.5, maxPositions: 1, stopLossPct: 2, takeProfitPct: 4 },
-    momentum:       { positionSizePct: 10, aggressivenessPct: 12, slippageTolerancePct: 0.5, maxPositions: 1, stopLossPct: 2, takeProfitPct: 4.5 },
-    breakout:       { positionSizePct: 7,  aggressivenessPct: 10, slippageTolerancePct: 0.8, maxPositions: 1, stopLossPct: 2.5, takeProfitPct: 6 },
-    mean_reversion: { positionSizePct: 6,  aggressivenessPct: 8,  slippageTolerancePct: 1.0, maxPositions: 1, stopLossPct: 4, takeProfitPct: 3 },
+    scalping:       { positionSizePct: 8,  aggressivenessPct: 10, slippageTolerancePct: 2.0, maxPositions: 1, stopLossPct: 3, scalpingSettings: { cooldownTicks: 5, spikeThreshold: 3.0, sellDropThreshold: 5.0, floorWindow: 20 } },
+    trend:          { positionSizePct: 12, aggressivenessPct: 15, slippageTolerancePct: 0.5, maxPositions: 1, stopLossPct: 3, takeProfitPct: 8 },
+    momentum:       { positionSizePct: 10, aggressivenessPct: 12, slippageTolerancePct: 0.5, maxPositions: 1, stopLossPct: 3, takeProfitPct: 8 },
+    breakout:       { positionSizePct: 7,  aggressivenessPct: 10, slippageTolerancePct: 0.8, maxPositions: 1, stopLossPct: 3, takeProfitPct: 9 },
+    mean_reversion: { positionSizePct: 6,  aggressivenessPct: 8,  slippageTolerancePct: 1.0, maxPositions: 1, stopLossPct: 3, takeProfitPct: 7 },
     dca:            { positionSizePct: 5,  aggressivenessPct: 5,  slippageTolerancePct: 1.0, maxPositions: 4, stopLossPct: 8 },
     grid:           { positionSizePct: 8,  aggressivenessPct: 10, slippageTolerancePct: 0.5, maxPositions: 3, stopLossPct: 5 },
   };
@@ -588,6 +590,20 @@ function applyFinalSafetyBounds(cfg: SuggestedBotConfig): void {
   cfg.slippageTolerancePct = clamp(cfg.slippageTolerancePct, 0.1, 5);
   cfg.maxPositions = clamp(Math.round(cfg.maxPositions), 1, 5);
   cfg.stopLossPct = clamp(cfg.stopLossPct, 1, 15);
+
+  // TP must beat roundtrip fee + SL to have positive expectation at 50% WR.
+  // Required: TP > SL + 2 × ROUNDTRIP_FEE (2%). Floor at max(7%, SL + 4%).
+  const ROUNDTRIP_FEE_PCT = 2;
+  const minTP = Math.max(7, cfg.stopLossPct + ROUNDTRIP_FEE_PCT * 2);
+  if (cfg.takeProfitPct !== undefined) {
+    cfg.takeProfitPct = Math.max(cfg.takeProfitPct, minTP);
+  }
+
+  // Scalping: trailing stop must be wide enough that a real move can develop.
+  if (cfg.scalpingSettings) {
+    cfg.scalpingSettings.spikeThreshold = Math.max(cfg.scalpingSettings.spikeThreshold ?? 3.0, 2.0);
+    cfg.scalpingSettings.sellDropThreshold = Math.max(cfg.scalpingSettings.sellDropThreshold ?? 5.0, 3.0);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -642,10 +658,12 @@ function rankAndDiversify(
   // First pass: best match per templateId (ensures template diversity).
   const picked: typeof scored = [];
   const usedTemplates = new Set<string>();
+  const usedMints = new Set<string>();
   for (const entry of scored) {
     if (picked.length >= MAX_SUGGESTIONS) break;
-    if (!usedTemplates.has(entry.match.templateId)) {
+    if (!usedTemplates.has(entry.match.templateId) && !usedMints.has(entry.pool.mintAddress)) {
       usedTemplates.add(entry.match.templateId);
+      usedMints.add(entry.pool.mintAddress);
       picked.push(entry);
     }
   }

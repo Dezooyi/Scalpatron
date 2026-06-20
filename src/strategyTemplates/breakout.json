@@ -17,9 +17,9 @@
     { "left": "RSI_14", "operator": ">", "right": 50 }
   ],
   "exit_conditions": [
-    { "type": "take_profit", "value": 0.05 },
-    { "type": "stop_loss", "value": 0.025 },
-    { "type": "trailing_stop", "trailing_pct": 0.015 }
+    { "type": "take_profit", "value": 0.09 },
+    { "type": "stop_loss", "value": 0.03 },
+    { "type": "trailing_stop", "trailing_pct": 0.05 }
   ],
   "risk_management": {
     "position_size": 0.1,

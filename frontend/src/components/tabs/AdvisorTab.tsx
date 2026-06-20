@@ -1,4 +1,3 @@
-import { useState, useEffect, useCallback } from "react";
 import { Wand2, RefreshCw, TrendingUp, TrendingDown, Minus, Zap, AlertTriangle, ChevronRight, Clock } from "lucide-react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -28,8 +27,13 @@ export interface AdvisorSuggestion {
 }
 
 interface AdvisorTabProps {
-  getApiBase: () => string;
   onCreateFromAdvisor: (suggestion: AdvisorSuggestion) => void;
+  suggestions: AdvisorSuggestion[];
+  history: AdvisorSuggestion[];
+  loading: boolean;
+  error: string | null;
+  fetchedAt: number | null;
+  onRefresh: () => void;
 }
 
 const REGIME_LABELS: Record<MarketRegime, { label: string; color: string }> = {
@@ -201,35 +205,7 @@ function SuggestionCard({ s, onCreate, compact = false }: { s: AdvisorSuggestion
   );
 }
 
-export function AdvisorTab({ getApiBase, onCreateFromAdvisor }: AdvisorTabProps) {
-  const [suggestions, setSuggestions] = useState<AdvisorSuggestion[]>([]);
-  const [history, setHistory] = useState<AdvisorSuggestion[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [fetchedAt, setFetchedAt] = useState<number | null>(null);
-
-  const fetchSuggestions = useCallback(async (forceRefresh = false) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const url = `${getApiBase()}/api/advisor/suggestions${forceRefresh ? '?refresh=1' : ''}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setSuggestions(data.suggestions ?? []);
-      setHistory(data.history ?? []);
-      setFetchedAt(data.fetchedAt ?? Date.now());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unbekannter Fehler');
-    } finally {
-      setLoading(false);
-    }
-  }, [getApiBase]);
-
-  useEffect(() => {
-    fetchSuggestions();
-  }, [fetchSuggestions]);
-
+export function AdvisorTab({ onCreateFromAdvisor, suggestions, history, loading, error, fetchedAt, onRefresh }: AdvisorTabProps) {
   const timeAgo = fetchedAt ? formatTimeAgo(fetchedAt) : null;
 
   return (
@@ -246,7 +222,7 @@ export function AdvisorTab({ getApiBase, onCreateFromAdvisor }: AdvisorTabProps)
           </div>
         </div>
         <div className="flex flex-col items-end gap-1 shrink-0">
-          <Button variant="outline" size="sm" onClick={() => fetchSuggestions(true)} disabled={loading} className="gap-2">
+          <Button variant="outline" size="sm" onClick={onRefresh} disabled={loading} className="gap-2">
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
             Aktualisieren
           </Button>

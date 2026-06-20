@@ -14,8 +14,8 @@
     { "left": "RSI_14", "operator": "<", "right": 30 }
   ],
   "exit_conditions": [
-    { "type": "take_profit", "value": 0.06 },
-    { "type": "stop_loss", "value": 0.025 },
+    { "type": "take_profit", "value": 0.08 },
+    { "type": "stop_loss", "value": 0.03 },
     { "type": "indicator", "condition": { "left": "price", "operator": ">=", "right": "VWAP" } }
   ],
   "risk_management": { "position_size": 0.1, "max_positions": 1, "leverage": 1 },

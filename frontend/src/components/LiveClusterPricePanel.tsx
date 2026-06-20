@@ -1,6 +1,22 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ScannerPulse } from "./ScannerPulse";
 import type { BotState } from "../App";
+import { formatUptime } from "../lib/botUtils";
+
+// Module-level ticking clock (pure during render via useSyncExternalStore)
+let clockNow = Date.now();
+const clockSubs = new Set<() => void>();
+const subscribeClock = (cb: () => void) => {
+  clockSubs.add(cb);
+  return () => { clockSubs.delete(cb); };
+};
+const getClockNow = () => clockNow;
+if (typeof window !== "undefined") {
+  setInterval(() => {
+    clockNow = Date.now();
+    clockSubs.forEach(cb => cb());
+  }, 1000);
+}
 
 interface PricePoint {
   timestamp: number;
@@ -29,6 +45,7 @@ export function LiveClusterPricePanel({ selectedBot, setBots }: LiveClusterPrice
   // Local price history state - fetched separately to reduce SSE payload size
   const [priceHistory, setPriceHistory] = useState<PricePoint[]>([]);
   const lastAppendedPrice = useRef<number | null>(null);
+  const now = useSyncExternalStore(subscribeClock, getClockNow, getClockNow);
 
   const getApiBase = () => localStorage.getItem('scalpatron_api_url') ?? '';
 
@@ -88,6 +105,12 @@ export function LiveClusterPricePanel({ selectedBot, setBots }: LiveClusterPrice
                   const prevPrice = priceHistory?.[priceHistory.length - 2]?.price;
                   return prevPrice != null ? prevPrice.toFixed(6) : "---";
                 })()}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 mt-1 text-micro">
+              <span className="text-muted-foreground opacity-40">UPTIME:</span>
+              <span className="text-primary/60 font-bold tabular-nums">
+                {selectedBot.status === "running" && selectedBot.startTime ? formatUptime(selectedBot.startTime, now) : "—"}
               </span>
             </div>
           </div>
