@@ -36,6 +36,8 @@ logs/*.jsonl
 *.db
 data/*.jsonl
 data/prices.jsonl
+# Advisor-Laufzeithistorie (ändert sich laufend, kein Source-of-Truth)
+data/advisor_history.json
 
 # --- IDE & Editor ---
 .vscode/
@@ -88,3 +90,6 @@ data/scalpatron.db-wal
 screenshots/
 tests/
 plans/
+
+# --- Agent Memory (lokal, umgebungsspezifisch) ---
+memory/

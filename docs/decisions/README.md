@@ -21,6 +21,11 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 | [009](adr-009-preflight-and-tx-verification.md) | Preflight & Tx-Verifikation vor State-Mutation | Akzeptiert | Trade-Code |
 | [010](adr-010-stale-price-isolation.md) | Stale-Price-Isolation & Outage-Circuit-Breaker | Akzeptiert | Price Feed |
 | [011](adr-011-self-correction-workflow.md) | Self-Correction & Adaptives Lernen im AI Agent | Vorgeschlagen | AI Agent |
+| [012](adr-012-scalping-fork-adaptive-cycles.md) | Scalping Strategy Forks — Programmatic Time-Aware Adaptation | Akzeptiert & Implementiert | Strategie |
+| [013](adr-013-multi-asset-support.md) | Multi-Asset Support via Token-Presets & Per-Bot-Mint-Konfiguration | Vorgeschlagen | Architektur |
+| [014](adr-014-advisor-settings-pipeline.md) | Konsistente Strategie- & Pattern-Settings für Smart-Advisor-Bots | Akzeptiert & Implementiert | Strategie / Frontend |
+| [015](adr-015-wallet-page.md) | Dedizierte Wallet-Seite mit Transaktionshistorie & Wallet-Setup | Akzeptiert & Implementiert | Wallet / Backend / Frontend |
+| [016](adr-016-scalping-units-and-persistence.md) | Einheiten-Konsistenz & Persistenz für Scalping-Parameter | Akzeptiert & Implementiert | Strategie / Trade-Code / AI Agent |
 
 > **Status-Werte:** `Vorgeschlagen` → `Akzeptiert` → `Veraltet` / `Ersetzt durch ADR-0XXX`
 > Ein `Vorgeschlagen`-ADR beschreibt einen geplanten, noch **nicht** implementierten Change.
@@ -47,6 +52,36 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 - Chain-of-Thought-Reflexion im System-Prompt (mandatory)
 - Lessons-Learned-Memory mit Severity-Decay (7d gleitend)
 - Bonus-Confidence bei explizitem Lessons-Reference im Reason
+
+### ADR-012 — Scalping Strategy Forks
+- Code-basierte Strategie-Forks für schnelle, deterministische Iteration
+- `MarketContext` mit Zeit, Session, Volatilität, Lookback und höherem Timeframe
+- Neue Strategie-Typen: `scalping-adaptive`, `scalping-session`, `scalping-cycle`
+- Forks arbeiten auf `StrategyConfig`-Ebene, keine Breaking Changes für bestehende Bots
+
+### ADR-014 — Advisor-Settings-Pipeline
+- Advisor-`scalpingSettings` werden Frontend→Backend durchgereicht und in
+  `bots.settings` persistiert (vorher verworfen)
+- `botInstance.getEffectiveScalpingSettings()` = single source of truth für
+  Display (`getState`) + Warmup-Gate (liest `strategyEngine.getScalpingSettings()`)
+- `createBot` defaultet Settings aus dem Template; `loadBotsFromDB` migriert
+  Legacy-Bots (`settings === DEFAULT_SETTINGS`) auf Template-Werte
+- AI-Adjustments + Strategy-Switch spiegeln nach `bots.settings` → kein
+  Verhaltenssprung (Template → DEFAULT) mehr beim Restart
+
+### ADR-016 — Scalping-Einheiten & Persistenz
+- Maßgebliche Einheiten aus `PatternDetector`: `spikeThreshold` &
+  `sellDropThreshold` = %-Punkte (Default 5.0), `takeProfitThreshold` = Bruch
+  (0.10 = 10 %) — codebauweit vereinheitlicht (Preset, SR-Slider, Badges, Fork,
+  KI-Validierung/Prompts, GlobalSettings)
+- SELL-Pfad (`trader.ts`) konvertiert `actualOutAmount` Lamports→SOL vor
+  Persistierung als `solAmount` (vorher Faktor-1e9-Mismatch, korrumpierte
+  Wallet-Metriken)
+- `scalping-adaptive`-Settings werden persistiert: `updateScalpingSettings`
+  mergt in `config.scalping_settings` (Fork-Base), sonst revertierte jeder
+  `analyze()`-Tick die User-Werte
+- VOLATILE-Semantik kanonisch „tighten" (passend zum getesteten Fork `×0.85`);
+  KI-Validierung sellDrop `[0.5, 10.0]`, floorWindow `[10, 50]`
 
 ---
 

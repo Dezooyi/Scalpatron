@@ -10,6 +10,7 @@
 - [Konfiguration](./configuration.md) — .env, PatternSettings, Strategy Config, AI-Aggressiveness
 - [Trading-Strategie](./strategy.md) — Range Spike Scalper + Multi-Strategy Architecture
 - [Multi-Strategy](./multi-strategy.md) — JSON Strategy Schema, Templates, IndicatorEngine, Feedback-Loop
+- [Neue Strategien](./neue-strategien.md) — Detaillierter Katalog aller StrategyEngine-Templates, Forks und PAET
 - [Trading-Engine](./TRADING_ENGINE.md) — Technical Deep-Dive into execution flow, swaps and generic tokens
 - [Betrieb](./operations.md) — Starten, Dashboard-Bedienung, Logs, Troubleshooting
 - [Design System](./design-system.md) — CSS-Variablen, Runtime-Overrides, `@theme inline` vs. `@theme`, dsConfig.ts
@@ -61,13 +62,21 @@ Solana_BotTrader00/
 │   ├── indicatorEngine.ts          # EMA/SMA/RSI/MACD/BB/ATR/STOCH/VWAP (Phase 7)
 │   ├── candleAggregator.ts         # Tick→OHLCV Aggregation (Phase 7)
 │   ├── strategyEngine.ts           # JSON-gesteuerte Strategie-Ausführung (Phase 7)
-│   └── strategyTemplates/          # Built-in JSON Strategy Templates (Phase 7)
-│       ├── scalping.json
-│       ├── ema_trend.json
-│       ├── rsi_mean_reversion.json
-│       ├── breakout.json
-│       ├── momentum.json
-│       └── dca.json
+│   ├── strategyTemplates/          # Built-in JSON Strategy Templates (Phase 7+)
+│   │   ├── scalping.json
+│   │   ├── scalping-adaptive.json
+│   │   ├── ema_trend.json
+│   │   ├── rsi_mean_reversion.json
+│   │   ├── breakout.json
+│   │   ├── momentum.json
+│   │   ├── dca.json
+│   │   ├── paet.json
+│   │   ├── solana_sniper.json
+│   │   ├── solana_runner.json
+│   │   └── solana_dip_buyer.json
+│   └── strategyForks/                # Programmatische Strategy-Adapters (ADR-012)
+│       ├── types.ts
+│       └── adaptiveScalpingFork.ts
 ├── data/                           # SQLite DB + Preis-History
 │   └── scalpatron.db
 ├── logs/                           # Trade-Logs (paper-trades.jsonl)
@@ -78,6 +87,8 @@ Solana_BotTrader00/
 │   ├── configuration.md
 │   ├── strategy.md
 │   ├── multi-strategy.md           # Phase 7 Referenz
+│   ├── neue-strategien.md          # Strategy-Katalog (2026-06)
+│   ├── strategy-paet/              # PAET Spezifikation & Milestones
 │   └── operations.md
 ├── frontend/src/App.tsx            # React Web-UI
 ├── .env                            # Laufzeit-Konfiguration (nicht committen!)
