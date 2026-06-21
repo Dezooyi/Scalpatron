@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Sliders, Zap, Clock, Eye, Move, Sparkles, Circle, Hexagon } from "lucide-react";
+import { Sliders, Zap, Clock, Eye, Move, Sparkles, Circle, Hexagon, TrendingUp, type LucideIcon } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -10,16 +10,45 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ColorPicker } from "@/components/ui/color-picker";
 import {
   loadAnimationConfig,
   saveAnimationConfig,
   type AnimationConfig,
   type EaseType,
+  type BackgroundPulseVariant,
 } from "@/lib/animationConfig";
 
 type Props = {
   onConfigChange?: (config: AnimationConfig) => void;
 };
+
+type SectionId = "trade" | "background" | "botchip";
+
+interface SectionToggleProps {
+  id: SectionId;
+  icon: LucideIcon;
+  label: string;
+  isActive: boolean;
+  onClick: () => void;
+}
+
+function SectionToggle({ icon: Icon, label, isActive, onClick }: SectionToggleProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex items-center gap-2 px-3 py-2 rounded text-xs font-semibold transition-colors ${
+        isActive
+          ? "bg-primary text-black"
+          : "text-zinc-400 hover:text-white hover:bg-zinc-800"
+      }`}
+    >
+      <Icon className="w-3.5 h-3.5" />
+      {label}
+    </button>
+  );
+}
 
 export default function AnimationSettings({ onConfigChange }: Props) {
   // Lazy initializer: read fresh from localStorage on every mount.
@@ -27,7 +56,7 @@ export default function AnimationSettings({ onConfigChange }: Props) {
   // snapshot would go stale across tab switches and silently revert saved values.
   const [config, setConfig] = useState<AnimationConfig>(() => loadAnimationConfig());
   const [saved, setSaved] = useState(false);
-  const [expandedSection, setExpandedSection] = useState<"trade" | "background" | "botchip">("trade");
+  const [expandedSection, setExpandedSection] = useState<SectionId>("trade");
 
   const updateConfig = <K extends keyof AnimationConfig>(
     key: K,
@@ -53,20 +82,6 @@ export default function AnimationSettings({ onConfigChange }: Props) {
     }
   };
 
-  const SectionToggle = ({ id, icon: Icon, label }: { id: "trade" | "background" | "botchip", icon: any, label: string }) => (
-    <button
-      onClick={() => setExpandedSection(id)}
-      className={`flex items-center gap-2 px-3 py-2 rounded text-xs font-semibold transition-colors ${
-        expandedSection === id 
-          ? "bg-primary text-black" 
-          : "text-zinc-400 hover:text-white hover:bg-zinc-800"
-      }`}
-    >
-      <Icon className="w-3.5 h-3.5" />
-      {label}
-    </button>
-  );
-
   return (
     <Card className="border-purple-500/20">
       <CardHeader>
@@ -82,9 +97,27 @@ export default function AnimationSettings({ onConfigChange }: Props) {
         
         {/* Section Toggles */}
         <div className="flex gap-1 mt-3 bg-zinc-900/60 border border-white/10 rounded-lg p-1 w-fit">
-          <SectionToggle id="trade" icon={Zap} label="Trade Flash" />
-          <SectionToggle id="background" icon={Circle} label="Background Pulse" />
-          <SectionToggle id="botchip" icon={Hexagon} label="Bot Chip" />
+          <SectionToggle
+            id="trade"
+            icon={Zap}
+            label="Trade Flash"
+            isActive={expandedSection === "trade"}
+            onClick={() => setExpandedSection("trade")}
+          />
+          <SectionToggle
+            id="background"
+            icon={Circle}
+            label="Background Pulse"
+            isActive={expandedSection === "background"}
+            onClick={() => setExpandedSection("background")}
+          />
+          <SectionToggle
+            id="botchip"
+            icon={Hexagon}
+            label="Bot Chip"
+            isActive={expandedSection === "botchip"}
+            onClick={() => setExpandedSection("botchip")}
+          />
         </div>
       </CardHeader>
 
@@ -281,212 +314,505 @@ export default function AnimationSettings({ onConfigChange }: Props) {
             <div className="space-y-3">
               <h4 className="text-sm font-medium text-cyan-400 flex items-center gap-2">
                 <Circle className="w-4 h-4" />
-                Initial Scale & Colors
+                Variant
               </h4>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
+                <Button
+                  variant={config.bgPulseVariant === "gradient" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => updateConfig("bgPulseVariant", "gradient" as BackgroundPulseVariant)}
+                  className="w-full text-xs"
+                >
+                  Gradient
+                </Button>
+                <Button
+                  variant={config.bgPulseVariant === "orb" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => updateConfig("bgPulseVariant", "orb" as BackgroundPulseVariant)}
+                  className="w-full text-xs"
+                >
+                  Orb
+                </Button>
+                <Button
+                  variant={config.bgPulseVariant === "equity" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => updateConfig("bgPulseVariant", "equity" as BackgroundPulseVariant)}
+                  className="w-full text-xs"
+                >
+                  Equity
+                </Button>
+              </div>
+            </div>
+
+            {config.bgPulseVariant === "orb" && (
+              <div className="space-y-3">
+                <h4 className="text-sm font-medium text-purple-400 flex items-center gap-2">
+                  <Sparkles className="w-4 h-4" />
+                  Orb Geometry
+                </h4>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Count</Label>
+                    <Input
+                      type="number"
+                      step="1"
+                      min="1"
+                      max="6"
+                      value={config.bgPulseOrbCount}
+                      onChange={(e) => handleNumberChange("bgPulseOrbCount", e.target.value, 1, 6)}
+                      className="text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Base Size (px)</Label>
+                    <Input
+                      type="number"
+                      step="10"
+                      min="100"
+                      max="800"
+                      value={config.bgPulseOrbBaseSize}
+                      onChange={(e) => handleNumberChange("bgPulseOrbBaseSize", e.target.value, 100, 800)}
+                      className="text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Spacing (px)</Label>
+                    <Input
+                      type="number"
+                      step="10"
+                      min="0"
+                      max="300"
+                      value={config.bgPulseOrbSpacing}
+                      onChange={(e) => handleNumberChange("bgPulseOrbSpacing", e.target.value, 0, 300)}
+                      className="text-xs"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Movement (px)</Label>
+                    <Input
+                      type="number"
+                      step="2"
+                      min="0"
+                      max="120"
+                      value={config.bgPulseOrbMovement}
+                      onChange={(e) => handleNumberChange("bgPulseOrbMovement", e.target.value, 0, 120)}
+                      className="text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Idle Speed (s)</Label>
+                    <Input
+                      type="number"
+                      step="0.2"
+                      min="1"
+                      max="8"
+                      value={config.bgPulseOrbIdleDuration}
+                      onChange={(e) => handleNumberChange("bgPulseOrbIdleDuration", e.target.value, 1, 8)}
+                      className="text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Fill Opacity</Label>
+                    <Input
+                      type="number"
+                      step="0.05"
+                      min="0"
+                      max="1"
+                      value={config.bgPulseOrbFillOpacity}
+                      onChange={(e) => handleNumberChange("bgPulseOrbFillOpacity", e.target.value, 0, 1)}
+                      className="text-xs"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 max-w-[300px]">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Border Opacity</Label>
+                    <Input
+                      type="number"
+                      step="0.05"
+                      min="0"
+                      max="1"
+                      value={config.bgPulseOrbBorderOpacity}
+                      onChange={(e) => handleNumberChange("bgPulseOrbBorderOpacity", e.target.value, 0, 1)}
+                      className="text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Glow Opacity</Label>
+                    <Input
+                      type="number"
+                      step="0.05"
+                      min="0"
+                      max="1"
+                      value={config.bgPulseOrbGlowOpacity}
+                      onChange={(e) => handleNumberChange("bgPulseOrbGlowOpacity", e.target.value, 0, 1)}
+                      className="text-xs"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <h4 className="text-sm font-medium text-pink-400 flex items-center gap-2">
+                    <Sparkles className="w-4 h-4" />
+                    Orb Colors (RGBA)
+                  </h4>
+                  <div className="grid grid-cols-3 gap-3">
+                    <ColorPicker
+                      label="Fill Color"
+                      value={config.bgPulseOrbFillColor}
+                      onChange={(v) => updateConfig("bgPulseOrbFillColor", v)}
+                    />
+                    <ColorPicker
+                      label="Border Color"
+                      value={config.bgPulseOrbBorderColor}
+                      onChange={(v) => updateConfig("bgPulseOrbBorderColor", v)}
+                    />
+                    <ColorPicker
+                      label="Glow Color"
+                      value={config.bgPulseOrbGlowColor}
+                      onChange={(v) => updateConfig("bgPulseOrbGlowColor", v)}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {config.bgPulseVariant === "equity" && (
+              <div className="space-y-3">
+                <h4 className="text-sm font-medium text-emerald-400 flex items-center gap-2">
+                  <TrendingUp className="w-4 h-4" />
+                  Equity Echo
+                </h4>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Repeat Count</Label>
+                    <Input
+                      type="number"
+                      step="1"
+                      min="1"
+                      max="8"
+                      value={config.bgPulseEquityRepeat}
+                      onChange={(e) => handleNumberChange("bgPulseEquityRepeat", e.target.value, 1, 8)}
+                      className="text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Fade Step</Label>
+                    <Input
+                      type="number"
+                      step="0.02"
+                      min="0"
+                      max="0.5"
+                      value={config.bgPulseEquityFadeStep}
+                      onChange={(e) => handleNumberChange("bgPulseEquityFadeStep", e.target.value, 0, 0.5)}
+                      className="text-xs"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Spacing (%)</Label>
+                    <Input
+                      type="number"
+                      step="1"
+                      min="0"
+                      max="40"
+                      value={config.bgPulseEquitySpacing}
+                      onChange={(e) => handleNumberChange("bgPulseEquitySpacing", e.target.value, 0, 40)}
+                      className="text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Scale Step</Label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      max="0.3"
+                      value={config.bgPulseEquityScaleStep}
+                      onChange={(e) => handleNumberChange("bgPulseEquityScaleStep", e.target.value, 0, 0.3)}
+                      className="text-xs"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Stroke Width (px)</Label>
+                    <Input
+                      type="number"
+                      step="0.5"
+                      min="0.5"
+                      max="6"
+                      value={config.bgPulseEquityStrokeWidth}
+                      onChange={(e) => handleNumberChange("bgPulseEquityStrokeWidth", e.target.value, 0.5, 6)}
+                      className="text-xs"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Fill Opacity</Label>
+                    <Input
+                      type="number"
+                      step="0.05"
+                      min="0"
+                      max="0.8"
+                      value={config.bgPulseEquityFillOpacity}
+                      onChange={(e) => handleNumberChange("bgPulseEquityFillOpacity", e.target.value, 0, 0.8)}
+                      className="text-xs"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-3">
+              <h4 className="text-sm font-medium text-cyan-400 flex items-center gap-2">
+                <Circle className="w-4 h-4" />
+                Frost Glass Overlay
+              </h4>
+              <div className="grid grid-cols-3 gap-3">
                 <div className="space-y-1">
-                  <Label className="text-xs">Initial Scale</Label>
+                  <Label className="text-xs">Enabled</Label>
+                  <Button
+                    variant={config.bgPulseFrostEnabled ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => updateConfig("bgPulseFrostEnabled", !config.bgPulseFrostEnabled)}
+                    className="w-full text-xs"
+                  >
+                    {config.bgPulseFrostEnabled ? "ON" : "OFF"}
+                  </Button>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Blur (px)</Label>
                   <Input
                     type="number"
-                    step="0.005"
-                    min="0.01"
-                    max="0.1"
-                    value={config.bgPulseInitialScale}
-                    onChange={(e) => handleNumberChange("bgPulseInitialScale", e.target.value, 0.01, 0.1)}
+                    step="1"
+                    min="0"
+                    max="40"
+                    value={config.bgPulseFrostBlur}
+                    onChange={(e) => handleNumberChange("bgPulseFrostBlur", e.target.value, 0, 40)}
                     className="text-xs"
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-xs">Expand Duration (s)</Label>
+                  <Label className="text-xs">Opacity</Label>
                   <Input
                     type="number"
                     step="0.05"
-                    min="0.1"
-                    max="0.5"
-                    value={config.bgPulseExpandDuration}
-                    onChange={(e) => handleNumberChange("bgPulseExpandDuration", e.target.value, 0.1, 0.5)}
+                    min="0"
+                    max="1"
+                    value={config.bgPulseFrostOpacity}
+                    onChange={(e) => handleNumberChange("bgPulseFrostOpacity", e.target.value, 0, 1)}
                     className="text-xs"
                   />
                 </div>
               </div>
             </div>
 
-            <div className="space-y-3">
-              <h4 className="text-sm font-medium text-purple-400 flex items-center gap-2">
-                <Sparkles className="w-4 h-4" />
-                Expand Phase 1 (Wabernd)
-              </h4>
-              <div className="grid grid-cols-3 gap-2">
-                <div className="space-y-1">
-                  <Label className="text-xs">Circle 1 Scale</Label>
-                  <Input
-                    type="number"
-                    step="0.1"
-                    min="1"
-                    max="3"
-                    value={config.bgPulseExpand1Scale}
-                    onChange={(e) => handleNumberChange("bgPulseExpand1Scale", e.target.value, 1, 3)}
-                    className="text-xs"
-                  />
+            {config.bgPulseVariant === "gradient" && (
+              <>
+                <div className="space-y-3">
+                  <h4 className="text-sm font-medium text-cyan-400 flex items-center gap-2">
+                    <Circle className="w-4 h-4" />
+                    Initial Scale & Colors
+                  </h4>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <Label className="text-xs">Initial Scale</Label>
+                      <Input
+                        type="number"
+                        step="0.005"
+                        min="0.01"
+                        max="0.1"
+                        value={config.bgPulseInitialScale}
+                        onChange={(e) => handleNumberChange("bgPulseInitialScale", e.target.value, 0.01, 0.1)}
+                        className="text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">Expand Duration (s)</Label>
+                      <Input
+                        type="number"
+                        step="0.05"
+                        min="0.1"
+                        max="0.5"
+                        value={config.bgPulseExpandDuration}
+                        onChange={(e) => handleNumberChange("bgPulseExpandDuration", e.target.value, 0.1, 0.5)}
+                        className="text-xs"
+                      />
+                    </div>
+                  </div>
                 </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Circle 2 Scale</Label>
-                  <Input
-                    type="number"
-                    step="0.1"
-                    min="1"
-                    max="3"
-                    value={config.bgPulseExpand2Scale}
-                    onChange={(e) => handleNumberChange("bgPulseExpand2Scale", e.target.value, 1, 3)}
-                    className="text-xs"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Circle 3 Scale</Label>
-                  <Input
-                    type="number"
-                    step="0.1"
-                    min="1"
-                    max="3"
-                    value={config.bgPulseExpand3Scale}
-                    onChange={(e) => handleNumberChange("bgPulseExpand3Scale", e.target.value, 1, 3)}
-                    className="text-xs"
-                  />
-                </div>
-              </div>
-              <div className="grid grid-cols-3 gap-2">
-                <div className="space-y-1">
-                  <Label className="text-xs">Opacity 1</Label>
-                  <Input
-                    type="number"
-                    step="0.05"
-                    min="0.1"
-                    max="1"
-                    value={config.bgPulseOpacity1}
-                    onChange={(e) => handleNumberChange("bgPulseOpacity1", e.target.value, 0.1, 1)}
-                    className="text-xs"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Opacity 2</Label>
-                  <Input
-                    type="number"
-                    step="0.05"
-                    min="0.1"
-                    max="1"
-                    value={config.bgPulseOpacity2}
-                    onChange={(e) => handleNumberChange("bgPulseOpacity2", e.target.value, 0.1, 1)}
-                    className="text-xs"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Opacity 3</Label>
-                  <Input
-                    type="number"
-                    step="0.05"
-                    min="0.1"
-                    max="1"
-                    value={config.bgPulseOpacity3}
-                    onChange={(e) => handleNumberChange("bgPulseOpacity3", e.target.value, 0.1, 1)}
-                    className="text-xs"
-                  />
-                </div>
-              </div>
-            </div>
 
-            <div className="space-y-3">
-              <h4 className="text-sm font-medium text-blue-400 flex items-center gap-2">
-                <Move className="w-4 h-4" />
-                Billowing Phase 2 (Slow)
-              </h4>
-              <div className="grid grid-cols-3 gap-2">
-                <div className="space-y-1">
-                  <Label className="text-xs">Circle 1 Scale</Label>
-                  <Input
-                    type="number"
-                    step="0.1"
-                    min="2"
-                    max="5"
-                    value={config.bgPulseBillow1Scale}
-                    onChange={(e) => handleNumberChange("bgPulseBillow1Scale", e.target.value, 2, 5)}
-                    className="text-xs"
-                  />
+                <div className="space-y-3">
+                  <h4 className="text-sm font-medium text-purple-400 flex items-center gap-2">
+                    <Sparkles className="w-4 h-4" />
+                    Expand Phase 1 (Wabernd)
+                  </h4>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="space-y-1">
+                      <Label className="text-xs">Circle 1 Scale</Label>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        min="1"
+                        max="3"
+                        value={config.bgPulseExpand1Scale}
+                        onChange={(e) => handleNumberChange("bgPulseExpand1Scale", e.target.value, 1, 3)}
+                        className="text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">Circle 2 Scale</Label>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        min="1"
+                        max="3"
+                        value={config.bgPulseExpand2Scale}
+                        onChange={(e) => handleNumberChange("bgPulseExpand2Scale", e.target.value, 1, 3)}
+                        className="text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">Circle 3 Scale</Label>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        min="1"
+                        max="3"
+                        value={config.bgPulseExpand3Scale}
+                        onChange={(e) => handleNumberChange("bgPulseExpand3Scale", e.target.value, 1, 3)}
+                        className="text-xs"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="space-y-1">
+                      <Label className="text-xs">Opacity 1</Label>
+                      <Input
+                        type="number"
+                        step="0.05"
+                        min="0.1"
+                        max="1"
+                        value={config.bgPulseOpacity1}
+                        onChange={(e) => handleNumberChange("bgPulseOpacity1", e.target.value, 0.1, 1)}
+                        className="text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">Opacity 2</Label>
+                      <Input
+                        type="number"
+                        step="0.05"
+                        min="0.1"
+                        max="1"
+                        value={config.bgPulseOpacity2}
+                        onChange={(e) => handleNumberChange("bgPulseOpacity2", e.target.value, 0.1, 1)}
+                        className="text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">Opacity 3</Label>
+                      <Input
+                        type="number"
+                        step="0.05"
+                        min="0.1"
+                        max="1"
+                        value={config.bgPulseOpacity3}
+                        onChange={(e) => handleNumberChange("bgPulseOpacity3", e.target.value, 0.1, 1)}
+                        className="text-xs"
+                      />
+                    </div>
+                  </div>
                 </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Circle 2 Scale</Label>
-                  <Input
-                    type="number"
-                    step="0.1"
-                    min="2"
-                    max="5"
-                    value={config.bgPulseBillow2Scale}
-                    onChange={(e) => handleNumberChange("bgPulseBillow2Scale", e.target.value, 2, 5)}
-                    className="text-xs"
-                  />
+
+                <div className="space-y-3">
+                  <h4 className="text-sm font-medium text-blue-400 flex items-center gap-2">
+                    <Move className="w-4 h-4" />
+                    Billowing Phase 2 (Slow)
+                  </h4>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="space-y-1">
+                      <Label className="text-xs">Circle 1 Scale</Label>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        min="2"
+                        max="5"
+                        value={config.bgPulseBillow1Scale}
+                        onChange={(e) => handleNumberChange("bgPulseBillow1Scale", e.target.value, 2, 5)}
+                        className="text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">Circle 2 Scale</Label>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        min="2"
+                        max="5"
+                        value={config.bgPulseBillow2Scale}
+                        onChange={(e) => handleNumberChange("bgPulseBillow2Scale", e.target.value, 2, 5)}
+                        className="text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">Circle 3 Scale</Label>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        min="2"
+                        max="5"
+                        value={config.bgPulseBillow3Scale}
+                        onChange={(e) => handleNumberChange("bgPulseBillow3Scale", e.target.value, 2, 5)}
+                        className="text-xs"
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Billow Duration (s)</Label>
+                    <Input
+                      type="number"
+                      step="0.1"
+                      min="1"
+                      max="5"
+                      value={config.bgPulseBillowDuration}
+                      onChange={(e) => handleNumberChange("bgPulseBillowDuration", e.target.value, 1, 5)}
+                      className="text-xs"
+                    />
+                  </div>
                 </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Circle 3 Scale</Label>
-                  <Input
-                    type="number"
-                    step="0.1"
-                    min="2"
-                    max="5"
-                    value={config.bgPulseBillow3Scale}
-                    onChange={(e) => handleNumberChange("bgPulseBillow3Scale", e.target.value, 2, 5)}
-                    className="text-xs"
-                  />
-                </div>
-              </div>
-              <div className="space-y-1">
-                <Label className="text-xs">Billow Duration (s)</Label>
-                <Input
-                  type="number"
-                  step="0.1"
-                  min="1"
-                  max="5"
-                  value={config.bgPulseBillowDuration}
-                  onChange={(e) => handleNumberChange("bgPulseBillowDuration", e.target.value, 1, 5)}
-                  className="text-xs"
-                />
-              </div>
-            </div>
+              </>
+            )}
 
             <div className="space-y-3">
               <h4 className="text-sm font-medium text-pink-400 flex items-center gap-2">
                 <Sparkles className="w-4 h-4" />
                 Colors (RGBA)
               </h4>
-              <div className="space-y-2">
-                <div className="space-y-1">
-                  <Label className="text-xs">AI Update Color</Label>
-                  <Input
-                    type="text"
-                    value={config.bgPulseColorAI}
-                    onChange={(e) => updateConfig("bgPulseColorAI", e.target.value)}
-                    className="text-xs font-mono"
-                    placeholder="rgba(168, 85, 247, 0.5)"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Buy Signal Color</Label>
-                  <Input
-                    type="text"
-                    value={config.bgPulseColorBuy}
-                    onChange={(e) => updateConfig("bgPulseColorBuy", e.target.value)}
-                    className="text-xs font-mono"
-                    placeholder="rgba(34, 197, 94, 0.5)"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Sell Signal Color</Label>
-                  <Input
-                    type="text"
-                    value={config.bgPulseColorSell}
-                    onChange={(e) => updateConfig("bgPulseColorSell", e.target.value)}
-                    className="text-xs font-mono"
-                    placeholder="rgba(239, 68, 68, 0.5)"
-                  />
-                </div>
+              <div className="grid grid-cols-2 gap-3">
+                <ColorPicker
+                  label="AI Update Color"
+                  value={config.bgPulseColorAI}
+                  onChange={(v) => updateConfig("bgPulseColorAI", v)}
+                />
+                <ColorPicker
+                  label="Buy Signal Color"
+                  value={config.bgPulseColorBuy}
+                  onChange={(v) => updateConfig("bgPulseColorBuy", v)}
+                />
+                <ColorPicker
+                  label="Sell Signal Color"
+                  value={config.bgPulseColorSell}
+                  onChange={(v) => updateConfig("bgPulseColorSell", v)}
+                />
+                <ColorPicker
+                  label="Tick Color"
+                  value={config.bgPulseColorTick}
+                  onChange={(v) => updateConfig("bgPulseColorTick", v)}
+                />
               </div>
             </div>
           </>

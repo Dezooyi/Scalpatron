@@ -2,8 +2,27 @@ import { Wand2, RefreshCw, TrendingUp, TrendingDown, Minus, Zap, AlertTriangle, 
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { getStrategyIcon, getStrategyColor } from "@/lib/botUtils";
+import { formatUsd } from "@/lib/performanceMetrics";
 
 type MarketRegime = 'RANGING' | 'TRENDING_UP' | 'TRENDING_DOWN' | 'VOLATILE' | 'OVERSOLD' | 'DEAD';
+
+export interface AdvisorScalpingSettings {
+  cooldownTicks?: number;
+  spikeThreshold?: number;
+  sellDropThreshold?: number;
+  floorWindow?: number;
+}
+
+export interface AdvisorSuggestedConfig {
+  positionSizePct: number;
+  aggressivenessPct: number;
+  slippageTolerancePct: number;
+  maxPositions: number;
+  stopLossPct: number;
+  takeProfitPct?: number;
+  scalpingSettings?: AdvisorScalpingSettings;
+  advisoryOnly: true;
+}
 
 export interface AdvisorSuggestion {
   rank: number;
@@ -24,6 +43,16 @@ export interface AdvisorSuggestion {
   confidence: number;
   regime: MarketRegime;
   generatedAt: number;
+  // Extended fields: concrete bot configuration from the advisor pipeline.
+  suggestedConfig?: AdvisorSuggestedConfig;
+  diagnostics?: {
+    baseScore: number;
+    historicalWinRate: number | null;
+    historicalSampleSize: number;
+    profitFactor: number | null;
+    regimeConfidence: number;
+    warnings: string[];
+  };
 }
 
 interface AdvisorTabProps {
@@ -68,11 +97,6 @@ function ConfidenceBar({ value }: { value: number }) {
   );
 }
 
-function formatUsd(v: number): string {
-  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `$${(v / 1_000).toFixed(0)}k`;
-  return `$${Math.round(v)}`;
-}
 
 function formatTimeAgo(ts: number): string {
   const diff = Date.now() - ts;
@@ -209,7 +233,7 @@ export function AdvisorTab({ onCreateFromAdvisor, suggestions, history, loading,
   const timeAgo = fetchedAt ? formatTimeAgo(fetchedAt) : null;
 
   return (
-    <div className="space-y-8 max-w-6xl mx-auto">
+    <div className="space-y-6 max-w-7xl mx-auto">
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-3">

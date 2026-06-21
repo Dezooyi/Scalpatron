@@ -43,7 +43,7 @@ export function LastActivityCard({ bot }: LastActivityCardProps) {
   const lastActivityTime = lastTrade?.timestamp || bot.priceHistory?.[bot.priceHistory.length - 1];
 
   return (
-    <Card className="border-border/30 bg-card">
+    <Card className="border-border/30 bg-card/40 backdrop-blur-md">
       <CardHeader className="p-3 pb-2">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">

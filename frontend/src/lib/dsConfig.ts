@@ -1,5 +1,5 @@
 export type DSConfig = {
-  // Colors — hex values, per theme
+  // Colors — rgba(r, g, b, a) values, per theme. Hex (#rrggbb) is also accepted.
   primaryLight: string;
   primaryDark: string;
   backgroundLight: string;
@@ -17,33 +17,41 @@ export type DSConfig = {
   fontScale: number; // multiplier
 };
 
+const rgba = (r: number, g: number, b: number, a = 1): string =>
+  `rgba(${r}, ${g}, ${b}, ${a.toFixed(2)})`;
+
 export const DS_DEFAULTS: DSConfig = {
-  primaryLight: "#4d79d4",
-  primaryDark: "#20d4c8",
-  backgroundLight: "#fafafa",
-  backgroundDark: "#111111",
-  cardLight: "#ffffff",
-  cardDark: "#171b26",
-  mutedLight: "#f5f5f5",
-  mutedDark: "#1e2230",
-  destructiveLight: "#e04020",
-  destructiveDark: "#c03018",
-  borderLight: "#ebebeb",
-  borderDark: "#1e2230",
+  primaryLight: rgba(77, 121, 212),
+  primaryDark: rgba(32, 212, 200),
+  backgroundLight: rgba(250, 250, 250),
+  backgroundDark: rgba(17, 17, 17),
+  cardLight: rgba(255, 255, 255),
+  cardDark: rgba(23, 27, 38),
+  mutedLight: rgba(245, 245, 245),
+  mutedDark: rgba(30, 34, 48),
+  destructiveLight: rgba(224, 64, 32),
+  destructiveDark: rgba(192, 48, 24),
+  borderLight: rgba(235, 235, 235),
+  borderDark: rgba(30, 34, 48),
   radius: 0.5,
   fontScale: 1.0,
 };
 
 const LS_KEY = "scalpatron_ds_config";
 
-export function hexLuminance(hex: string): number {
-  if (hex.length < 7) return 0;
-  const r = parseInt(hex.slice(1, 3), 16) / 255;
-  const g = parseInt(hex.slice(3, 5), 16) / 255;
-  const b = parseInt(hex.slice(5, 7), 16) / 255;
+import { parseRgb } from "@/lib/color";
+
+export function hexLuminance(input: string): number {
+  const { r, g, b } = parseRgb(input, { r: 0, g: 0, b: 0 });
   const lin = (c: number) => c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  return 0.2126 * lin(r / 255) + 0.7152 * lin(g / 255) + 0.0722 * lin(b / 255);
 }
+
+/**
+ * Builds an `rgba(...)` string from any hex or rgba color, overriding alpha.
+ * Falls back to the input string if parsing fails so callers can safely chain.
+ */
+export { withAlpha } from "@/lib/color";
 
 function fg(hex: string, threshold = 0.35): string {
   return hexLuminance(hex) > threshold ? "#111111" : "#fafafa";

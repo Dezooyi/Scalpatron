@@ -68,6 +68,13 @@ interface CreateBotDialogProps {
   setShowTokenWhitelist: (v: boolean) => void;
   startAfterCreate: boolean;
   setStartAfterCreate: (v: boolean) => void;
+  /** ADR-014: advisor-recommended scalping settings (read-only display). */
+  advisorSettings?: {
+    cooldownTicks?: number;
+    spikeThreshold?: number;
+    sellDropThreshold?: number;
+    floorWindow?: number;
+  } | null;
   onCreateBot: () => void;
 }
 
@@ -82,6 +89,7 @@ function semanticLabel(pct: number): { label: string; tone: string; barColor: st
 
 const STRATEGY_AI_HINTS: Record<string, { recommended: number; reason: string }> = {
   scalping:           { recommended: 15, reason: "Scalping profitiert von niedriger Aggressivität — schnelle Exits, kleine Positionen." },
+  "scalping-adaptive": { recommended: 20, reason: "Adaptive Scalping passt Parameter an Session & Volatilität an — moderate Aggressivität lässt dem Fork Raum." },
   breakout:           { recommended: 40, reason: "Breakout-Strategien brauchen etwas mehr Kapital um Momentum zu nutzen." },
   dca:                { recommended: 20, reason: "DCA funktioniert am besten mit kontrollierten, kleinen Einsätzen." },
   ema_trend:          { recommended: 35, reason: "EMA-Trend-Strategien profitieren von mittlerer Aggressivität bei klarem Signal." },
@@ -118,6 +126,7 @@ export function CreateBotDialog({
   setShowTokenWhitelist,
   startAfterCreate,
   setStartAfterCreate,
+  advisorSettings,
   onCreateBot,
 }: CreateBotDialogProps) {
   const [activeTab, setActiveTab] = useState<"setup" | "ai">("setup");
@@ -132,12 +141,14 @@ export function CreateBotDialog({
       const randomId = Math.random().toString(36).substring(2, 7).toUpperCase();
       setNewBotName(`Agent-${randomId}`);
     }
-  }, [open]);
+  }, [newBotName, open, setNewBotName]);
 
-  // Reset tab on open
-  useEffect(() => {
+  // Reset tab when dialog opens (adjust state during render to avoid cascading renders)
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
     if (open) setActiveTab("setup");
-  }, [open]);
+  }
 
   const generateNewName = () => {
     const randomId = Math.random().toString(36).substring(2, 7).toUpperCase();
@@ -431,6 +442,40 @@ export function CreateBotDialog({
                   <p className="text-[10px] text-zinc-600 border-l-2 border-zinc-700 pl-2">
                     Standard Scalping: Detects short price spikes (floor-median deviation) and enters/exits quickly.
                   </p>
+                )}
+
+                {/* ADR-014: read-only advisor scalping recommendations */}
+                {advisorSettings && (
+                  <div className="mt-2 rounded-md border border-cyan-500/20 bg-cyan-500/5 p-2.5 space-y-1.5">
+                    <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-cyan-300">
+                      <Sparkles className="h-3 w-3" /> Advisor-Empfehlung (Scalping)
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {advisorSettings.spikeThreshold != null && (
+                        <span className="px-1.5 py-0.5 rounded bg-zinc-800/80 border border-white/10 text-[10px] text-zinc-200 font-mono">
+                          Spike ≥ {advisorSettings.spikeThreshold.toFixed(1)}%
+                        </span>
+                      )}
+                      {advisorSettings.sellDropThreshold != null && (
+                        <span className="px-1.5 py-0.5 rounded bg-zinc-800/80 border border-white/10 text-[10px] text-zinc-200 font-mono">
+                          Drop ≥ {advisorSettings.sellDropThreshold.toFixed(1)}%
+                        </span>
+                      )}
+                      {advisorSettings.cooldownTicks != null && (
+                        <span className="px-1.5 py-0.5 rounded bg-zinc-800/80 border border-white/10 text-[10px] text-zinc-200 font-mono">
+                          Cooldown {advisorSettings.cooldownTicks}t
+                        </span>
+                      )}
+                      {advisorSettings.floorWindow != null && (
+                        <span className="px-1.5 py-0.5 rounded bg-zinc-800/80 border border-white/10 text-[10px] text-zinc-200 font-mono">
+                          Floor {advisorSettings.floorWindow}t
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[9px] text-zinc-500 leading-relaxed">
+                      Diese Werte werden beim Erstellen als Bot-Settings übernommen. Nachträglich änderbar in den Bot-Details.
+                    </p>
+                  </div>
                 )}
               </div>
 

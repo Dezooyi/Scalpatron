@@ -1,8 +1,9 @@
-import { Zap, TrendingUp, RefreshCw, Flame, Activity, ArrowDown, SlidersHorizontal, BrainCircuit } from "lucide-react";
+import { Zap, TrendingUp, RefreshCw, Flame, Activity, ArrowDown, SlidersHorizontal, BrainCircuit, Sparkles, Radar } from "lucide-react";
 
 export const getStrategyIcon = (type: string | undefined, cls = "h-2.5 w-2.5") => {
   switch (type) {
     case 'scalping': return <Zap className={cls} />;
+    case 'scalping-adaptive': return <Sparkles className={cls} />;
     case 'trend': return <TrendingUp className={cls} />;
     case 'mean_reversion': return <RefreshCw className={cls} />;
     case 'breakout': return <Flame className={cls} />;
@@ -10,6 +11,8 @@ export const getStrategyIcon = (type: string | undefined, cls = "h-2.5 w-2.5") =
     case 'dca': return <ArrowDown className={cls} />;
     case 'grid': return <SlidersHorizontal className={cls} />;
     case 'ml': return <BrainCircuit className={cls} />;
+    case 'paet': return <Radar className={cls} />;
+    case 'paet_plus': return <Radar className={cls} />;
     default: return <Zap className={cls} />;
   }
 };
@@ -17,6 +20,7 @@ export const getStrategyIcon = (type: string | undefined, cls = "h-2.5 w-2.5") =
 export const getStrategyColor = (type: string | undefined) => {
   switch (type) {
     case 'scalping': return 'bg-blue-500/20 text-blue-300 border-blue-500/30';
+    case 'scalping-adaptive': return 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
     case 'trend': return 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
     case 'mean_reversion': return 'bg-purple-500/20 text-purple-300 border-purple-500/30';
     case 'breakout': return 'bg-amber-500/20 text-amber-300 border-amber-500/30';
@@ -24,6 +28,8 @@ export const getStrategyColor = (type: string | undefined) => {
     case 'dca': return 'bg-teal-500/20 text-teal-300 border-teal-500/30';
     case 'grid': return 'bg-orange-500/20 text-orange-300 border-orange-500/30';
     case 'ml': return 'bg-pink-500/20 text-pink-300 border-pink-500/30';
+    case 'paet': return 'bg-rose-500/20 text-rose-300 border-rose-500/30';
+    case 'paet_plus': return 'bg-violet-500/20 text-violet-300 border-violet-500/30';
     default: return 'bg-zinc-500/20 text-zinc-400 border-zinc-500/30';
   }
 };
@@ -37,6 +43,9 @@ export const getStrategyDescription = (type: string | undefined) => {
     case 'dca': return 'DCA Strategy: Dollar Cost Averaging accumulating positions over time.';
     case 'grid': return 'Grid Strategy: Places buy and sell orders at regular intervals.';
     case 'ml': return 'Machine Learning: KI-basierte Predictive Modeling Matrix.';
+    case 'scalping-adaptive': return 'Adaptive Scalping: Dynamisch anpassbare Scalping-Parameter je nach Marktregime.';
+    case 'paet': return 'PAET — Predictive Anomaly & Evacuation Trigger: Verlässt Positionen vor prognostizierten Kollapsen.';
+    case 'paet_plus': return 'PAET+ — Predictive Anomaly & Evacuation Trigger mit selektivem Einstieg: Kauft wenn Velocity↑ und Residual>0, verkauft vor Kollapsen.';
     default: return 'Scalping Strategy: Exploits small price spikes for quick profits.';
   }
 };

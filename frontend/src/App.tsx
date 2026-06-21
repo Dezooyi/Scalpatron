@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import gsap from "gsap";
-import { useGSAP } from "@gsap/react";
 import { CSSPlugin } from "gsap/CSSPlugin";
 gsap.registerPlugin(CSSPlugin);
 import {
@@ -10,6 +9,7 @@ import {
 import { configureGSAP } from "@/lib/gsapConfig";
 import { useAnimationVisibility } from "@/hooks/useAnimationVisibility";
 import { useAtTop } from "@/hooks/useAtTop";
+import { useLocalStorage } from "@/hooks/useLocalStorage";
 import {
   Play,
   Square,
@@ -32,25 +32,20 @@ import {
   Loader2,
   TrendingUp,
   TrendingDown,
+  LineChart as LineChartIcon,
   Info,
   ArrowDown,
   Puzzle,
   Check,
   Wand2,
+  Wallet,
 } from "lucide-react";
-import {
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  AreaChart,
-  Area,
-} from "recharts";
+import { EquityCurveChart } from "@/components/performance/EquityCurveChart";
+import { PriceChart } from "@/components/performance/PriceChart";
 import Documentation from "@/components/Documentation";
 import GlobalSettings from "@/components/GlobalSettings";
 import { SelfCorrectionInsightsTab } from "@/components/tabs/SelfCorrectionInsightsTab";
-import { AdvisorTab, type AdvisorSuggestion } from "@/components/tabs/AdvisorTab";
+import { AdvisorTab, type AdvisorSuggestion, type AdvisorScalpingSettings } from "@/components/tabs/AdvisorTab";
 import { LogFeedList } from "@/components/LogFeedList";
 import type { LogFeedRowData, BadgeVariant } from "@/components/LogFeedList";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -79,11 +74,14 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { CreateBotDialog } from "@/components/CreateBotDialog";
 import { OracleAnalysisDialog } from "@/components/OracleAnalysisDialog";
 import { BotChipGrid } from "@/components/BotChipGrid";
+import { BackgroundPulse } from "@/components/BackgroundPulse";
 import { GlobalBotStatsBar } from "@/components/GlobalBotStatsBar";
 import { PerformanceSection } from "@/components/PerformanceSection";
+import { WalletPage } from "@/components/wallet/WalletPage";
 import { formatUptime } from "@/lib/botUtils";
 import {
   Table,
@@ -99,6 +97,8 @@ export type BotSettings = {
   spikeThreshold: number;
   sellDropThreshold: number;
   cooldownTicks: number;
+  takeProfitThreshold?: number;
+  startDelayTicks?: number;
 };
 
 export type BotPosition = {
@@ -140,6 +140,7 @@ export type { LogEntry };
 
 export type AgentAdviceEntry = {
   botId: string;
+  applied?: boolean;
   advice?: {
     regime?: string;
     confidence?: number;
@@ -159,6 +160,7 @@ export type AgentHistoryEntry = {
   reason?: string;
   analysis?: string;
   adjustedSettings?: BotSettings | string;
+  applied?: boolean | number;
   aggressivenessAdvice?: number;
   outcomeTradeCount?: number;
   outcomeTotalPnl?: number;
@@ -206,14 +208,43 @@ type StrategyConfig = {
     d_period?: number;
     window?: number;
   }>;
-  entry_conditions: Array<{ left: string; operator: string; right: string | number }>;
-  exit_conditions: Array<{ type: string; value?: number; trailing_pct?: number; condition?: any }>;
+  entry_conditions: Array<{ left: string; operator: string; right: string | number; type?: string; threshold?: number }>;
+  exit_conditions: Array<{ type: string; value?: number; trailing_pct?: number; condition?: { left: string; operator: string; right: string | number } }>;
   risk_management: { position_size: number; max_positions: number; leverage: number; max_drawdown?: number };
   execution: { order_type: string; slippage_tolerance: number };
-  scalping_settings?: { floorWindow?: number; spikeThreshold?: number; sellDropThreshold?: number; cooldownTicks?: number };
+  scalping_settings?: { floorWindow?: number; spikeThreshold?: number; sellDropThreshold?: number; cooldownTicks?: number; takeProfitThreshold?: number; startDelayTicks?: number };
+  paet_settings?: { stl_seasonal_period?: number; stl_trend_window?: number; volatility_sigma_multiplier?: number; collapse_threshold_pct?: number; evacuation_ticks?: number; safety_coefficient_k?: number; false_alarm_penalty_omega?: number; min_history_candles?: number; acceleration_ema_period?: number; entry_mode?: 'once' | 'paet_plus'; entry_cooldown_ticks?: number };
   system_prompt?: string;
   isTemplate?: boolean;
   grid_levels?: number | string;
+};
+
+export type KillSwitchRule = {
+  enabled: boolean;
+  value: number;
+};
+
+export type KillSwitchConfig = {
+  enabled: boolean;                 // Master-Switch
+  maxDrawdown?: KillSwitchRule;             // 0.15 = 15%
+  maxDailyLoss?: KillSwitchRule;            // 0.05 = 5%
+  maxConsecutiveLosses?: KillSwitchRule;    // 5
+  sessionTakeProfit?: KillSwitchRule;       // 0.10 = 10%
+  maxTotalTrades?: KillSwitchRule;          // 100
+};
+
+export type KillSwitchRuntime = {
+  config: KillSwitchConfig;
+  status: 'armed' | 'tripped';
+  reason?: string;
+  trippedAt?: number;
+  peakEquity: number;
+  currentEquity: number;
+  drawdownPct: number;
+  sessionStartEquity: number;
+  sessionPnlPct: number;
+  consecutiveLosses: number;
+  totalTrades: number;
 };
 
 type SystemPromptInfo = {
@@ -260,7 +291,33 @@ export type BotState = {
   strategyType?: string;
   strategyConfig?: StrategyConfig;
   warmupProgress?: number;
+  killSwitch?: KillSwitchRuntime;
 };
+
+// Strategie-abhängige Standard-Kill-Switch-Konfiguration (globale Trading-Regel)
+const KILL_SWITCH_DEFAULTS: Record<string, Record<string, number>> = {
+  scalping:           { maxDrawdown: 0.08, maxDailyLoss: 0.04, maxConsecutiveLosses: 6, sessionTakeProfit: 0.06, maxTotalTrades: 200 },
+  "scalping-adaptive": { maxDrawdown: 0.08, maxDailyLoss: 0.04, maxConsecutiveLosses: 6, sessionTakeProfit: 0.06, maxTotalTrades: 200 },
+  trend:              { maxDrawdown: 0.15, maxDailyLoss: 0.06, maxConsecutiveLosses: 5, sessionTakeProfit: 0.12, maxTotalTrades: 150 },
+  mean_reversion: { maxDrawdown: 0.10, maxDailyLoss: 0.04, maxConsecutiveLosses: 7, sessionTakeProfit: 0.08, maxTotalTrades: 200 },
+  breakout:       { maxDrawdown: 0.18, maxDailyLoss: 0.08, maxConsecutiveLosses: 4, sessionTakeProfit: 0.15, maxTotalTrades: 120 },
+  momentum:       { maxDrawdown: 0.20, maxDailyLoss: 0.08, maxConsecutiveLosses: 4, sessionTakeProfit: 0.18, maxTotalTrades: 120 },
+  dca:            { maxDrawdown: 0.25, maxDailyLoss: 0.10, maxConsecutiveLosses: 8, sessionTakeProfit: 0.20, maxTotalTrades: 100 },
+  grid:           { maxDrawdown: 0.12, maxDailyLoss: 0.05, maxConsecutiveLosses: 6, sessionTakeProfit: 0.10, maxTotalTrades: 300 },
+  ml:             { maxDrawdown: 0.12, maxDailyLoss: 0.05, maxConsecutiveLosses: 5, sessionTakeProfit: 0.10, maxTotalTrades: 150 },
+};
+
+function defaultKillSwitchConfig(strategyType?: string): KillSwitchConfig {
+  const base = KILL_SWITCH_DEFAULTS[strategyType ?? 'scalping'] ?? KILL_SWITCH_DEFAULTS.scalping;
+  return {
+    enabled: false,
+    maxDrawdown: { enabled: true, value: base.maxDrawdown },
+    maxDailyLoss: { enabled: true, value: base.maxDailyLoss },
+    maxConsecutiveLosses: { enabled: true, value: base.maxConsecutiveLosses },
+    sessionTakeProfit: { enabled: true, value: base.sessionTakeProfit },
+    maxTotalTrades: { enabled: true, value: base.maxTotalTrades },
+  };
+}
 
 export type TokenInfo = {
   mintAddress: string;
@@ -349,6 +406,9 @@ export default function App() {
 
   const [bots, setBots] = useState<BotState[]>([]);
   const [activeTab, setActiveTab] = useState("dashboard");
+  const [assistantSubTab, setAssistantSubTab] = useState<"advisor" | "assistant" | "selfcorrection">("advisor");
+  const [chartTab, setChartTab] = useState<"equity" | "price">("equity");
+  const [settingsInitialTab, setSettingsInitialTab] = useState<"appearance" | "api" | "trading" | "wallet" | "design" | "animation" | "danger" | undefined>(undefined);
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
   const [serverStatus, setServerStatus] = useState<
@@ -359,7 +419,7 @@ export default function App() {
   // Separate state for price histories to avoid memory bloat via SSE
   const [botPriceHistories, setBotPriceHistories] = useState<Record<string, number[]>>({});
 
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [theme, setTheme] = useLocalStorage<"dark" | "light">("scalpatron_theme", "dark");
   const [agentAdvice, setAgentAdvice] = useState<AgentAdviceEntry[]>([]);
   const [terminalLogs, setTerminalLogs] = useState<Record<string, LogEntry[]>>({});
 
@@ -424,16 +484,20 @@ export default function App() {
   const [newBotTradingMode, setNewBotTradingMode] = useState<"fixed" | "aggressive">("fixed");
   const [newBotTradeSize, setNewBotTradeSize] = useState(1);
   const [newBotAggressiveness, setNewBotAggressiveness] = useState(10);
-  const [newBotAutoStart, setNewBotAutoStart] = useState(false);
+  const [newBotAutoStart, setNewBotAutoStart] = useState(true);
   const [isCreateBotDialogOpen, setIsCreateBotDialogOpen] = useState(false);
   const [pendingAdvisorToken, setPendingAdvisorToken] = useState<{ name: string; symbol: string; priceUsd?: number; volume24h?: number; liquidity?: number } | null>(null);
+  // ADR-014: advisor-recommended scalping settings, forwarded to the backend as
+  // the bot's `settings` payload so the created bot actually trades with the
+  // values the advisor computed (instead of discarding them).
+  const [pendingAdvisorSettings, setPendingAdvisorSettings] = useState<AdvisorScalpingSettings | null>(null);
 
   // Global Settings (cached for CreateBot dialog defaults)
   const [globalSettings, setGlobalSettings] = useState({ initialSOL: 10, tradeSize: 1, paperMode: true });
 
   // Inline Bot Settings Panel
   const [botSettingsPanelId, setBotSettingsPanelId] = useState<string | null>(null);
-  const [botSettingsDraft, setBotSettingsDraft] = useState<{ floorWindow: number; spikeThreshold: number; sellDropThreshold: number; cooldownTicks: number; tradeSize: number; aggressiveness: number; tradingMode: "fixed" | "aggressive"; walletAddress: string; strategyConfigDraft: StrategyConfig | null; aggPreset: number }>({ floorWindow: 20, spikeThreshold: 0.3, sellDropThreshold: 0.15, cooldownTicks: 5, tradeSize: 1, aggressiveness: 10, tradingMode: "fixed", walletAddress: "", strategyConfigDraft: null, aggPreset: 50 });
+  const [botSettingsDraft, setBotSettingsDraft] = useState<{ floorWindow: number; spikeThreshold: number; sellDropThreshold: number; cooldownTicks: number; takeProfitThreshold: number; startDelayTicks: number; tradeSize: number; aggressiveness: number; tradingMode: "fixed" | "aggressive"; walletAddress: string; strategyConfigDraft: StrategyConfig | null; aggPreset: number; killSwitchDraft: KillSwitchConfig }>({ floorWindow: 20, spikeThreshold: 0.3, sellDropThreshold: 5, cooldownTicks: 5, takeProfitThreshold: 0.10, startDelayTicks: 30, tradeSize: 1, aggressiveness: 10, tradingMode: "fixed", walletAddress: "", strategyConfigDraft: null, aggPreset: 50, killSwitchDraft: defaultKillSwitchConfig() });
   const [botSettingsSaveStatus, setBotSettingsSaveStatus] = useState<"idle" | "saved" | "error">("idle");
   const [tradeFlash, setTradeFlash] = useState<Record<string, "buy" | "sell" | null>>({});
   const [aiFlash, setAiFlash] = useState<Record<string, boolean>>({});
@@ -468,12 +532,6 @@ export default function App() {
 
   const logEndRef = useRef<HTMLDivElement>(null);
   const tradeFlashTimeoutRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const globalPulseCircle1Ref = useRef<HTMLDivElement>(null);
-  const globalPulseCircle2Ref = useRef<HTMLDivElement>(null);
-  const globalPulseCircle3Ref = useRef<HTMLDivElement>(null);
-  const globalPulseContainerRef = useRef<HTMLDivElement>(null);
-  const lastAnimatedFlashRef = useRef<Record<string, string | null>>({});
-  const lastAnimatedAiFlashRef = useRef<Record<string, boolean>>({});
 
   // Detect new trades and trigger flash animation - optimized with ref-based comparison
   // to avoid iterating over all bots on every render
@@ -616,7 +674,7 @@ export default function App() {
               reason: data.advice.reason,
               analysis: data.advice.analysis,
               adjustedSettings: data.advice.adjustedSettings,
-              applied: true,
+              applied: data.applied ?? false,
             };
             return [newEntry, ...prev].slice(0, 100);
           });
@@ -916,18 +974,15 @@ export default function App() {
 
   // Load agent data when tab opens; reload history when bot filter changes
   useEffect(() => {
-    loadAgentHistory(selectedHistoryBot === "all" ? undefined : selectedHistoryBot);
-
     if (activeTab === "agent") {
+      loadAgentHistory(selectedHistoryBot === "all" ? undefined : selectedHistoryBot);
       loadAgentStatus();
       loadAgentModels();
-      // Load regime performance
       const botId = selectedHistoryBot !== "all" ? selectedHistoryBot : undefined;
       const perfUrl = botId
         ? `${getApiBase()}/api/agent/regime-performance?botId=${botId}`
         : `${getApiBase()}/api/agent/regime-performance`;
       fetch(perfUrl).then(r => r.json()).then(d => { if (Array.isArray(d)) setRegimePerformance(d); }).catch(() => { });
-      // Load strategy templates
       fetch(`${getApiBase()}/api/strategies/templates`).then(r => r.json()).then(d => {
         if (Array.isArray(d)) setStrategyTemplates(d);
       }).catch(() => { });
@@ -1078,19 +1133,38 @@ export default function App() {
       setBotSettingsPanelId(null);
       return;
     }
-    const isScalping = !bot.strategyConfig || bot.strategyConfig.strategy_type === 'scalping';
-    const fw = bot.settings?.floorWindow ?? 20;
+    const isScalping = !bot.strategyConfig || bot.strategyConfig.strategy_type === 'scalping' || bot.strategyConfig.strategy_type === 'scalping-adaptive';
+    const isPaet = bot.strategyConfig?.strategy_type === 'paet';
+
+    // For scalping-adaptive: the adaptive fork updates bot.settings (scalpingDetector.settings)
+    // every tick based on market context, so they differ from what the user actually configured.
+    // strategyConfig.scalping_settings holds the authoritative stored base values — use those
+    // so the panel always shows (and saves) what the user set, not the live runtime adaptation.
+    const isAdaptive = bot.strategyConfig?.strategy_type === 'scalping-adaptive';
+    const baseCfg = isAdaptive ? bot.strategyConfig?.scalping_settings : undefined;
+
+    const fw = baseCfg?.floorWindow ?? bot.settings?.floorWindow ?? 20;
     const computedPreset = isScalping
       ? Math.round(Math.max(0, Math.min(1, (35 - fw) / 30)) * 99 + 1)
-      : 50;
+      : isPaet
+        ? Math.round(Math.max(0, Math.min(1, (3.0 - (bot.strategyConfig?.paet_settings?.volatility_sigma_multiplier ?? 2.0)) / 2.0)) * 99 + 1)
+        : 50;
     setBotSettingsDraft({
-      ...bot.settings,
+      floorWindow:          baseCfg?.floorWindow          ?? bot.settings?.floorWindow          ?? 20,
+      spikeThreshold:       baseCfg?.spikeThreshold       ?? bot.settings?.spikeThreshold       ?? 0.3,
+      sellDropThreshold:    baseCfg?.sellDropThreshold    ?? bot.settings?.sellDropThreshold    ?? 5,
+      cooldownTicks:        baseCfg?.cooldownTicks        ?? bot.settings?.cooldownTicks        ?? 5,
+      takeProfitThreshold:  baseCfg?.takeProfitThreshold  ?? bot.settings?.takeProfitThreshold  ?? 0.10,
+      startDelayTicks:      baseCfg?.startDelayTicks      ?? bot.settings?.startDelayTicks      ?? 30,
       tradeSize: bot.tradeSize ?? 1,
       aggressiveness: bot.aggressiveness ?? 10,
       tradingMode: bot.tradingMode ?? "fixed",
       walletAddress: bot.walletAddress ?? "",
       strategyConfigDraft: bot.strategyConfig ? JSON.parse(JSON.stringify(bot.strategyConfig)) : null,
       aggPreset: computedPreset,
+      killSwitchDraft: bot.killSwitch?.config
+        ? JSON.parse(JSON.stringify(bot.killSwitch.config))
+        : defaultKillSwitchConfig(bot.strategyConfig?.strategy_type ?? bot.strategyType),
     });
     setBotSettingsPanelId(bot.id);
     setBotSettingsSaveStatus("idle");
@@ -1099,23 +1173,25 @@ export default function App() {
   const saveBotSettings = async (id: string) => {
     try {
       const { tradeSize, aggressiveness, tradingMode, walletAddress,
-        floorWindow, spikeThreshold, sellDropThreshold, cooldownTicks,
-        strategyConfigDraft } = botSettingsDraft;
+        floorWindow, spikeThreshold, sellDropThreshold, cooldownTicks, takeProfitThreshold, startDelayTicks,
+        strategyConfigDraft, killSwitchDraft } = botSettingsDraft;
       const stratType = strategyConfigDraft?.strategy_type ?? 'scalping';
+      const isScalpingFamily = stratType === 'scalping' || stratType === 'scalping-adaptive';
 
-      // Always save trade config + scalping pattern settings if applicable
+      // Always save trade config + scalping pattern settings + kill switch
       const settingsRes = await fetch(`${getApiBase()}/api/bots/${id}/settings`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           tradeSize, aggressiveness, tradingMode, walletAddress,
-          ...(stratType === 'scalping' ? { floorWindow, spikeThreshold, sellDropThreshold, cooldownTicks } : {}),
+          killSwitch: killSwitchDraft,
+          ...(isScalpingFamily ? { floorWindow, spikeThreshold, sellDropThreshold, cooldownTicks, takeProfitThreshold, startDelayTicks } : {}),
         }),
       });
       if (!settingsRes.ok) throw new Error();
 
       // For non-scalping strategies: also push updated strategyConfig
-      if (stratType !== 'scalping' && strategyConfigDraft) {
+      if (!isScalpingFamily && strategyConfigDraft) {
         const stratRes = await fetch(`${getApiBase()}/api/bots/${id}/strategy`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -1129,6 +1205,15 @@ export default function App() {
     } catch {
       setBotSettingsSaveStatus("error");
       setTimeout(() => setBotSettingsSaveStatus("idle"), 2500);
+    }
+  };
+
+  const resetKillSwitch = async (botId: string) => {
+    try {
+      const res = await fetch(`${getApiBase()}/api/bots/${botId}/killswitch/reset`, { method: "POST" });
+      if (!res.ok) throw new Error();
+    } catch (e) {
+      console.error("Kill-Switch Reset fehlgeschlagen:", e);
     }
   };
 
@@ -1189,6 +1274,8 @@ export default function App() {
           aggressiveness: newBotAggressiveness,
           tradingMode: newBotTradingMode,
           strategyId: newBotStrategyId || undefined,
+          // ADR-014: forward advisor scalping settings as the bot's `settings`.
+          ...(pendingAdvisorSettings ? { settings: pendingAdvisorSettings } : {}),
           ...(pendingAdvisorToken ? {
             tokenName: pendingAdvisorToken.name,
             tokenSymbol: pendingAdvisorToken.symbol,
@@ -1249,13 +1336,15 @@ export default function App() {
     setNewBotTradeSize(1);
     setNewBotAggressiveness(10);
     setPendingAdvisorToken(null);
+    setPendingAdvisorSettings(null);
   };
 
   // ==================== SMART BOT ADVISOR ====================
 
   // ==================== SMART BOT ADVISOR FUNCTIONS ====================
 
-  // Wird NUR durch Klick auf "Aktualisieren" getriggert — kein Auto-Fetch beim Tab-Öffnen.
+  // Wird beim ersten Öffnen der Strategy Assistant Seite automatisch aufgerufen (CACHE).
+  // forceRefresh=true umgeht den Server-Cache (Klick auf "Aktualisieren").
   const fetchAdvisorSuggestions = useCallback(async (forceRefresh = false) => {
     setAdvisorLoading(true);
     setAdvisorError(null);
@@ -1274,6 +1363,8 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => { void fetchAdvisorSuggestions(false); }, [fetchAdvisorSuggestions]);
+
   const handleCreateFromAdvisor = (suggestion: AdvisorSuggestion) => {
     setNewBotName(`${suggestion.tokenSymbol} ${suggestion.strategyName.split(' ')[0]}`);
     setNewBotMintAddress(suggestion.mintAddress);
@@ -1285,6 +1376,9 @@ export default function App() {
       volume24h: suggestion.volume24h,
       liquidity: suggestion.liquidity,
     });
+    // ADR-014: forward the advisor's scalping recommendations so the created
+    // bot trades with them. Only scalping strategies carry scalpingSettings.
+    setPendingAdvisorSettings(suggestion.suggestedConfig?.scalpingSettings ?? null);
     setActiveTab("dashboard");
     setIsCreateBotDialogOpen(true);
   };
@@ -1721,7 +1815,7 @@ export default function App() {
 
     // Solo skip redundant renders
     if (!hasChanges) return;
-  }, [bots]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [bots]);
 
   // Trigger background pulse on any AI flash (any bot)
   useEffect(() => {
@@ -1739,97 +1833,22 @@ export default function App() {
     }
   }, [terminalLogs, selectedBot]);
 
-  // Background Pulse Animation — High-performance GSAP implementation
-  useGSAP(() => {
-    if (!animConfig.enabled || !animConfig.backgroundPulseEnabled || !backgroundPulseTrigger || !globalPulseContainerRef.current) return;
-
-    const circle1 = globalPulseCircle1Ref.current;
-    const circle2 = globalPulseCircle2Ref.current;
-    const circle3 = globalPulseCircle3Ref.current;
-    const container = globalPulseContainerRef.current;
-    if (!circle1 || !circle2 || !circle3 || !container) return;
-
-    const color = backgroundPulseTrigger === "buy"
-      ? animConfig.bgPulseColorBuy
-      : backgroundPulseTrigger === "sell"
-        ? animConfig.bgPulseColorSell
-        : backgroundPulseTrigger === "ai"
-          ? animConfig.bgPulseColorAI
-          : "rgba(103, 232, 249, 0.4)"; // Faint Cyan for Ticks
-
-    // Kill existing background pulse animations
-    gsap.killTweensOf([circle1, circle2, circle3, container]);
-
-    // Color via CSS Variable - avoids rebuilding the radial-gradient string on every trigger
-    container.style.setProperty("--pulse-color", color);
-
-    const tl = gsap.timeline();
-
-    // Start - alle Circles resetten (autoAlpha statt opacity: 0 setzt auch
-    // visibility:hidden, damit die Compositor-Layer nicht unnötig evaluiert werden)
-    tl.set([circle1, circle2, circle3], {
-      scale: animConfig.bgPulseInitialScale,
-      autoAlpha: 0,
-    });
-
-    tl.set(container, { autoAlpha: 1 });
-
-    // Phase 1: Schnelle Expansion
-    tl.to(circle1, {
-      scale: animConfig.bgPulseExpand1Scale,
-      autoAlpha: animConfig.bgPulseOpacity1,
-      duration: animConfig.bgPulseExpandDuration,
-      ease: animConfig.easeType,
-    });
-    tl.to(circle2, {
-      scale: animConfig.bgPulseExpand2Scale,
-      autoAlpha: animConfig.bgPulseOpacity2,
-      duration: animConfig.bgPulseExpandDuration + 0.05,
-      ease: animConfig.easeType,
-    }, "-=0.2");
-    tl.to(circle3, {
-      scale: animConfig.bgPulseExpand3Scale,
-      autoAlpha: animConfig.bgPulseOpacity3,
-      duration: animConfig.bgPulseExpandDuration + 0.1,
-      ease: animConfig.easeType,
-    }, "-=0.25");
-
-    // Phase 2: Langsame Expansion & Fade Out
-    tl.to(circle1, {
-      scale: animConfig.bgPulseBillow1Scale,
-      autoAlpha: 0,
-      duration: animConfig.bgPulseBillowDuration,
-      ease: "power2.inOut",
-    });
-    tl.to(circle2, {
-      scale: animConfig.bgPulseBillow2Scale,
-      autoAlpha: 0,
-      duration: animConfig.bgPulseBillowDuration + 0.3,
-      ease: "power2.inOut",
-    }, "<0.1");
-    tl.to(circle3, {
-      scale: animConfig.bgPulseBillow3Scale,
-      autoAlpha: 0,
-      duration: animConfig.bgPulseBillowDuration + 0.6,
-      ease: "power2.inOut",
-    }, "<0.15");
-
-  // Dependencies include the enable flags so toggling "All Animations" /
-  // "Background Pulse" in the settings immediately re-evaluates the guard.
-  // Without them the effect only re-runs on the next trigger event, so a toggle
-  // appeared to "not take effect" because the trigger is transient (resets to false).
-  }, { dependencies: [backgroundPulseTrigger, animConfig.enabled, animConfig.backgroundPulseEnabled], scope: globalPulseContainerRef });
-
   return (
     <>
-      {/* GLOBAL BACKGROUND PULSE (GSAP Controlled Waber-Effect) - FIXIERT FÜR GESAMTE APP */}
-      <div className="global-pulse-container" ref={globalPulseContainerRef}>
-        <div className="global-pulse-circle" ref={globalPulseCircle1Ref} />
-        <div className="global-pulse-circle global-pulse-circle-2" ref={globalPulseCircle2Ref} />
-        <div className="global-pulse-circle global-pulse-circle-3" ref={globalPulseCircle3Ref} />
-      </div>
-
-      <div className={`flex h-screen w-full text-foreground overflow-hidden relative ${theme === "light" ? "app-bg-light" : "app-bg-dark"}`}>
+      {/* `isolate` macht den Wrapper zum Stacking-Context. Der Pulse liegt als
+          Kind mit negativem z-index darin => er wird ÜBER dem Wrapper-Hintergrund,
+          aber UNTER dem eigentlichen Inhalt gezeichnet. Würde er als Sibling mit
+          z-index:-20 vor dem Wrapper liegen, überdeckte ihn die deckende
+          app-bg-Hintergrundfarbe komplett (Regression seit Dashboard-Redesign). */}
+      <div className={`flex h-screen w-full text-foreground overflow-hidden relative isolate ${theme === "light" ? "app-bg-light" : "app-bg-dark"}`}>
+        {/* GLOBAL BACKGROUND PULSE - ausgelagert in eigene Komponente */}
+        {animConfig.enabled && animConfig.backgroundPulseEnabled && (
+          <BackgroundPulse
+            trigger={backgroundPulseTrigger}
+            config={animConfig}
+            bot={selectedBot}
+          />
+        )}
         {/* Top Navigation Bar - ersetzt Sidepanel */}
         <header className="topbar animate-in fade-in duration-1000" data-at-top={isAtTop}>
           <div className="topbar-container">
@@ -1903,6 +1922,7 @@ export default function App() {
                   className={`topbar-nav-button ${activeTab === "agent" ? "active" : ""}`}
                   onClick={() => {
                     setActiveTab("agent");
+                    setAssistantSubTab("advisor");
                     setSelectedBotId(null);
                   }}
                 >
@@ -1910,40 +1930,24 @@ export default function App() {
                 </button>
                 <div className="nav-tooltip">
                   <span className="nav-tooltip-label">Strategy Assistant</span>
-                  <span className="nav-tooltip-info">AI-powered analysis</span>
+                  <span className="nav-tooltip-info">Advisor · AI Agent · Self-Correction</span>
                 </div>
               </div>
 
+              {/* Wallet Button */}
               <div className="topbar-nav-item">
                 <button
-                  className={`topbar-nav-button ${activeTab === "selfcorrection" ? "active" : ""}`}
+                  className={`topbar-nav-button ${activeTab === "wallet" ? "active" : ""}`}
                   onClick={() => {
-                    setActiveTab("selfcorrection");
+                    setActiveTab("wallet");
                     setSelectedBotId(null);
                   }}
                 >
-                  <Puzzle className="h-4 w-4" />
+                  <Wallet className="h-4 w-4" />
                 </button>
                 <div className="nav-tooltip">
-                  <span className="nav-tooltip-label">Self-Correction</span>
-                  <span className="nav-tooltip-info">Insights & Lessons (ADR-011)</span>
-                </div>
-              </div>
-
-              {/* Smart Bot Advisor Button */}
-              <div className="topbar-nav-item">
-                <button
-                  className={`topbar-nav-button ${activeTab === "advisor" ? "active" : ""}`}
-                  onClick={() => {
-                    setActiveTab("advisor");
-                    setSelectedBotId(null);
-                  }}
-                >
-                  <Wand2 className="h-4 w-4" />
-                </button>
-                <div className="nav-tooltip">
-                  <span className="nav-tooltip-label">Smart Advisor</span>
-                  <span className="nav-tooltip-info">Token + Strategy Recommendations</span>
+                  <span className="nav-tooltip-label">Wallet</span>
+                  <span className="nav-tooltip-info">Balances & Transaktionen</span>
                 </div>
               </div>
 
@@ -2056,7 +2060,11 @@ export default function App() {
         </header>
 
         {/* Main Content Area - Dashboard, Tokens, Agent, Docs, Settings */}
-        <main className="flex-1 overflow-auto p-8">
+        {/* overflow-x-hidden: verhindert horizontalen Page-Scroll, der durch
+            dekorative Bot-Chip-Overlays (-inset-4 Glows, ::after Pulse,
+            Event-Badges) bzw. Trade-/AI-Flash-Animationen am Inhaltsrand
+            ausgelöst wird. Vertikales Scrollen bleibt via overflow-y-auto. */}
+        <main className="flex-1 overflow-y-auto overflow-x-hidden p-8">
           <div className="max-w-[1400px] mx-auto space-y-8">
             {activeTab === "dashboard" ? (
               // COMBINED DASHBOARD VIEW
@@ -2087,6 +2095,7 @@ export default function App() {
                     setShowTokenWhitelist={setShowTokenWhitelist}
                     startAfterCreate={newBotAutoStart}
                     setStartAfterCreate={setNewBotAutoStart}
+                    advisorSettings={pendingAdvisorSettings}
                     onCreateBot={createDemoBot}
                   />
                 </div>
@@ -2159,7 +2168,12 @@ export default function App() {
                     agentCycleMinutes={agentConfig?.cycleMinutes}
                     nextAnalysisTime={agentStatus?.nextAnalysisTime}
                     onToggleAll={handleToggleAll}
+                    onStopAgent={stopAgent}
+                    onStartAgent={startAgent}
                     isAllActionLoading={isAllActionLoading}
+                    onOpenWalletTab={() => setActiveTab("wallet")}
+                    onOpenWalletSettings={() => { setSettingsInitialTab("wallet"); setActiveTab("settings"); }}
+                    getApiBase={getApiBase}
                   />
                 )}
 
@@ -2173,20 +2187,22 @@ export default function App() {
                   />
                 )}
 
-                {/* Bot Chip Grid */}
-                <BotChipGrid
-                  bots={bots}
-                  selectedBotId={selectedBotId}
-                  deletingBotId={deletingBotId}
-                  tokens={tokens}
-                  tradeFlash={tradeFlash}
-                  aiFlash={aiFlash}
-                  animConfig={animConfig}
-                  backgroundPulseTrigger={backgroundPulseTrigger}
-                  onSelectBot={setSelectedBotId}
-                  onReorderBots={handleReorderBots}
-                  onToggleBotStatus={toggleBotStatus}
-                />
+                {/* Bot Chip Grid — bei nur einem Bot übersprungen (Auswahl trivial) */}
+                {bots.length > 1 && (
+                  <BotChipGrid
+                    bots={bots}
+                    selectedBotId={selectedBotId}
+                    deletingBotId={deletingBotId}
+                    tokens={tokens}
+                    tradeFlash={tradeFlash}
+                    aiFlash={aiFlash}
+                    animConfig={animConfig}
+                    backgroundPulseTrigger={backgroundPulseTrigger}
+                    onSelectBot={setSelectedBotId}
+                    onReorderBots={handleReorderBots}
+                    onToggleBotStatus={toggleBotStatus}
+                  />
+                )}
 
                 {/* Detail View — always rendered, animates on bot change */}
                 {selectedBot && (() => {
@@ -2197,7 +2213,7 @@ export default function App() {
                     <div key={selectedBotId} className="animate-in fade-in slide-in-from-bottom-16 duration-600 space-y-3 mt-3">
                       {/* DETACHED PREMIUM BOT HEADER */}
                       <Card
-                        className="relative rounded-l bg-transparent border-none">
+                        className="relative rounded-l bg-card/40 backdrop-blur-md border-none">
                         <div className="flex items-center justify-between px-4 py-4 shrink-0">
                           <div className="flex items-center gap-8 flex-1 min-w-0">
                             <div className="flex items-center gap-5 flex-1 min-w-0">
@@ -2361,7 +2377,7 @@ export default function App() {
 
                       {/* MAIN CONTENT AREA - Detached from Header */}
                       <div className="grid grid-cols-1 gap-6">
-                        <Card className="border-primary/40 bg-transparent shadow-none overflow-hidden flex flex-col rounded-2xl">
+                        <Card className="border-primary/40 bg-card/40 backdrop-blur-md shadow-none overflow-hidden flex flex-col rounded-2xl">
 
                           {/* Inline Bot Settings Panel */}
                           {botSettingsPanelId === selectedBot?.id && (() => {
@@ -2430,7 +2446,7 @@ export default function App() {
 
                             // Get indicator by type — exact match first, then fuzzy base-type + closest period
                             // Needed because templates use "EMA"/"RSI" but UI keys use "EMA_20"/"RSI_14"
-                            const getInd = (typeKey: string): (typeof scd.indicators)[number] | undefined => {
+                            const getInd = (typeKey: string): (NonNullable<typeof scd>['indicators'])[number] | undefined => {
                               if (!scd?.indicators) return undefined;
                               const exact = scd.indicators.find(i => i.type === typeKey);
                               if (exact) return exact;
@@ -2460,8 +2476,8 @@ export default function App() {
                               const lerpF = (a: number, b: number, dp = 3) => parseFloat((a + (b - a) * t).toFixed(dp));
                               setBotSettingsDraft((p) => {
                                 const base = { ...p, aggPreset: v };
-                                if (stratType === 'scalping') {
-                                  return { ...base, floorWindow: lerp(35, 5), spikeThreshold: lerpF(0.8, 0.1), sellDropThreshold: lerpF(0.12, 0.03), cooldownTicks: lerp(25, 2) };
+                                if (stratType === 'scalping' || stratType === 'scalping-adaptive') {
+                                  return { ...base, floorWindow: lerp(35, 5), spikeThreshold: lerpF(0.8, 0.1), sellDropThreshold: lerpF(5.0, 0.5), cooldownTicks: lerp(25, 2), takeProfitThreshold: lerpF(0.08, 0.25), startDelayTicks: lerp(40, 5) };
                                 }
                                 if (!p.strategyConfigDraft) return base;
                                 const sc = p.strategyConfigDraft;
@@ -2479,6 +2495,26 @@ export default function App() {
                                 }
                                 if (stratType === 'dca') {
                                   return { ...base, strategyConfigDraft: { ...sc, entry_conditions: sc.entry_conditions.map(e => e.left === 'RSI_14' ? { ...e, right: lerp(30, 50) } : e), exit_conditions: sc.exit_conditions.map(e => e.type === 'take_profit' ? { ...e, value: lerpF(0.04, 0.18) } : e.type === 'stop_loss' ? { ...e, value: lerpF(0.02, 0.10) } : e), risk_management: { ...sc.risk_management, position_size: lerpF(0.02, 0.12), max_positions: lerp(1, 5), max_drawdown: lerpF(0.08, 0.25) } }};
+                                }
+                                if (stratType === 'paet') {
+                                  // Permanent params (not touched by R1/R2/R3 adaptation):
+                                  //   volatility_sigma_multiplier, safety_coefficient_k,
+                                  //   acceleration_ema_period, false_alarm_penalty_omega
+                                  // Start-value params (R1/R2/R3 converge these after ~30 ticks):
+                                  //   stl_trend_window, collapse_threshold_pct, evacuation_ticks
+                                  // All midpoints at t=0.5 align with PAET_DEFAULTS.
+                                  return { ...base, strategyConfigDraft: { ...sc, paet_settings: {
+                                    ...(sc.paet_settings ?? {}),
+                                    collapse_threshold_pct:      lerpF(0.38, 0.12, 3),
+                                    volatility_sigma_multiplier: lerpF(3.0, 1.0, 1),
+                                    safety_coefficient_k:        lerpF(0.5, 3.5, 1),
+                                    evacuation_ticks:            lerp(1, 5),
+                                    acceleration_ema_period:     lerp(8, 2),
+                                    false_alarm_penalty_omega:   lerpF(0.8, 2.2, 2),
+                                    stl_trend_window:            lerp(90, 30),
+                                    min_history_candles:         lerp(160, 80),
+                                    entry_cooldown_ticks:        lerp(15, 5),
+                                  }}};
                                 }
                                 return base;
                               });
@@ -2505,19 +2541,41 @@ export default function App() {
                               <div className="animate-in slide-in-from-top-2 duration-200 border-b border-primary/10 bg-muted/20 px-6 py-4 space-y-4">
 
                                 {/* Strategy badge */}
-                                <div className="flex items-center gap-2">
-                                  <span
-                                    className={`flex items-center gap-1 text-xs-custom font-bold px-2 py-0.5 rounded border cursor-help ${getStrategyColor(stratType)}`}
-                                    onMouseEnter={(e) => tooltip.show(getStrategyDescription(stratType), e)}
-                                    onMouseMove={(e) => tooltip.move(e)}
-                                    onMouseLeave={() => tooltip.hide()}
-                                  >
-                                    {getStrategyIcon(stratType, "h-3 w-3")}
-                                    {stratType.replace('_', ' ').toUpperCase()}
-                                  </span>
-                                  <span className="text-xs-custom text-zinc-500">{scd?.strategy_name ?? 'Range Spike Scalper'}</span>
-                                </div>
+                                {(() => {
+                                  const paetPlus = stratType === 'paet' && scd?.paet_settings?.entry_mode === 'paet_plus';
+                                  const displayType = paetPlus ? 'paet_plus' : stratType;
+                                  const displayName = paetPlus ? 'PAET+' : stratType.replace('_', ' ').toUpperCase();
+                                  return (
+                                    <div className="flex items-center gap-2">
+                                      <span
+                                        className={`flex items-center gap-1 text-xs-custom font-bold px-2 py-0.5 rounded border cursor-help ${getStrategyColor(displayType)}`}
+                                        onMouseEnter={(e) => tooltip.show(getStrategyDescription(displayType), e)}
+                                        onMouseMove={(e) => tooltip.move(e)}
+                                        onMouseLeave={() => tooltip.hide()}
+                                      >
+                                        {getStrategyIcon(displayType, "h-3 w-3")}
+                                        {displayName}
+                                      </span>
+                                      <span className="text-xs-custom text-zinc-500">{scd?.strategy_name ?? 'Range Spike Scalper'}</span>
+                                    </div>
+                                  );
+                                })()}
 
+                                {/* ── SETTINGS TABS ── */}
+                                <Tabs defaultValue="strategy">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <TabsList className="h-8">
+                                      <TabsTrigger value="strategy" className="text-xs-custom px-3 h-6">Strategie</TabsTrigger>
+                                      <TabsTrigger value="killswitch" className="text-xs-custom px-3 h-6 gap-1">
+                                        Stop-Strategie
+                                        {selectedBot?.killSwitch?.status === 'tripped' && (
+                                          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                                        )}
+                                      </TabsTrigger>
+                                    </TabsList>
+                                  </div>
+
+                                  <TabsContent value="strategy" className="space-y-4 mt-3">
                                 {/* ── MASTER AGGRESSIVENESS PRESET ── */}
                                 <div className="space-y-1.5 pb-3 border-b border-border/30">
                                   <div className="flex items-center justify-between">
@@ -2539,16 +2597,20 @@ export default function App() {
                                 </div>
 
                                 {/* ── SCALPING PARAMS ── */}
-                                {stratType === 'scalping' && (
+                                {(stratType === 'scalping' || stratType === 'scalping-adaptive') && (
                                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                     {SR('Floor Window', 5, 100, 1, botSettingsDraft.floorWindow ?? 20, tick,
                                       (n) => setBotSettingsDraft(p => ({ ...p, floorWindow: n })), 'Ticks (5–100)')}
                                     {SR('Spike Threshold', 0.05, 5, 0.05, botSettingsDraft.spikeThreshold ?? 0.3, (n) => `${n.toFixed(2)}%`,
                                       (n) => setBotSettingsDraft(p => ({ ...p, spikeThreshold: n })), '% Anstieg')}
-                                    {SR('Sell Drop', 0.02, 1, 0.01, botSettingsDraft.sellDropThreshold ?? 0.15, (n) => `${n.toFixed(2)}%`,
+                                    {SR('Sell Drop', 0.1, 10, 0.1, botSettingsDraft.sellDropThreshold ?? 5, (n) => `${n.toFixed(2)}%`,
                                       (n) => setBotSettingsDraft(p => ({ ...p, sellDropThreshold: n })), '% Rückgang')}
                                     {SR('Cooldown', 0, 50, 1, botSettingsDraft.cooldownTicks ?? 5, tick,
                                       (n) => setBotSettingsDraft(p => ({ ...p, cooldownTicks: n })), 'Ticks (0–50)')}
+                                    {SR('Take Profit', 0.5, 50, 0.5, (botSettingsDraft.takeProfitThreshold ?? 0.10) * 100, pct1,
+                                      (n) => setBotSettingsDraft(p => ({ ...p, takeProfitThreshold: n / 100 })), '% Ziel')}
+                                    {SR('Start Delay', 0, 100, 1, botSettingsDraft.startDelayTicks ?? 30, tick,
+                                      (n) => setBotSettingsDraft(p => ({ ...p, startDelayTicks: n })), 'Ticks nach Start')}
                                   </div>
                                 )}
 
@@ -2662,6 +2724,70 @@ export default function App() {
                                   </div>
                                 )}
 
+                                {/* ── PAET PARAMS ── */}
+                                {stratType === 'paet' && scd && (() => {
+                                  const ps = (scd.paet_settings ?? {}) as Record<string, number | string | undefined>;
+                                  const entryMode = (scd.paet_settings?.entry_mode ?? 'once') as 'once' | 'paet_plus';
+                                  const updatePaetSetting = (key: string, value: number | string) =>
+                                    setBotSettingsDraft(p => ({
+                                      ...p,
+                                      strategyConfigDraft: p.strategyConfigDraft ? {
+                                        ...p.strategyConfigDraft,
+                                        paet_settings: { ...(p.strategyConfigDraft.paet_settings ?? {}), [key]: value },
+                                      } : p.strategyConfigDraft,
+                                    }));
+                                  return (
+                                    <div className="space-y-3">
+                                      {/* ── Entry Mode ── */}
+                                      <div className="space-y-1.5 pb-3 border-b border-border/20">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <label className={labelCls}>Entry Mode</label>
+                                          <div className="flex gap-1">
+                                            <button type="button"
+                                              onClick={() => updatePaetSetting('entry_mode', 'once')}
+                                              className={`px-2 py-0.5 rounded text-xs-custom font-bold border transition-colors ${entryMode === 'once' ? 'bg-rose-500/20 border-rose-500/40 text-rose-300' : 'bg-muted border-border text-muted-foreground'}`}>
+                                              PAET
+                                            </button>
+                                            <button type="button"
+                                              onClick={() => updatePaetSetting('entry_mode', 'paet_plus')}
+                                              className={`px-2 py-0.5 rounded text-xs-custom font-bold border transition-colors ${entryMode === 'paet_plus' ? 'bg-violet-500/20 border-violet-500/40 text-violet-300' : 'bg-muted border-border text-muted-foreground'}`}>
+                                              PAET+
+                                            </button>
+                                          </div>
+                                        </div>
+                                        <p className={descCls}>
+                                          {entryMode === 'once'
+                                            ? 'Kauft automatisch nach Warmup — kein Einstiegs-Filter.'
+                                            : 'PAET+: Kauft nur wenn Velocity↑ und Residual>0 (STL-Momentum-Filter).'}
+                                        </p>
+                                        <div className="mt-1.5">
+                                          {SR('Entry Cooldown', 1, 50, 1, (ps.entry_cooldown_ticks as number ?? 10), tick,
+                                            (n) => updatePaetSetting('entry_cooldown_ticks', n), 'Ticks nach SELL bis nächster BUY')}
+                                        </div>
+                                      </div>
+                                      {/* ── Exit & Signal Parameters ── */}
+                                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                        {SR('Collapse Threshold', 5, 50, 1, (ps.collapse_threshold_pct as number ?? 0.25) * 100, pct1,
+                                          (n) => updatePaetSetting('collapse_threshold_pct', n / 100), '% unter Peak = Kollaps')}
+                                        {SR('Evacuation Ticks', 1, 10, 1, (ps.evacuation_ticks as number ?? 3), tick,
+                                          (n) => updatePaetSetting('evacuation_ticks', n), 'Candles für Exit')}
+                                        {SR('Safety Buffer k', 0.5, 5, 0.5, (ps.safety_coefficient_k as number ?? 2), (n) => n.toFixed(1),
+                                          (n) => updatePaetSetting('safety_coefficient_k', n), 'Sicherheitspuffer')}
+                                        {SR('Sigma Multiplier', 1.0, 4.0, 0.1, (ps.volatility_sigma_multiplier as number ?? 2.0), (n) => `${n.toFixed(1)}σ`,
+                                          (n) => updatePaetSetting('volatility_sigma_multiplier', n), 'Band-Breite')}
+                                        {SR('Min History', 60, 300, 10, (ps.min_history_candles as number ?? 120), tick,
+                                          (n) => updatePaetSetting('min_history_candles', n), 'Warmup-Candles')}
+                                        {SR('Trend Window', 20, 200, 5, (ps.stl_trend_window as number ?? 60), tick,
+                                          (n) => updatePaetSetting('stl_trend_window', n), 'SMA für Trend T(t)')}
+                                        {SR('EMA Smoothing', 2, 20, 1, (ps.acceleration_ema_period as number ?? 5), tick,
+                                          (n) => updatePaetSetting('acceleration_ema_period', n), 'Glättung vor Ableit.')}
+                                        {SR('Seasonal Period', 0, 120, 1, (ps.stl_seasonal_period as number ?? 0), (n) => n === 0 ? 'Auto' : `${Math.round(n)}`,
+                                          (n) => updatePaetSetting('stl_seasonal_period', n), '0 = FFT Auto-Detect')}
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
+
                                 {/* Trading Config Row */}
                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-3 border-t border-border/30">
                                   <div className="space-y-1">
@@ -2703,6 +2829,153 @@ export default function App() {
                                     <p className={descCls}>Für Tracking & Anzeige</p>
                                   </div>
                                 </div>
+                                  </TabsContent>
+
+                                  {/* ── STOP-STRATEGIE / KILL-SWITCH TAB ── */}
+                                  <TabsContent value="killswitch" className="space-y-4 mt-3">
+                                    {(() => {
+                                      const ks = botSettingsDraft.killSwitchDraft;
+                                      const rt = selectedBot?.killSwitch;
+                                      const setKs = (patch: Partial<KillSwitchConfig>) =>
+                                        setBotSettingsDraft(p => ({ ...p, killSwitchDraft: { ...p.killSwitchDraft, ...patch } }));
+                                      const tripped = rt?.status === 'tripped';
+                                      const fmtPctSigned = (n: number) => `${n >= 0 ? '+' : ''}${(n * 100).toFixed(2)}%`;
+
+                                      // Per-Rule Zugriff (jede Regel einzeln an/aus + Wert)
+                                      type RKey = 'maxDrawdown' | 'maxDailyLoss' | 'maxConsecutiveLosses' | 'sessionTakeProfit' | 'maxTotalTrades';
+                                      const ruleVal = (k: RKey, fallback: number) => ks[k]?.value ?? fallback;
+                                      const setRuleVal = (k: RKey, value: number) =>
+                                        setKs({ [k]: { enabled: ks[k]?.enabled ?? true, value } } as Partial<KillSwitchConfig>);
+                                      const toggleRule = (k: RKey) =>
+                                        setKs({ [k]: { enabled: !(ks[k]?.enabled ?? true), value: ks[k]?.value ?? 0 } } as Partial<KillSwitchConfig>);
+                                      const activeCount = (['maxDrawdown', 'maxDailyLoss', 'maxConsecutiveLosses', 'sessionTakeProfit', 'maxTotalTrades'] as RKey[])
+                                        .filter(k => ks[k]?.enabled).length;
+
+                                      // Regel-Zeile mit Toggle + Slider
+                                      const renderRule = (k: RKey, label: string, min: number, max: number, step: number, fmt: (n: number) => string, desc: string, mul: number, fallback: number) => {
+                                        const on = ks[k]?.enabled ?? true;
+                                        const val = ruleVal(k, fallback);
+                                        return (
+                                          <div className={`rounded-lg border p-2.5 space-y-1.5 transition-opacity ${on ? 'bg-muted/30 border-border' : 'bg-muted/10 border-border/30 opacity-50'}`}>
+                                            <div className="flex items-center justify-between gap-2">
+                                              <div className="flex items-center gap-1.5 min-w-0">
+                                                <button
+                                                  type="button"
+                                                  onClick={() => toggleRule(k)}
+                                                  title={on ? 'Regel aktiv — klicken zum Deaktivieren' : 'Regel inaktiv — klicken zum Aktivieren'}
+                                                  className={`w-7 h-3.5 rounded-full relative transition-colors shrink-0 ${on ? 'bg-emerald-500/70' : 'bg-muted-foreground/40'}`}
+                                                >
+                                                  <span className={`absolute top-[2px] w-2.5 h-2.5 rounded-full bg-white shadow transition-all ${on ? 'left-[14px]' : 'left-[2px]'}`} />
+                                                </button>
+                                                <span className="text-[10px] font-bold uppercase text-muted-foreground truncate">{label}</span>
+                                              </div>
+                                              <span className={`text-[11px] font-mono font-bold tabular-nums shrink-0 ${on ? 'text-primary' : 'text-muted-foreground'}`}>{fmt(val * mul)}</span>
+                                            </div>
+                                            <input type="range" min={min} max={max} step={step} value={val * mul}
+                                              onChange={(e) => setRuleVal(k, Number(e.target.value) / mul)}
+                                              disabled={!on}
+                                              className={`w-full cursor-pointer ${on ? 'accent-primary' : 'accent-muted-foreground/40'}`}
+                                              style={{ height: '4px' }} />
+                                            <p className={descCls}>{desc}</p>
+                                          </div>
+                                        );
+                                      };
+
+                                      return (
+                                        <div className={`space-y-4 ${ks.enabled ? '' : 'opacity-60'}`}>
+                                          {/* Live-Status Banner */}
+                                          {tripped ? (
+                                            <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 space-y-2">
+                                              <div className="flex items-start justify-between gap-2">
+                                                <div className="flex items-center gap-2">
+                                                  <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                                                  <span className="text-xs-custom font-bold text-red-400 uppercase">Kill-Switch ausgelöst — Trading gestoppt</span>
+                                                </div>
+                                                <button
+                                                  className="px-2.5 py-1 rounded bg-red-500/20 border border-red-500/40 text-red-300 text-xs-custom font-bold hover:bg-red-500/30 transition-colors"
+                                                  onClick={() => resetKillSwitch(selectedBot?.id ?? "")}
+                                                >
+                                                  Reset & Entschärfen
+                                                </button>
+                                              </div>
+                                              <p className="text-xs-custom text-red-300/80 font-mono break-words">{rt?.reason ?? 'Grenze überschritten'}</p>
+                                            </div>
+                                          ) : ks.enabled ? (
+                                            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2 flex items-center gap-2">
+                                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                              <span className="text-xs-custom font-bold text-emerald-400 uppercase">Scharf geschaltet — {activeCount} {activeCount === 1 ? 'Regel' : 'Regeln'} überwacht</span>
+                                            </div>
+                                          ) : (
+                                            <div className="rounded-lg border border-border/40 bg-muted/30 p-2 flex items-center gap-2">
+                                              <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/40" />
+                                              <span className="text-xs-custom font-bold text-muted-foreground uppercase">Inaktiv — aktivieren, um Trading automatisch zu stoppen</span>
+                                            </div>
+                                          )}
+
+                                          {/* Master Enable + Empfehlung */}
+                                          <div className="flex items-center justify-between gap-3 pb-3 border-b border-border/30">
+                                            <button
+                                              type="button"
+                                              onClick={() => setKs({ enabled: !ks.enabled })}
+                                              className={`flex items-center gap-2 px-3 py-1.5 rounded border text-xs-custom font-bold transition-colors ${ks.enabled ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400' : 'bg-muted border-border text-muted-foreground'}`}
+                                            >
+                                              <span className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center ${ks.enabled ? 'border-emerald-400' : 'border-muted-foreground/50'}`}>
+                                                {ks.enabled && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />}
+                                              </span>
+                                              Kill-Switch {ks.enabled ? 'AKTIV' : 'AUS'}
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => setKs({ ...defaultKillSwitchConfig(stratType), enabled: ks.enabled })}
+                                              className="px-2.5 py-1 rounded border border-border bg-muted text-muted-foreground text-xs-custom font-bold hover:bg-muted/60 hover:text-foreground transition-colors"
+                                            >
+                                              ⚙ Empfehlung ({stratType.replace('_', ' ')})
+                                            </button>
+                                          </div>
+
+                                          {/* Stop-Regeln — jede Regel einzeln an/aus + Wert (responsives Grid) */}
+                                          <div className="space-y-2">
+                                            <div className="flex items-center justify-between">
+                                              <span className="text-[10px] font-bold uppercase text-muted-foreground">Aktive Regeln</span>
+                                              <span className={`text-[10px] font-mono font-bold ${activeCount > 0 ? 'text-emerald-400' : 'text-muted-foreground'}`}>
+                                                {activeCount}/5 aktiv
+                                              </span>
+                                            </div>
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
+                                              {renderRule('maxDrawdown', 'Max Drawdown', 1, 50, 1, pct0, 'Stop bei Equity-Rückgang vom Hoch', 100, 0.15)}
+                                              {renderRule('maxDailyLoss', 'Max Tagesverlust', 1, 30, 1, pct0, 'Stop bei Session-/Tagesverlust', 100, 0.05)}
+                                              {renderRule('maxConsecutiveLosses', 'Max Folgeverluste', 1, 20, 1, tick, 'Stop nach N Verlust-Trades in Folge', 1, 5)}
+                                              {renderRule('sessionTakeProfit', 'Session Take-Profit', 1, 50, 1, pct0, 'Stop bei erreichtem Session-Gewinn', 100, 0.10)}
+                                              {renderRule('maxTotalTrades', 'Max Trades gesamt', 5, 1000, 5, tick, 'Stop nach N geschlossenen Trades', 1, 100)}
+                                            </div>
+                                          </div>
+
+                                          {/* Live-Metriken */}
+                                          {rt && (
+                                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 pt-3 border-t border-border/30">
+                                              <div className="space-y-0.5">
+                                                <span className={labelCls}>Drawdown</span>
+                                                <span className={`text-xs font-mono font-bold ${ks.maxDrawdown?.enabled && rt.drawdownPct >= (ks.maxDrawdown?.value ?? 1) * 0.8 ? 'text-red-400' : 'text-foreground'}`}>{(rt.drawdownPct * 100).toFixed(1)}%</span>
+                                              </div>
+                                              <div className="space-y-0.5">
+                                                <span className={labelCls}>Session PnL</span>
+                                                <span className={`text-xs font-mono font-bold ${rt.sessionPnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtPctSigned(rt.sessionPnlPct)}</span>
+                                              </div>
+                                              <div className="space-y-0.5">
+                                                <span className={labelCls}>Folgeverluste</span>
+                                                <span className={`text-xs font-mono font-bold ${ks.maxConsecutiveLosses?.enabled && rt.consecutiveLosses >= (ks.maxConsecutiveLosses?.value ?? 99) * 0.8 ? 'text-red-400' : 'text-foreground'}`}>{rt.consecutiveLosses}</span>
+                                              </div>
+                                              <div className="space-y-0.5">
+                                                <span className={labelCls}>Trades</span>
+                                                <span className="text-xs font-mono font-bold text-foreground">{rt.totalTrades}</span>
+                                              </div>
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })()}
+                                  </TabsContent>
+                                </Tabs>
 
                                 <div className="flex items-center gap-3 mt-4">
                                   <button
@@ -2747,42 +3020,191 @@ export default function App() {
                                     const totalPnlPercent = stats?.totalPnlPercent ?? 0;
 
                                     return (
-                                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                                        {/* Total Trades Card */}
-                                        <StatCard
-                                          icon={Activity}
-                                          iconColor="text-blue-400"
-                                          label="Total Trades"
-                                          value={totalTrades}
-                                          valueColor="text-foreground"
-                                        />
+                                      <>
+                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                          {/* Total Trades Card */}
+                                          <StatCard
+                                            icon={Activity}
+                                            iconColor="text-blue-400"
+                                            label="Total Trades"
+                                            value={totalTrades}
+                                            valueColor="text-foreground"
+                                          />
 
-                                        {/* Win Rate Card */}
-                                        <StatCard
-                                          icon={TrendingUp}
-                                          iconColor="text-emerald-400"
-                                          label="Win Rate"
-                                          value={`${winRatePercentage.toFixed(1)}%`}
-                                          valueColor={winRatePercentage >= 50 ? 'text-emerald-400' : 'text-red-400'}
-                                        />
+                                          {/* Win Rate Card */}
+                                          <StatCard
+                                            icon={TrendingUp}
+                                            iconColor="text-emerald-400"
+                                            label="Win Rate"
+                                            value={`${winRatePercentage.toFixed(1)}%`}
+                                            valueColor={winRatePercentage >= 50 ? 'text-emerald-400' : 'text-red-400'}
+                                          />
 
-                                        {/* Total PnL Card */}
-                                        <StatCard
-                                          icon={totalPnlPercent >= 0 ? TrendingUp : TrendingDown}
-                                          iconColor={totalPnlPercent >= 0 ? 'text-emerald-400' : 'text-red-400'}
-                                          label="Total PnL"
-                                          value={`${totalPnlPercent >= 0 ? '+' : ''}${totalPnlPercent.toFixed(2)}%`}
-                                          valueColor={totalPnlPercent >= 0 ? 'text-emerald-400' : 'text-red-400'}
-                                        />
+                                          {/* Total PnL Card */}
+                                          <StatCard
+                                            icon={totalPnlPercent >= 0 ? TrendingUp : TrendingDown}
+                                            iconColor={totalPnlPercent >= 0 ? 'text-emerald-400' : 'text-red-400'}
+                                            label="Total PnL"
+                                            value={`${totalPnlPercent >= 0 ? '+' : ''}${totalPnlPercent.toFixed(2)}%`}
+                                            valueColor={totalPnlPercent >= 0 ? 'text-emerald-400' : 'text-red-400'}
+                                          />
 
-                                        {/* Uptime Card */}
-                                        <StatCard
-                                          icon={Flame}
-                                          iconColor="text-orange-400"
-                                          label="Uptime"
-                                          value={formatUptime(selectedBot.startTime)}
-                                          valueColor="text-foreground"
-                                        />
+                                          {/* Uptime Card */}
+                                          <StatCard
+                                            icon={Flame}
+                                            iconColor="text-orange-400"
+                                            label="Uptime"
+                                            value={formatUptime(selectedBot.startTime)}
+                                            valueColor="text-foreground"
+                                          />
+                                        </div>
+
+                                        {/* Warmup Status under key facts cards */}
+                                        <div className="mt-4">
+                                          <div className="flex justify-between items-center mb-1">
+                                            <span className="text-tiny font-bold uppercase text-muted-foreground flex items-center gap-1">
+                                              Warmup Status
+                                              {(selectedBot.warmupProgress ?? 0) >= 1 && <Check className="h-2 w-2 text-green-400" />}
+                                            </span>
+                                            <span className={`text-tiny font-mono font-bold ${(selectedBot.warmupProgress ?? 0) >= 1 ? 'text-green-400' : 'text-primary'}`}>
+                                              {((selectedBot.warmupProgress || 0) * 100).toFixed(0)}%
+                                            </span>
+                                          </div>
+                                          <div className="h-1 w-full bg-zinc-800 rounded-full overflow-hidden">
+                                            <div
+                                              className={`h-full transition-all duration-700 ease-out ${(selectedBot.warmupProgress ?? 0) >= 1 ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]' : 'bg-primary animate-pulse'}`}
+                                              style={{ width: `${(selectedBot.warmupProgress || 0) * 100}%` }}
+                                            />
+                                          </div>
+                                          {(selectedBot.warmupProgress ?? 0) < 1 && (
+                                            <span className="text-2xs text-zinc-600 mt-1 uppercase tracking-tighter italic">
+                                              {selectedBot.strategyType === 'scalping-adaptive'
+                                                ? 'Progressive adaptive warmup — spike threshold easing in...'
+                                                : 'Waiting for indicator data stability...'}
+                                            </span>
+                                          )}
+                                        </div>
+                                      </>
+                                    );
+                                  })()}
+
+                                  {/* Exit Strategie — Fortschritt bis zur Exit-Regel (Kill-Switch) */}
+                                  {(() => {
+                                    const ks = selectedBot.killSwitch;
+
+                                    // Kill-Switch deaktiviert → Hinweis
+                                    if (!ks?.config?.enabled) {
+                                      return (
+                                        <div className="rounded-lg bg-muted/30 border border-border/50 p-2.5 mt-3">
+                                          <div className="flex items-center gap-1.5 mb-1">
+                                            <ArrowDown className="h-3 w-3 text-muted-foreground" />
+                                            <span className="text-[9px] font-bold uppercase text-muted-foreground">Exit Strategie</span>
+                                          </div>
+                                          <div className="text-sm font-bold text-muted-foreground">Kill-Switch inaktiv</div>
+                                          <p className="text-[10px] text-muted-foreground/60 mt-0.5">Stop-Strategie aktivieren, um den Trading-Stopp zu überwachen.</p>
+                                        </div>
+                                      );
+                                    }
+
+                                    // Ausgelöst → Ergebnis anzeigen
+                                    if (ks.status === 'tripped') {
+                                      return (
+                                        <div className="rounded-lg bg-red-500/10 border border-red-500/40 p-2.5 mt-3 space-y-1">
+                                          <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-1.5">
+                                              <Zap className="h-3 w-3 text-red-400 animate-pulse" />
+                                              <span className="text-[9px] font-bold uppercase text-red-400">Exit Regel ausgelöst</span>
+                                            </div>
+                                            {ks.trippedAt && (
+                                              <span className="text-[9px] text-red-300/60 font-mono">
+                                                {new Date(ks.trippedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                              </span>
+                                            )}
+                                          </div>
+                                          <div className="text-sm font-black text-red-300 break-words">{ks.reason ?? 'Grenze überschritten'}</div>
+                                          <p className="text-[10px] text-red-300/70">Trading gestoppt — Reset in den Stop-Strategie-Einstellungen erforderlich.</p>
+                                        </div>
+                                      );
+                                    }
+
+                                    // Relevanteste Exit-Regel berechnen (größter Fortschritt zur Grenze).
+                                    // Nur aktivierten Einzelregeln (rule.enabled) werden berücksichtigt.
+                                    type Rule = { name: string; kind: 'danger' | 'goal'; progress: number; current: string; limit: string; remaining: string; verb: string };
+                                    const cfg = ks.config;
+                                    const rules: Rule[] = [];
+                                    if (cfg.maxDrawdown?.enabled && cfg.maxDrawdown.value > 0) {
+                                      const lim = cfg.maxDrawdown.value;
+                                      rules.push({ name: 'Max Drawdown', kind: 'danger', progress: ks.drawdownPct / lim, current: `${(ks.drawdownPct * 100).toFixed(1)}%`, limit: `${(lim * 100).toFixed(0)}%`, remaining: `${((lim - ks.drawdownPct) * 100).toFixed(1)}% bis Stopp`, verb: 'Stop bei Equity-Rückgang vom Hoch' });
+                                    }
+                                    if (cfg.maxDailyLoss?.enabled && cfg.maxDailyLoss.value > 0) {
+                                      const lim = cfg.maxDailyLoss.value;
+                                      const loss = Math.max(0, -ks.sessionPnlPct);
+                                      rules.push({ name: 'Tagesverlust-Limit', kind: 'danger', progress: loss / lim, current: `-${(loss * 100).toFixed(1)}%`, limit: `-${(lim * 100).toFixed(0)}%`, remaining: `${((lim - loss) * 100).toFixed(1)}% bis Stopp`, verb: 'Stop bei Session-Verlust' });
+                                    }
+                                    if (cfg.maxConsecutiveLosses?.enabled && cfg.maxConsecutiveLosses.value > 0) {
+                                      const lim = cfg.maxConsecutiveLosses.value;
+                                      rules.push({ name: 'Folgeverluste', kind: 'danger', progress: ks.consecutiveLosses / lim, current: `${ks.consecutiveLosses}`, limit: `${lim}`, remaining: `${lim - ks.consecutiveLosses} weitere bis Stopp`, verb: 'Stop nach Verlust-Serie' });
+                                    }
+                                    if (cfg.sessionTakeProfit?.enabled && cfg.sessionTakeProfit.value > 0) {
+                                      const lim = cfg.sessionTakeProfit.value;
+                                      const gain = Math.max(0, ks.sessionPnlPct);
+                                      rules.push({ name: 'Session Take-Profit', kind: 'goal', progress: gain / lim, current: `+${(gain * 100).toFixed(1)}%`, limit: `+${(lim * 100).toFixed(0)}%`, remaining: `+${((lim - gain) * 100).toFixed(1)}% bis Ziel`, verb: 'Gewinnmitnahme bei Session-Ziel' });
+                                    }
+                                    if (cfg.maxTotalTrades?.enabled && cfg.maxTotalTrades.value > 0) {
+                                      const lim = cfg.maxTotalTrades.value;
+                                      rules.push({ name: 'Trade-Limit', kind: 'danger', progress: ks.totalTrades / lim, current: `${ks.totalTrades}`, limit: `${lim}`, remaining: `${lim - ks.totalTrades} Trades bis Stopp`, verb: 'Lebenszeit-Trade-Kappe' });
+                                    }
+
+                                    if (rules.length === 0) {
+                                      return (
+                                        <div className="rounded-lg bg-muted/30 border border-border/50 p-2.5 mt-3">
+                                          <div className="flex items-center gap-1.5 mb-1">
+                                            <ArrowDown className="h-3 w-3 text-muted-foreground" />
+                                            <span className="text-[9px] font-bold uppercase text-muted-foreground">Exit Strategie</span>
+                                          </div>
+                                          <div className="text-sm font-bold text-muted-foreground">Keine Regeln konfiguriert</div>
+                                        </div>
+                                      );
+                                    }
+
+                                    const active = rules.reduce((a, b) => (b.progress > a.progress ? b : a), rules[0]);
+                                    const pct = Math.max(0, Math.min(1, active.progress));
+                                    const isGoal = active.kind === 'goal';
+                                    const barColor = isGoal ? 'from-emerald-500 to-teal-400' : pct >= 0.8 ? 'from-red-600 to-orange-400' : pct >= 0.5 ? 'from-amber-500 to-yellow-400' : 'from-sky-500 to-cyan-400';
+                                    const valueColor = isGoal ? 'text-emerald-400' : pct >= 0.8 ? 'text-red-400' : 'text-foreground';
+
+                                    return (
+                                      <div className="rounded-lg bg-muted/30 border border-border p-2.5 mt-3">
+                                        <div className="flex items-center gap-1.5 mb-1">
+                                          <ArrowDown className={`h-3 w-3 ${isGoal ? 'text-emerald-400' : 'text-primary'}`} />
+                                          <span className="text-[9px] font-bold uppercase text-muted-foreground">Exit Strategie</span>
+                                        </div>
+                                        <div className="flex items-baseline justify-between gap-2">
+                                          <div className="min-w-0">
+                                            <div className={`text-base font-black ${valueColor} truncate`}>{active.name}</div>
+                                            <p className="text-[10px] text-muted-foreground/70 truncate">{active.verb}</p>
+                                          </div>
+                                          <div className="text-right shrink-0">
+                                            <div className={`text-base font-black font-mono ${valueColor}`}>{active.current}</div>
+                                            <div className="text-[9px] text-muted-foreground font-mono">/ {active.limit}</div>
+                                          </div>
+                                        </div>
+
+                                        {/* Dünne animierte Status-Bar */}
+                                        <div className="mt-2">
+                                          <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                                            <div
+                                              className={`h-full rounded-full bg-gradient-to-r ${barColor} relative transition-[width] duration-700 ease-out`}
+                                              style={{ width: `${pct * 100}%` }}
+                                            >
+                                              <span className="absolute inset-0 bg-white/20 animate-pulse rounded-full" />
+                                            </div>
+                                          </div>
+                                          <div className="flex items-center justify-between mt-1">
+                                            <span className="text-[9px] text-muted-foreground font-medium">{active.remaining}</span>
+                                            <span className={`text-[9px] font-mono font-bold ${valueColor}`}>{Math.round(pct * 100)}%</span>
+                                          </div>
+                                        </div>
                                       </div>
                                     );
                                   })()}
@@ -2879,10 +3301,10 @@ export default function App() {
                                           Floor: {selectedBot.settings?.floorWindow ?? 20}
                                         </span>
                                         <span className="inline-flex items-center bg-muted text-muted-foreground border border-border px-1.5 py-0.5 rounded text-tiny font-mono">
-                                          Spike: {(selectedBot.settings?.spikeThreshold ?? 0.3) * 100}%
+                                          Spike: {selectedBot.settings?.spikeThreshold ?? 3}%
                                         </span>
                                         <span className="inline-flex items-center bg-muted text-muted-foreground border border-border px-1.5 py-0.5 rounded text-tiny font-mono">
-                                          Drop: {(selectedBot.settings?.sellDropThreshold ?? 0.15) * 100}%
+                                          Drop: {selectedBot.settings?.sellDropThreshold ?? 5}%
                                         </span>
                                         <span className="inline-flex items-center bg-muted text-muted-foreground border border-border px-1.5 py-0.5 rounded text-tiny font-mono">
                                           CD: {selectedBot.settings?.cooldownTicks ?? 5}
@@ -2934,96 +3356,9 @@ export default function App() {
                             <div className="flex h-[950px] gap-2">
                               {/* Left Panel (60%) — Scanner + Performance Cards */}
                               <div className="w-[60%] border-r border-border/30 p-2.5 flex flex-col gap-4 overflow-auto custom-scrollbar h-full">
-                                <LiveClusterPricePanel selectedBot={selectedBot} setBots={setBots} />
+                                <LiveClusterPricePanel selectedBot={selectedBot} selectedTokenInfo={selectedTokenInfo} indicatorValues={botIndicators[selectedBot?.id]?.latestValues} />
 
-                                <div className="grid grid-cols-2 gap-3 mt-auto">
-                                  {/* Performance */}
-                                  <div className="bg-primary/5 border-0 p-2.5 rounded-lg flex flex-col gap-1.5 shadow-md justify-between">
-                                    <div className="text-xs font-bold text-foreground tracking-wider uppercase mb-1.5 flex justify-between items-center">
-                                      Performance <Zap className="h-2.5 w-2.5" />
-                                    </div>
-                                    {/* SIGNAL Badge */}
-                                    {(() => {
-                                      const lastTrade = selectedBot.recentTrades?.slice(-1)[0];
-                                      const inPosition = lastTrade?.action === "BUY" && !lastTrade?.exitPrice;
-                                      const signal = selectedBot?.status !== "running" ? "HOLD" : inPosition ? "SELL" : "BUY";
-                                      const signalStyle = signal === "BUY"
-                                        ? "text-green-400 bg-green-500/15 border-green-500/30"
-                                        : signal === "SELL"
-                                          ? "text-orange-400 bg-orange-500/15 border-orange-500/30"
-                                          : "text-zinc-400 bg-zinc-500/15 border-zinc-500/30";
-                                      return (
-                                        <div className="flex items-center gap-1.5">
-                                          <span className="text-tiny text-zinc-500 font-bold uppercase tracking-wider">Signal</span>
-                                          <span className={`text-tiny font-black uppercase tracking-wider px-1.5 py-0.5 rounded border ${signalStyle}`}>{signal}</span>
-                                        </div>
-                                      );
-                                    })()}
-                                    <div className={`text-2xl font-black font-mono leading-none ${selectedBot.stats?.totalPnlPercent >= 0 ? "text-green-400" : "text-red-400"}`}>
-                                      {selectedBot.stats?.totalPnlPercent >= 0 ? "+" : ""}{selectedBot.stats?.totalPnlPercent?.toFixed(2) || 0}%
-                                    </div>
-                                    <div className="pt-1.5 border-t border-primary/10">
-                                      <div className="grid grid-cols-2 gap-2">
-                                        <div className="flex flex-col gap-0.5">
-                                          <span className="text-tiny font-bold uppercase text-muted-foreground">Win Rate</span>
-                                          <span className="text-label font-bold text-primary">
-                                            {selectedBot.stats?.totalTrades > 0 ? ((selectedBot.stats.wins / selectedBot.stats.totalTrades) * 100).toFixed(0) : 0}%
-                                          </span>
-                                        </div>
-                                        <div className="flex flex-col gap-0.5">
-                                          <span className="text-tiny font-bold uppercase text-muted-foreground">Trades</span>
-                                          <span className="text-label font-bold text-foreground">{selectedBot.stats?.totalTrades || 0}</span>
-                                        </div>
-                                        {selectedBot.recentTrades && selectedBot.recentTrades.length > 0 && (() => {
-                                          const lastClosed = [...selectedBot.recentTrades].reverse().find((t) => t.pnl !== undefined);
-                                          return lastClosed && lastClosed.pnl !== undefined ? (
-                                            <div className="flex flex-col gap-0.5">
-                                              <span className="text-tiny font-bold uppercase text-muted-foreground">Last PnL</span>
-                                              <span className={`text-label font-bold font-mono ${lastClosed.pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
-                                                {lastClosed.pnl >= 0 ? "+" : ""}{lastClosed.pnl.toFixed(4)}
-                                              </span>
-                                            </div>
-                                          ) : null;
-                                        })()}
-                                      </div>
-                                    </div>
-                                    {selectedTokenInfo && (() => {
-                                      const fmtUsd = (v: number) =>
-                                        v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(1)}M`
-                                          : v >= 1_000 ? `$${(v / 1_000).toFixed(0)}K`
-                                            : `$${v.toFixed(0)}`;
-                                      return (
-                                        <div className="pt-1.5 border-t border-primary/10">
-                                          <div className="grid grid-cols-2 gap-2">
-                                            <div className="flex flex-col gap-0.5">
-                                              <span className="text-tiny font-bold uppercase text-muted-foreground">Token</span>
-                                              <span className="text-label font-bold text-foreground font-mono">{selectedTokenInfo.symbol}</span>
-                                            </div>
-                                            {selectedTokenInfo.priceChange24h !== undefined && (
-                                              <div className="flex flex-col gap-0.5">
-                                                <span className="text-tiny font-bold uppercase text-muted-foreground">24h Δ</span>
-                                                <span className={`text-label font-bold font-mono ${(selectedTokenInfo.priceChange24h ?? 0) >= 0 ? "text-green-400" : "text-red-400"}`}>
-                                                  {(selectedTokenInfo.priceChange24h ?? 0) >= 0 ? "+" : ""}{selectedTokenInfo.priceChange24h?.toFixed(2)}%
-                                                </span>
-                                              </div>
-                                            )}
-                                            {selectedTokenInfo.volume24h !== undefined && (
-                                              <div className="flex flex-col gap-0.5">
-                                                <span className="text-tiny font-bold uppercase text-muted-foreground">Vol 24h</span>
-                                                <span className="text-label font-bold text-foreground/80">{fmtUsd(selectedTokenInfo.volume24h)}</span>
-                                              </div>
-                                            )}
-                                            {selectedTokenInfo.liquidity !== undefined && (
-                                              <div className="flex flex-col gap-0.5">
-                                                <span className="text-tiny font-bold uppercase text-muted-foreground">Liq.</span>
-                                                <span className="text-label font-bold text-foreground/80">{fmtUsd(selectedTokenInfo.liquidity)}</span>
-                                              </div>
-                                            )}
-                                          </div>
-                                        </div>
-                                      );
-                                    })()}
-                                  </div>
+                                <div className="grid grid-cols-2 gap-3">
 
                                   {/* Strategy Config */}
                                   <div className={`bg-muted/30 border-0 p-2.5 rounded-lg flex flex-col gap-1.5 shadow-md justify-between ai-flash-target-${selectedBot?.id}`}>
@@ -3111,21 +3446,18 @@ export default function App() {
                                     {(() => {
                                       const sType = selectedBot.strategyType ?? 'scalping';
                                       const indVals = botIndicators[selectedBot?.id]?.latestValues ?? {};
-                                      const fmt = (v: number | undefined) => v == null || isNaN(v as any) ? <span className="text-zinc-600 text-tiny">WARM</span> : <span className="text-primary font-mono text-label">{v.toFixed(6)}</span>;
-                                      const _pct = (v: number | undefined) => v == null || isNaN(v as any) ? <span className="text-zinc-600 text-tiny">WARM</span> : <span className="text-primary font-mono text-label">{(v * 100).toFixed(2)}%</span>; void _pct;
+                                      const fmt = (v: number | undefined) => v == null || Number.isNaN(v) ? <span className="text-zinc-600 text-tiny">WARM</span> : <span className="text-primary font-mono text-label">{v.toFixed(6)}</span>;
+                                      const _pct = (v: number | undefined) => v == null || Number.isNaN(v) ? <span className="text-zinc-600 text-tiny">WARM</span> : <span className="text-primary font-mono text-label">{(v * 100).toFixed(2)}%</span>; void _pct;
                                       const condBadge = (ok: boolean | undefined) => ok === undefined ? null : ok
                                         ? <span className="text-tiny text-emerald-400 font-bold">✓</span>
                                         : <span className="text-tiny text-zinc-600 font-bold">✗</span>;
 
-                                      if (sType === 'scalping' || !selectedBot.strategyType) {
+                                      if (sType === 'scalping' || sType === 'scalping-adaptive' || !selectedBot.strategyType) {
                                         // Fallback to top-level settings for scalping if config not fully populated
                                         const cfg = selectedBot.strategyConfig;
-                                        const floor = cfg?.indicators?.find((i: any) => i.type === 'FLOOR')?.window ?? selectedBot.settings?.floorWindow;
-                                        // @ts-ignore
-                                        const spike = cfg?.entry_conditions?.find((e: any) => e.type === 'spike')?.threshold ?? selectedBot.settings?.spikeThreshold;
-                                        // @ts-ignore
-                                        const drop = cfg?.exit_conditions?.find((e: any) => e.type === 'drop')?.threshold ?? selectedBot.settings?.sellDropThreshold;
-                                        // @ts-ignore
+                                        const floor = cfg?.indicators?.find((i) => i.type === 'FLOOR')?.window ?? selectedBot.settings?.floorWindow;
+                                        const spike = cfg?.entry_conditions?.find((e) => e.type === 'spike')?.threshold ?? selectedBot.settings?.spikeThreshold;
+                                        const drop = cfg?.exit_conditions?.find((e) => e.type === 'drop')?.threshold ?? selectedBot.settings?.sellDropThreshold;
                                         const cooldown = cfg?.execution?.cooldown_ticks ?? selectedBot.settings?.cooldownTicks;
 
                                         return (
@@ -3223,11 +3555,11 @@ export default function App() {
 
                                       if (sType === 'mean_reversion') {
                                         const cfg = selectedBot.strategyConfig;
-                                        const rsi = cfg?.indicators?.find((i: any) => i.type === 'RSI')?.period ?? 14;
-                                        const bb = cfg?.indicators?.find((i: any) => i.type === 'BB')?.period ?? 20;
-                                        const std = cfg?.indicators?.find((i: any) => i.type === 'BB')?.std_dev ?? 2;
-                                        const oversold = cfg?.entry_conditions?.find((e: any) => e.left === 'RSI_14')?.right ?? 32;
-                                        const tp = cfg?.exit_conditions?.find((e: any) => e.type === 'take_profit')?.value ?? 0.035;
+                                        const rsi = cfg?.indicators?.find((i) => i.type === 'RSI')?.period ?? 14;
+                                        const bb = cfg?.indicators?.find((i) => i.type === 'BB')?.period ?? 20;
+                                        const std = cfg?.indicators?.find((i) => i.type === 'BB')?.std_dev ?? 2;
+                                        const oversold = cfg?.entry_conditions?.find((e) => e.left === 'RSI_14')?.right ?? 32;
+                                        const tp = cfg?.exit_conditions?.find((e) => e.type === 'take_profit')?.value ?? 0.035;
 
                                         return (
                                           <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 mt-1">
@@ -3260,10 +3592,10 @@ export default function App() {
 
                                       if (sType === 'breakout') {
                                         const cfg = selectedBot.strategyConfig;
-                                        const bb = cfg?.indicators?.find((i: any) => i.type === 'BB')?.period ?? 20;
-                                        const rsiMin = cfg?.entry_conditions?.find((e: any) => e.left === 'RSI_14')?.right ?? 50;
-                                        const atr = cfg?.indicators?.find((i: any) => i.type === 'ATR')?.period ?? 14;
-                                        const tp = cfg?.exit_conditions?.find((e: any) => e.type === 'take_profit')?.value ?? 0.05;
+                                        const bb = cfg?.indicators?.find((i) => i.type === 'BB')?.period ?? 20;
+                                        const rsiMin = cfg?.entry_conditions?.find((e) => e.left === 'RSI_14')?.right ?? 50;
+                                        const atr = cfg?.indicators?.find((i) => i.type === 'ATR')?.period ?? 14;
+                                        const tp = cfg?.exit_conditions?.find((e) => e.type === 'take_profit')?.value ?? 0.05;
 
                                         return (
                                           <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 mt-1">
@@ -3296,9 +3628,9 @@ export default function App() {
 
                                       if (sType === 'momentum') {
                                         const cfg = selectedBot.strategyConfig;
-                                        const macd = `${cfg?.indicators?.find((i: any) => i.type === 'MACD')?.fast_period ?? 12}/${cfg?.indicators?.find((i: any) => i.type === 'MACD')?.slow_period ?? 26}`;
-                                        const rsiMax = cfg?.entry_conditions?.find((e: any) => e.left === 'RSI_14')?.right ?? 70;
-                                        const tp = cfg?.exit_conditions?.find((e: any) => e.type === 'take_profit')?.value ?? 0.045;
+                                        const macd = `${cfg?.indicators?.find((i) => i.type === 'MACD')?.fast_period ?? 12}/${cfg?.indicators?.find((i) => i.type === 'MACD')?.slow_period ?? 26}`;
+                                        const rsiMax = cfg?.entry_conditions?.find((e) => e.left === 'RSI_14')?.right ?? 70;
+                                        const tp = cfg?.exit_conditions?.find((e) => e.type === 'take_profit')?.value ?? 0.045;
 
                                         return (
                                           <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 mt-1">
@@ -3320,6 +3652,46 @@ export default function App() {
                                                 {condBadge(!isNaN(indVals['MACD_histogram']) ? indVals['MACD_histogram'] > 0 : undefined)}
                                                 <span className="text-tiny text-zinc-400">Bullish?</span>
                                               </div>
+                                            </div>
+                                          </div>
+                                        );
+                                      }
+
+                                      if (sType === 'paet') {
+                                        const cfg = selectedBot.strategyConfig;
+                                        const ps = cfg?.paet_settings ?? {};
+                                        const vel = indVals['paet_velocity'];
+                                        const acc = indVals['paet_acceleration'];
+                                        const sigma = indVals['paet_sigma'];
+                                        const omega = indVals['paet_omega'];
+                                        const period = indVals['paet_period'];
+                                        const velColor = !isNaN(vel) ? (vel < 0 ? 'text-red-400' : 'text-emerald-400') : 'text-zinc-500';
+                                        const accColor = !isNaN(acc) ? (acc < 0 ? 'text-orange-400' : 'text-zinc-400') : 'text-zinc-500';
+                                        return (
+                                          <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 mt-1">
+                                            <div className="flex flex-col">
+                                              <span className="text-tiny font-bold uppercase text-muted-foreground">Velocity</span>
+                                              <span className={`text-label font-bold font-mono ${velColor}`}>{!isNaN(vel) ? vel.toFixed(6) : '–'}</span>
+                                            </div>
+                                            <div className="flex flex-col">
+                                              <span className="text-tiny font-bold uppercase text-muted-foreground">Acceleration</span>
+                                              <span className={`text-label font-bold font-mono ${accColor}`}>{!isNaN(acc) ? acc.toFixed(6) : '–'}</span>
+                                            </div>
+                                            <div className="flex flex-col">
+                                              <span className="text-tiny font-bold uppercase text-muted-foreground">Residual σ</span>
+                                              <span className="text-label font-bold text-primary">{!isNaN(sigma) && sigma > 0 ? sigma.toFixed(6) : '–'}</span>
+                                            </div>
+                                            <div className="flex flex-col">
+                                              <span className="text-tiny font-bold uppercase text-muted-foreground">ω (FA-Penalty)</span>
+                                              <span className="text-label font-bold text-amber-400">{!isNaN(omega) ? omega.toFixed(2) : ((ps.false_alarm_penalty_omega ?? 1.50)).toFixed(2)}</span>
+                                            </div>
+                                            <div className="flex flex-col">
+                                              <span className="text-tiny font-bold uppercase text-muted-foreground">Cycle Period</span>
+                                              <span className="text-label font-bold text-primary">{!isNaN(period) && period > 0 ? `${Math.round(period)} c` : '–'}</span>
+                                            </div>
+                                            <div className="flex flex-col">
+                                              <span className="text-tiny font-bold uppercase text-muted-foreground">Collapse at</span>
+                                              <span className="text-label font-bold text-red-400">−{((ps.collapse_threshold_pct ?? 0.25) * 100).toFixed(0)}%</span>
                                             </div>
                                           </div>
                                         );
@@ -3354,13 +3726,13 @@ export default function App() {
 
                                       if (sType === 'dca') {
                                         const cfg = selectedBot.strategyConfig;
-                                        const rsi = cfg?.indicators?.find((i: any) => i.type === 'RSI')?.period ?? 14;
-                                        const ema = cfg?.indicators?.find((i: any) => i.type === 'EMA')?.period ?? 100;
+                                        const rsi = cfg?.indicators?.find((i) => i.type === 'RSI')?.period ?? 14;
+                                        const ema = cfg?.indicators?.find((i) => i.type === 'EMA')?.period ?? 100;
                                         const posSize = cfg?.risk_management?.position_size ?? 0.05;
                                         const maxPos = cfg?.risk_management?.max_positions ?? 5;
-                                        const tp = cfg?.exit_conditions?.find((e: any) => e.type === 'take_profit')?.value ?? 0.06;
-                                        const sl = cfg?.exit_conditions?.find((e: any) => e.type === 'stop_loss')?.value ?? 0.05;
-                                        const rsiEntry = cfg?.entry_conditions?.find((e: any) => e.left === 'RSI_14');
+                                        const tp = cfg?.exit_conditions?.find((e) => e.type === 'take_profit')?.value ?? 0.06;
+                                        const sl = cfg?.exit_conditions?.find((e) => e.type === 'stop_loss')?.value ?? 0.05;
+                                        const rsiEntry = cfg?.entry_conditions?.find((e) => e.left === 'RSI_14');
                                         const rsiThreshold = rsiEntry ? rsiEntry.right : 40;
                                         return (
                                           <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 mt-1">
@@ -3529,14 +3901,29 @@ export default function App() {
                                       </button>
                                     </div>
                                     {(() => {
-                                      const latest = agentAdvice.find((a) => a.botId === selectedBot?.id);
-                                      if (latest?.advice) {
-                                        const { regime, confidence, reason, analysis } = latest.advice;
+                                      const latestSse = agentAdvice.find((a) => a.botId === selectedBot?.id);
+                                      const latestHist = agentHistory.find((h) => h.botId === selectedBot?.id && h.regime !== 'ERROR' && h.regime !== 'SKIPPED');
+                                      const isAppliedValue = (v: boolean | number | undefined) => v === true || v === 1;
+                                      const latestAdviceData = latestSse?.advice
+                                        ? { ...latestSse.advice, applied: latestSse.applied }
+                                        : (latestHist ? {
+                                            regime: latestHist.regime,
+                                            confidence: latestHist.confidence,
+                                            reason: latestHist.reason,
+                                            analysis: latestHist.analysis,
+                                            applied: isAppliedValue(latestHist.applied),
+                                          } : null);
+                                      if (latestAdviceData) {
+                                        const { regime, confidence, reason, analysis, applied } = latestAdviceData;
+                                        const isApplied = isAppliedValue(applied);
                                         const regimeColor = regime === "RANGING" ? "bg-blue-500/25 text-blue-300 border-blue-500/40" : regime === "TRENDING" ? "bg-emerald-500/25 text-emerald-300 border-emerald-500/40" : regime === "VOLATILE" ? "bg-amber-500/25 text-amber-300 border-amber-500/40" : "bg-red-500/25 text-red-300 border-red-500/40";
                                         return (
                                           <>
                                             <div className="flex items-center gap-2">
                                               <span className={`text-xs-custom font-black uppercase tracking-wider px-2 py-1 rounded border shrink-0 ${regimeColor}`}>{regime}</span>
+                                              <span className={`text-3xs font-black uppercase tracking-wider px-1.5 py-0.5 rounded border shrink-0 ${isApplied ? 'bg-purple-500/20 text-purple-300 border-purple-500/40' : 'bg-zinc-700/50 text-zinc-400 border-zinc-600'}`}>
+                                                {isApplied ? 'AI Applied' : 'Analyzed'}
+                                              </span>
                                               <div className="flex-1 flex items-center gap-2">
                                                 <div className="flex-1 h-[4px] bg-muted/60 rounded-full overflow-hidden">
                                                   <div className="h-full bg-gradient-to-r from-cyan-500 to-cyan-300 rounded-full transition-all duration-500" style={{ width: `${((confidence ?? 0) * 100).toFixed(0)}%` }} />
@@ -3583,6 +3970,130 @@ export default function App() {
                                       }
                                       return <p className="text-sm-custom leading-relaxed italic text-cyan-200/50">Quantum analysis in progress (21 min duty cycle)…</p>;
                                     })()}
+                                  </div>
+
+                                  {/* Quick Trade Bar — Mode + Size + BUY / SELL */}
+                                  <div className="bg-primary/5 border-0 p-2.5 rounded-lg flex flex-col gap-2 shadow-md">
+                                    <div className="text-xs font-bold text-foreground uppercase tracking-wider">Quick Trade</div>
+
+                                    {/* Trading Mode Toggle */}
+                                    {(() => {
+                                      const setTradingMode = (mode: 'fixed' | 'aggressive') => {
+                                        if (!selectedBot?.id) return;
+                                        fetch(`${getApiBase()}/api/bots/${selectedBot.id}/config`, {
+                                          method: 'POST',
+                                          headers: { 'Content-Type': 'application/json' },
+                                          body: JSON.stringify({ tradeSize: selectedBot.tradeSize, aggressiveness: selectedBot.aggressiveness, tradingMode: mode }),
+                                        }).then(() => {
+                                          setBots(prev => prev.map(b => b.id === selectedBot.id ? { ...b, tradingMode: mode } : b));
+                                        });
+                                      };
+                                      return (
+                                        <div className="grid grid-cols-2 gap-1.5">
+                                          {([['fixed', 'Fixed SOL'], ['aggressive', 'Aggressive']] as const).map(([mode, label]) => (
+                                            <button
+                                              key={mode}
+                                              type="button"
+                                              onClick={() => setTradingMode(mode)}
+                                              className={`py-1 rounded text-[10px] font-bold border transition-colors ${selectedBot?.tradingMode === mode ? 'bg-primary/20 border-primary/40 text-primary' : 'bg-muted border-border text-muted-foreground'}`}
+                                            >
+                                              {label}
+                                            </button>
+                                          ))}
+                                        </div>
+                                      );
+                                    })()}
+
+                                    {/* Size / Aggressiveness Slider */}
+                                    {selectedBot?.tradingMode === 'fixed' ? (
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-[10px] font-bold uppercase text-muted-foreground shrink-0">SOL</span>
+                                        <input
+                                          type="range" min={0.01} max={10} step={0.01}
+                                          value={selectedBot.tradeSize ?? 1}
+                                          onChange={async (e) => {
+                                            const newSize = parseFloat(e.target.value);
+                                            if (selectedBot?.id) {
+                                              await fetch(`${getApiBase()}/api/bots/${selectedBot.id}/config`, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({
+                                                  tradeSize: newSize,
+                                                  aggressiveness: selectedBot.aggressiveness,
+                                                  tradingMode: 'fixed',
+                                                }),
+                                              });
+                                              setBots(prev => prev.map(b => b.id === selectedBot.id ? { ...b, tradeSize: newSize } : b));
+                                            }
+                                          }}
+                                          className="flex-1 accent-primary"
+                                        />
+                                        <span className="text-[10px] font-mono font-bold text-primary w-12 text-right">{selectedBot.tradeSize?.toFixed(2)}</span>
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-[10px] font-bold uppercase text-muted-foreground shrink-0">Aggro</span>
+                                        <input
+                                          type="range" min={1} max={100}
+                                          value={selectedBot.aggressiveness ?? 10}
+                                          onChange={async (e) => {
+                                            const newAggro = parseInt(e.target.value);
+                                            if (selectedBot?.id) {
+                                              await fetch(`${getApiBase()}/api/bots/${selectedBot.id}/config`, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({
+                                                  tradeSize: selectedBot.tradeSize,
+                                                  aggressiveness: newAggro,
+                                                  tradingMode: 'aggressive',
+                                                }),
+                                              });
+                                              setBots(prev => prev.map(b => b.id === selectedBot.id ? { ...b, aggressiveness: newAggro } : b));
+                                            }
+                                          }}
+                                          className="flex-1 accent-primary"
+                                        />
+                                        <span className="text-[10px] font-mono font-bold text-primary w-12 text-right">{selectedBot.aggressiveness}%</span>
+                                      </div>
+                                    )}
+
+                                    {/* BUY / SELL Buttons */}
+                                    <div className="grid grid-cols-2 gap-2">
+                                      <button
+                                        className="flex items-center justify-center gap-1.5 bg-green-500/20 hover:bg-green-500/30 border border-green-500/40 text-green-400 rounded-md py-1.5 px-3 text-xs font-bold uppercase tracking-wide transition-all active:scale-95 disabled:opacity-50"
+                                        disabled={!selectedBot?.stats?.lastPrice}
+                                        onClick={async () => {
+                                          if (!selectedBot?.id || !selectedBot?.stats?.lastPrice) return;
+                                          try {
+                                            await fetch(`${getApiBase()}/api/bots/${selectedBot.id}/trade`, {
+                                              method: 'POST',
+                                              headers: { 'Content-Type': 'application/json' },
+                                              body: JSON.stringify({ action: 'BUY', price: selectedBot.stats.lastPrice }),
+                                            });
+                                          } catch (err) { console.error(err); }
+                                        }}
+                                      >
+                                        <TrendingUp className="h-3.5 w-3.5" />
+                                        Buy
+                                      </button>
+                                      <button
+                                        className="flex items-center justify-center gap-1.5 bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-400 rounded-md py-1.5 px-3 text-xs font-bold uppercase tracking-wide transition-all active:scale-95 disabled:opacity-50"
+                                        disabled={!selectedBot?.stats?.lastPrice}
+                                        onClick={async () => {
+                                          if (!selectedBot?.id || !selectedBot?.stats?.lastPrice) return;
+                                          try {
+                                            await fetch(`${getApiBase()}/api/bots/${selectedBot.id}/trade`, {
+                                              method: 'POST',
+                                              headers: { 'Content-Type': 'application/json' },
+                                              body: JSON.stringify({ action: 'SELL', price: selectedBot.stats.lastPrice }),
+                                            });
+                                          } catch (err) { console.error(err); }
+                                        }}
+                                      >
+                                        <TrendingDown className="h-3.5 w-3.5" />
+                                        Sell
+                                      </button>
+                                    </div>
                                   </div>
 
                                   {/* Engine Status */}
@@ -3652,7 +4163,9 @@ export default function App() {
                                         </div>
                                         {(selectedBot.warmupProgress ?? 0) < 1 && (
                                           <span className="text-2xs text-zinc-600 mt-1 uppercase tracking-tighter italic">
-                                            Waiting for indicator data stability...
+                                            {selectedBot.strategyType === 'scalping-adaptive'
+                                              ? 'Progressive adaptive warmup — spike threshold easing in...'
+                                              : 'Waiting for indicator data stability...'}
                                           </span>
                                         )}
                                       </div>
@@ -3693,7 +4206,7 @@ export default function App() {
                         <div className="grid grid-cols-2 gap-3">
 
                           {/* Trade History Card */}
-                          <Card className={`relative overflow-hidden border border-primary/40 bg-transparent shadow-none transition-all duration-300 rounded-2xl trade-flash-target-${selectedBot?.id} ai-flash-target-${selectedBot?.id}`}>
+                          <Card className={`relative overflow-hidden border border-primary/40 bg-card/40 backdrop-blur-md shadow-none transition-all duration-300 rounded-2xl trade-flash-target-${selectedBot?.id} ai-flash-target-${selectedBot?.id}`}>
                             {/* Particle overlay on flash */}
                             {(tradeFlash[selectedBot?.id] || aiFlash[selectedBot?.id]) && (
                               <div className="pointer-events-none absolute inset-0 z-20 overflow-hidden rounded-xl">
@@ -3748,57 +4261,54 @@ export default function App() {
                           </Card>
 
                           {/* Chart Card */}
-                          <Card className={`relative overflow-hidden border border-primary/40 bg-transparent shadow-none transition-all duration-300 rounded-2xl trade-flash-target-${selectedBot?.id} ai-flash-target-${selectedBot?.id}`}>
+                          <Card className={`relative overflow-hidden border border-primary/40 bg-card/40 backdrop-blur-md shadow-none transition-all duration-300 rounded-2xl trade-flash-target-${selectedBot?.id} ai-flash-target-${selectedBot?.id}`}>
                             <div className="flex items-center gap-2 px-4 pt-3 pb-2 border-b border-border/30">
-                              <Activity className="h-3.5 w-3.5 text-primary" />
-                              <span className="text-xs font-semibold tracking-wide text-zinc-300">Price Chart</span>
-                              <span className="ml-auto text-xs-custom font-mono text-zinc-500">{selectedPriceHistory.length} ticks</span>
+                              <LineChartIcon className="h-3.5 w-3.5 text-primary" />
+                              <span className="text-xs font-semibold tracking-wide text-zinc-300">Charts</span>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setChartTab("equity")}
+                                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-2xs font-bold uppercase tracking-wider transition-colors ${
+                                    chartTab === "equity"
+                                      ? "bg-primary/20 text-primary border border-primary/40"
+                                      : "text-muted-foreground hover:text-foreground hover:bg-muted border border-transparent"
+                                  }`}
+                                >
+                                  <TrendingUp className="h-3 w-3" /> Equity
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setChartTab("price")}
+                                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-2xs font-bold uppercase tracking-wider transition-colors ${
+                                    chartTab === "price"
+                                      ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
+                                      : "text-muted-foreground hover:text-foreground hover:bg-muted border border-transparent"
+                                  }`}
+                                >
+                                  <Activity className="h-3 w-3" /> Price
+                                </button>
+                              </div>
+                              <span className="ml-auto text-xs-custom font-mono text-zinc-500">
+                                {chartTab === "equity"
+                                  ? `${(selectedBot.recentTrades ?? []).filter((t) => t.action === "SELL" && typeof t.pnlPercent === "number").length} Trades`
+                                  : `${selectedPriceHistory.length} Ticks`}
+                              </span>
                             </div>
                             <div className="h-[280px] p-1">
-                              {selectedPriceHistory.length > 0 ? (
-                                <ResponsiveContainer width="100%" height="100%">
-                                  <AreaChart data={selectedPriceHistory.map((price, i) => ({ index: i, price }))}>
-                                    <defs>
-                                      <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.3} />
-                                        <stop offset="95%" stopColor="#06b6d4" stopOpacity={0} />
-                                      </linearGradient>
-                                    </defs>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-                                    <XAxis
-                                      dataKey="index"
-                                      stroke="#52525b"
-                                      tick={{ fontSize: 9, fill: "#71717a" }}
-                                      tickFormatter={(val) => val % 10 === 0 ? val : ''}
-                                    />
-                                    <YAxis
-                                      stroke="#52525b"
-                                      tick={{ fontSize: 9, fill: "#71717a" }}
-                                      domain={['auto', 'auto']}
-                                      tickFormatter={(val) => `$${val.toFixed(5)}`}
-                                      width={72}
-                                    />
-                                    <Tooltip
-                                      contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: '8px', fontSize: '11px' }}
-                                      labelStyle={{ color: '#71717a' }}
-                                      formatter={(value) => [`$${Number(value).toFixed(8)}`, 'Price']}
-                                      labelFormatter={(label) => `Tick #${label}`}
-                                    />
-                                    <Area
-                                      type="monotone"
-                                      dataKey="price"
-                                      stroke="#06b6d4"
-                                      strokeWidth={1.5}
-                                      fillOpacity={1}
-                                      fill="url(#colorPrice)"
-                                    />
-                                  </AreaChart>
-                                </ResponsiveContainer>
+                              {chartTab === "equity" ? (
+                                <EquityCurveChart
+                                  trades={(selectedBot.recentTrades ?? []).map((t) => ({
+                                    botId: selectedBot.id,
+                                    timestamp: t.timestamp,
+                                    action: t.action,
+                                    price: t.price,
+                                    pnlPercent: t.pnlPercent ?? null,
+                                  }))}
+                                  height={272}
+                                />
                               ) : (
-                                <div className="h-full flex flex-col items-center justify-center gap-3 opacity-30">
-                                  <Activity className="h-10 w-10 text-primary animate-pulse" />
-                                  <p className="text-muted-foreground font-mono text-xs">Awaiting price data…</p>
-                                </div>
+                                <PriceChart prices={selectedPriceHistory} height={272} />
                               )}
                             </div>
                           </Card>
@@ -4022,7 +4532,7 @@ export default function App() {
                   <div className="space-y-4">
                     {/* Filter chips */}
                     <div className="flex flex-wrap gap-2">
-                      {["all", "scalping", "trend", "mean_reversion", "breakout", "momentum", "dca", "grid"].map(f => (
+                      {["all", "scalping", "scalping-adaptive", "trend", "mean_reversion", "breakout", "momentum", "dca", "grid", "ml", "paet"].map(f => (
                         <button key={f} onClick={() => setStrategyFilter(f)}
                           className={`px-3 py-1 rounded-full text-sm-custom font-semibold border transition-colors ${strategyFilter === f ? "bg-primary/20 border-primary text-primary" : "border-zinc-700 text-zinc-400 hover:border-zinc-500"}`}>
                           {f === "all" ? "Alle" : f}
@@ -4204,10 +4714,45 @@ export default function App() {
               </div>
 
             ) : activeTab === "agent" ? (
-              // STRATEGY ASSISTANT (KI AGENT) VIEW
+              // STRATEGY ASSISTANT (3 SUBTABS: Advisor · Assistant · Self-Correction)
               <div className="space-y-6 max-w-7xl mx-auto">
-                {/* Einheitlicher Header */}
-                <div className="flex items-center gap-3 mb-6">
+                {/* Subtab bar: Smart Advisor | Assistant | Self-Correction */}
+                <div className="inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground">
+                  {([
+                    { key: "advisor",       label: "Smart Advisor",    Icon: Wand2       },
+                    { key: "assistant",     label: "Assistant",        Icon: BrainCircuit },
+                    { key: "selfcorrection", label: "Self-Correction",  Icon: Puzzle      },
+                  ] as const).map(({ key, label, Icon }) => (
+                    <button
+                      key={key}
+                      className={`inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-all ${
+                        assistantSubTab === key ? "bg-background text-foreground shadow" : "hover:text-foreground"
+                      }`}
+                      onClick={() => setAssistantSubTab(key)}
+                    >
+                      <Icon className="mr-2 h-4 w-4" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Smart Advisor subtab */}
+                {assistantSubTab === "advisor" && (
+                  <AdvisorTab
+                    onCreateFromAdvisor={handleCreateFromAdvisor}
+                    suggestions={advisorSuggestions}
+                    history={advisorHistory}
+                    loading={advisorLoading}
+                    error={advisorError}
+                    fetchedAt={advisorFetchedAt}
+                    onRefresh={() => fetchAdvisorSuggestions(true)}
+                  />
+                )}
+
+                {/* Assistant subtab header */}
+                {assistantSubTab === "assistant" && (
+                <>
+                <div className="flex items-center gap-3">
                   <BrainCircuit className="h-8 w-8 text-primary" />
                   <div>
                     <h1 className="text-3xl font-bold tracking-tighter">Strategy Assistant</h1>
@@ -4281,7 +4826,7 @@ export default function App() {
                   <Button
                     variant="secondary"
                     className="bg-purple-600 hover:bg-purple-700 text-white"
-                    onClick={triggerAgentAnalysis}
+                    onClick={() => triggerAgentAnalysis()}
                   >
                     <Zap className="mr-2 h-4 w-4" /> Jetzt Analysieren
                   </Button>
@@ -4304,7 +4849,7 @@ export default function App() {
                         <select
                           className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                           value={agentConfig?.provider || 'ollama'}
-                          onChange={(e) => agentConfig && updateAgentConfig({ ...agentConfig, provider: e.target.value as any })}
+                          onChange={(e) => agentConfig && updateAgentConfig({ ...agentConfig, provider: e.target.value as 'ollama' | 'opencode' })}
                         >
                           <option value="ollama">Ollama (Lokal / API)</option>
                           <option value="opencode">Opencode (Lokal / CLI)</option>
@@ -4683,38 +5228,29 @@ export default function App() {
                     </div>
                   </CardContent>
                 </Card>
+                </>
+                )}
+
+                {/* Self-Correction subtab content (component renders its own header) */}
+                {assistantSubTab === "selfcorrection" && (
+                  <SelfCorrectionInsightsTab bots={bots} getApiBase={getApiBase} />
+                )}
               </div>
-            ) : activeTab === "selfcorrection" ? (
-              // ADR-011 SELF-CORRECTION INSIGHTS
-              <div className="space-y-6 max-w-7xl mx-auto">
-                <div className="flex items-center gap-3 mb-6">
-                  <Puzzle className="h-8 w-8 text-primary" />
-                  <div>
-                    <h1 className="text-3xl font-bold tracking-tighter">Self-Correction Insights</h1>
-                    <p className="text-muted-foreground mt-1">
-                      Time-window performance, drift detection and lessons-learned memory (ADR-011).
-                    </p>
-                  </div>
-                </div>
-                <SelfCorrectionInsightsTab bots={bots} getApiBase={getApiBase} />
-              </div>
-            ) : activeTab === "advisor" ? (
-              // SMART BOT ADVISOR
-              <AdvisorTab
-                getApiBase={getApiBase}
-                onCreateFromAdvisor={handleCreateFromAdvisor}
-                suggestions={advisorSuggestions}
-                history={advisorHistory}
-                loading={advisorLoading}
-                error={advisorError}
-                fetchedAt={advisorFetchedAt}
-                onRefresh={() => fetchAdvisorSuggestions(true)}
-              />
+            ) : activeTab === "wallet" ? (
+              // WALLET VIEW (ADR-015)
+              <WalletPage onNavigateToSettings={(sub) => { setSettingsInitialTab(sub); setActiveTab("settings"); }} />
             ) : activeTab === "docs" ? (
               // DOCS VIEW
               <Documentation />
             ) : activeTab === "settings" ? (
-              <GlobalSettings theme={theme} onThemeChange={setTheme} onSaved={(s) => setGlobalSettings((prev) => ({ ...prev, ...s }))} onAnimConfigChange={setAnimConfig} />
+              <GlobalSettings
+                theme={theme}
+                onThemeChange={setTheme}
+                onSaved={(s) => setGlobalSettings((prev) => ({ ...prev, ...s }))}
+                onAnimConfigChange={setAnimConfig}
+                initialTab={settingsInitialTab}
+                onNavigateToWalletTab={() => { setSettingsInitialTab(undefined); setActiveTab("wallet"); }}
+              />
             ) : null}
           </div>
         </main>
@@ -4824,7 +5360,7 @@ export default function App() {
           key={isOracleDialogOpen ? "open" : "closed"}
           open={isOracleDialogOpen}
           onOpenChange={setIsOracleDialogOpen}
-          bot={selectedBot}
+          bot={selectedBot ?? null}
           latestAdvice={agentAdvice.find((a) => a.botId === selectedBot?.id)?.advice ?? null}
           availableStrategies={[...strategyTemplates, ...savedStrategies]}
           isTriggering={isTriggering}

@@ -94,7 +94,7 @@ export function StrategiesTab({
         <div className="space-y-4">
           {/* Filter chips */}
           <div className="flex flex-wrap gap-2">
-            {["all", "scalping", "trend", "mean_reversion", "breakout", "momentum", "dca", "grid"].map(f => (
+            {["all", "scalping", "scalping-adaptive", "trend", "mean_reversion", "breakout", "momentum", "dca", "grid", "ml", "paet"].map(f => (
               <button key={f} onClick={() => setStrategyFilter(f)}
                 className={`px-3 py-1 rounded-full text-sm-custom font-semibold border transition-colors ${strategyFilter === f ? "bg-primary/20 border-primary text-primary" : "border-zinc-700 text-zinc-400 hover:border-zinc-500"}`}>
                 {f === "all" ? "Alle" : f}

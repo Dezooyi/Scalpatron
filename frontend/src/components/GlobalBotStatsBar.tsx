@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useMemo } from "react";
-import { Clock, Activity, TrendingUp, TrendingDown, Target, Skull, BrainCircuit, BarChart3, LineChart, Square, Play, RefreshCw, Wallet, Coins } from "lucide-react";
+import { Clock, Activity, TrendingUp, TrendingDown, Target, Skull, BrainCircuit, BarChart3, LineChart, Square, Play, RefreshCw, Wallet, Coins, ExternalLink, Settings as SettingsIcon } from "lucide-react";
 import type { BotState } from "@/App";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import gsap from "gsap";
@@ -29,9 +29,10 @@ interface StatBadgeProps {
   secondaryContent?: React.ReactNode;
   containerClass?: string;
   onClick?: () => void;
+  headerAction?: React.ReactNode;
 }
 
-function StatBadge({ icon, title, value, valueColor = "text-zinc-900 dark:text-zinc-100", secondaryContent, containerClass = "border-zinc-200/20 dark:border-white/5", onClick }: StatBadgeProps) {
+function StatBadge({ icon, title, value, valueColor = "text-zinc-900 dark:text-zinc-100", secondaryContent, containerClass = "border-zinc-200/20 dark:border-white/5", onClick, headerAction }: StatBadgeProps) {
   const cardRef = useRef<HTMLDivElement>(null);
 
   // Cleanup GSAP animations on unmount to prevent memory leaks
@@ -75,9 +76,12 @@ function StatBadge({ icon, title, value, valueColor = "text-zinc-900 dark:text-z
       tabIndex={onClick ? 0 : undefined}
       onKeyDown={onClick ? (e) => (e.key === 'Enter' || e.key === ' ') && onClick() : undefined}
     >
-      <div className="flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400 opacity-80">
-        {icon}
-        <span className="text-[8px] font-bold uppercase tracking-widest">{title}</span>
+      <div className="flex items-center justify-between gap-1.5 text-zinc-500 dark:text-zinc-400 opacity-80">
+        <div className="flex items-center gap-1.5">
+          {icon}
+          <span className="text-[8px] font-bold uppercase tracking-widest">{title}</span>
+        </div>
+        {headerAction && <div className="flex items-center">{headerAction}</div>}
       </div>
       <div className="flex items-center justify-between w-full">
         <span className={`text-sm font-black tracking-tight ${valueColor}`}>{value}</span>
@@ -96,12 +100,31 @@ interface GlobalBotStatsBarProps {
   agentCycleMinutes?: number;
   nextAnalysisTime?: number | null;
   onToggleAll?: (targetStatus: "running" | "stopped") => void;
+  onStopAgent?: () => void;
+  onStartAgent?: () => void;
   isAllActionLoading?: boolean;
+  onOpenWalletTab?: () => void;
+  onOpenWalletSettings?: () => void;
+  getApiBase?: () => string;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agentCycleMinutes, nextAnalysisTime, onToggleAll, isAllActionLoading }: GlobalBotStatsBarProps) {
+export function GlobalBotStatsBar({
+  bots,
+  agentHistoryCount,
+  agentRunning,
+  nextAnalysisTime,
+  onToggleAll,
+  onStopAgent,
+  onStartAgent,
+  isAllActionLoading,
+  onOpenWalletTab,
+  onOpenWalletSettings,
+  getApiBase,
+}: GlobalBotStatsBarProps) {
   const [now, setNow] = useState(() => Date.now());
+  const [onchainSol, setOnchainSol] = useState<number | null>(null);
+  const [onchainNetwork, setOnchainNetwork] = useState<string>("");
+  const [onchainAddress, setOnchainAddress] = useState<string>("");
 
   useEffect(() => {
     const interval = setInterval(() => setNow(Date.now()), 1000);
@@ -172,17 +195,6 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
     () => bots.reduce((acc, bot) => acc + (bot.stats?.balanceSOL || 0), 0),
     [bots]
   );
-  const totalBalanceToken = useMemo(
-    () => bots.reduce((acc, bot) => acc + (bot.stats?.balanceToken || 0), 0),
-    [bots]
-  );
-  
-  // Get unique wallet addresses from bots - memoized
-  const walletAddresses = useMemo(
-    () => [...new Set(bots.filter(b => b.walletAddress).map(b => b.walletAddress))],
-    [bots]
-  );
-  const primaryWalletAddress = walletAddresses[0] || null;
 
   // Group bots by wallet for detail view - memoized
   const botsByWallet = useMemo(
@@ -199,6 +211,26 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
 
   const someRunning = bots.some(b => b.status === "running");
   const targetStatus = someRunning ? "stopped" : "running";
+
+  // ADR-015: Fetch on-chain wallet info from walletService
+  const fetchWalletInfo = async () => {
+    const base = getApiBase?.() ?? "";
+    try {
+      const res = await fetch(`${base}/api/wallet/info`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setOnchainSol(data.solBalance ?? null);
+      setOnchainNetwork(data.network ?? "");
+      setOnchainAddress(data.address ?? "");
+    } catch { /* ignore */ }
+  };
+
+  useEffect(() => {
+    const tick = () => { void fetchWalletInfo(); };
+    tick();
+    const interval = setInterval(tick, 30_000);
+    return () => clearInterval(interval);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="w-full flex flex-col gap-3 mb-4">
@@ -294,44 +326,57 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
               <div className="flex items-center gap-2 pb-2 border-b border-zinc-200 dark:border-white/10">
                 <Wallet className="h-4 w-4 text-emerald-400" />
                 <span className="text-sm font-bold uppercase tracking-wider">Wallet Details</span>
+                {onchainNetwork && (
+                  <span className={`ml-auto text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                    onchainNetwork === "mainnet"
+                      ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                      : "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                  }`}>
+                    {onchainNetwork}
+                  </span>
+                )}
               </div>
 
-              {/* Aggregated Totals */}
+              {/* On-Chain vs Paper Aggregated Totals */}
               <div className="grid grid-cols-2 gap-3">
                 <div className="p-2 rounded bg-zinc-50 dark:bg-black/30 border border-zinc-200 dark:border-white/10">
                   <div className="flex items-center gap-1.5 mb-1">
-                    <span className="text-[9px] font-bold uppercase text-zinc-500">Total SOL</span>
+                    <span className="text-[9px] font-bold uppercase text-zinc-500">On-Chain SOL</span>
+                    {onchainSol !== null && (
+                      <span className="text-[8px] text-emerald-400 ml-auto">live</span>
+                    )}
                   </div>
-                  <span className="text-lg font-black text-emerald-400 tabular-nums">{totalBalanceSOL.toFixed(4)}</span>
+                  <span className="text-lg font-black text-emerald-400 tabular-nums">
+                    {onchainSol !== null ? onchainSol.toFixed(4) : "—"}
+                  </span>
                 </div>
                 <div className="p-2 rounded bg-zinc-50 dark:bg-black/30 border border-zinc-200 dark:border-white/10">
                   <div className="flex items-center gap-1.5 mb-1">
                     <Coins className="h-3 w-3 text-cyan-400" />
-                    <span className="text-[9px] font-bold uppercase text-zinc-500">Total Tokens</span>
+                    <span className="text-[9px] font-bold uppercase text-zinc-500">Paper Total</span>
                   </div>
-                  <span className="text-lg font-black text-cyan-400 tabular-nums">{totalBalanceToken.toFixed(1)}</span>
+                  <span className="text-lg font-black text-cyan-400 tabular-nums">{totalBalanceSOL.toFixed(4)}</span>
                 </div>
               </div>
 
               {/* Primary Wallet Address */}
-              {primaryWalletAddress && (
+              {onchainAddress && (
                 <div className="p-2 rounded bg-zinc-50 dark:bg-black/30 border border-zinc-200 dark:border-white/10">
                   <div className="text-[9px] font-bold uppercase text-zinc-500 mb-1">Primary Wallet</div>
                   <div className="text-xs font-mono text-zinc-700 dark:text-zinc-300 truncate">
-                    {primaryWalletAddress.slice(0, 8)}...{primaryWalletAddress.slice(-6)}
+                    {onchainAddress.slice(0, 8)}...{onchainAddress.slice(-6)}
                   </div>
                 </div>
               )}
 
-              {/* Individual Wallets */}
+              {/* Bot-by-Bot Paper-Balances */}
               {Object.keys(botsByWallet).length > 0 && (
                 <div className="pt-2 border-t border-zinc-200 dark:border-white/10">
-                  <div className="text-[9px] font-bold uppercase text-zinc-500 mb-2">Bots by Wallet</div>
-                  <div className="space-y-1.5 max-h-[150px] overflow-y-auto">
+                  <div className="text-[9px] font-bold uppercase text-zinc-500 mb-2">Paper-Bots by Wallet</div>
+                  <div className="space-y-1.5 max-h-[100px] overflow-y-auto">
                     {Object.entries(botsByWallet).map(([addr, walletBots]) => {
                       const walletSOL = walletBots.reduce((acc, b) => acc + (b.stats?.balanceSOL || 0), 0);
                       const walletToken = walletBots.reduce((acc, b) => acc + (b.stats?.balanceToken || 0), 0);
-                      
                       return (
                         <div key={addr} className="flex items-center justify-between p-1.5 rounded bg-zinc-100 dark:bg-black/20 text-[10px]">
                           <span className="font-mono text-zinc-600 dark:text-zinc-400 truncate max-w-[120px]">
@@ -347,6 +392,28 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
                   </div>
                 </div>
               )}
+
+              {/* Action Buttons */}
+              <div className="pt-2 border-t border-zinc-200 dark:border-white/10 flex gap-2">
+                {onOpenWalletTab && (
+                  <button
+                    onClick={onOpenWalletTab}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-[10px] font-bold uppercase tracking-wider border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    Wallet-Tab
+                  </button>
+                )}
+                {onOpenWalletSettings && (
+                  <button
+                    onClick={onOpenWalletSettings}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-[10px] font-bold uppercase tracking-wider border border-white/10 bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground transition-colors"
+                  >
+                    <SettingsIcon className="h-3 w-3" />
+                    Einrichten
+                  </button>
+                )}
+              </div>
             </div>
           </PopoverContent>
         </Popover>
@@ -409,6 +476,24 @@ export function GlobalBotStatsBar({ bots, agentHistoryCount, agentRunning, agent
             </div>
           }
           valueColor="text-purple-300"
+          headerAction={
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (agentRunning) onStopAgent?.(); else onStartAgent?.();
+              }}
+              disabled={agentRunning === undefined}
+              title={agentRunning ? "Strategy Assistant stoppen" : "Strategy Assistant starten"}
+              className={`flex items-center justify-center w-5 h-5 rounded-full border transition-all duration-200 focus:outline-none focus:ring-1 focus:ring-purple-400/50 ${
+                agentRunning
+                  ? "bg-red-500/10 border-red-500/40 text-red-400 hover:bg-red-500/25 hover:border-red-500/60"
+                  : "bg-emerald-500/10 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/25 hover:border-emerald-500/60"
+              } ${agentRunning === undefined ? "opacity-40 cursor-not-allowed" : "cursor-pointer active:scale-90"}`}
+            >
+              {agentRunning ? <Square className="h-2.5 w-2.5 fill-current" /> : <Play className="h-2.5 w-2.5 fill-current ml-[1px]" />}
+            </button>
+          }
           secondaryContent={
             <div className="flex items-center gap-1 mr-1">
               {agentRunning && (

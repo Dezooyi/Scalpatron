@@ -25,7 +25,12 @@ export function StrategyChipPicker({
   const defaultSelected = selectedId === "";
 
   // Highlight Strategies Filter
-  const highlightNames = ["Solana Pulse Sniper", "Asymmetric Breakout (Runner)", "Solana V-Shape Dip Buyer"];
+  const highlightNames = [
+    "Nova Pulse Scalper",
+    "Solana Pulse Sniper",
+    "Asymmetric Breakout (Runner)",
+    "Solana V-Shape Dip Buyer",
+  ];
   const highlightStrategies = strategyTemplates
     .filter((t) => highlightNames.includes(t.strategy_name))
     .sort((a, b) => highlightNames.indexOf(a.strategy_name) - highlightNames.indexOf(b.strategy_name));
@@ -50,13 +55,16 @@ export function StrategyChipPicker({
               
               const isSniper = t.strategy_name.includes("Sniper");
               const isRunner = t.strategy_name.includes("Breakout");
-              
+              const isPulse = t.strategy_name.includes("Pulse Scalper");
+
               // Custom colors based on the specific strategy type
-              const gradientColor = isSniper 
-                ? "from-blue-500/20 to-cyan-400/10 border-blue-500/50 shadow-[0_0_12px_rgba(59,130,246,0.3)] text-blue-400" 
-                : isRunner
-                  ? "from-orange-500/20 to-amber-400/10 border-orange-500/50 shadow-[0_0_12px_rgba(249,115,22,0.3)] text-orange-400"
-                  : "from-purple-500/20 to-fuchsia-400/10 border-purple-500/50 shadow-[0_0_12px_rgba(168,85,247,0.3)] text-purple-400";
+              const gradientColor = isPulse
+                ? "from-emerald-500/20 to-cyan-400/10 border-emerald-500/50 shadow-[0_0_12px_rgba(16,185,129,0.3)] text-emerald-400"
+                : isSniper
+                  ? "from-blue-500/20 to-cyan-400/10 border-blue-500/50 shadow-[0_0_12px_rgba(59,130,246,0.3)] text-blue-400"
+                  : isRunner
+                    ? "from-orange-500/20 to-amber-400/10 border-orange-500/50 shadow-[0_0_12px_rgba(249,115,22,0.3)] text-orange-400"
+                    : "from-purple-500/20 to-fuchsia-400/10 border-purple-500/50 shadow-[0_0_12px_rgba(168,85,247,0.3)] text-purple-400";
                   
               const dimColor = "bg-zinc-800/60 border-white/10 text-zinc-300 hover:border-zinc-400 hover:bg-zinc-800/80";
 

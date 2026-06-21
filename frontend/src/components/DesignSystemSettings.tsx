@@ -9,11 +9,13 @@ import {
 } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { ColorPicker } from "@/components/ui/color-picker";
 import {
   applyDSConfig,
   saveDSConfig,
   loadStoredDSConfig,
   DS_DEFAULTS,
+  withAlpha,
   type DSConfig,
 } from "@/lib/dsConfig";
 
@@ -47,32 +49,18 @@ function ColorRow({
       </div>
 
       {/* Light picker */}
-      <div className="flex items-center gap-1.5">
-        <input
-          type="color"
-          value={lightVal}
-          onChange={(e) => onChange(lightKey, e.target.value as DSConfig[typeof lightKey])}
-          title={`${label} — Light mode`}
-          className="w-8 h-8 rounded cursor-pointer border border-border bg-transparent p-0.5 shrink-0"
-        />
-        <span className="text-xs font-mono text-muted-foreground w-18 hidden sm:block">
-          {lightVal}
-        </span>
-      </div>
+      <ColorPicker
+        value={lightVal}
+        onChange={(v) => onChange(lightKey, v as DSConfig[typeof lightKey])}
+        className="w-44"
+      />
 
       {/* Dark picker */}
-      <div className="flex items-center gap-1.5">
-        <input
-          type="color"
-          value={darkVal}
-          onChange={(e) => onChange(darkKey, e.target.value as DSConfig[typeof darkKey])}
-          title={`${label} — Dark mode`}
-          className="w-8 h-8 rounded cursor-pointer border border-border bg-transparent p-0.5 shrink-0"
-        />
-        <span className="text-xs font-mono text-muted-foreground w-18 hidden sm:block">
-          {darkVal}
-        </span>
-      </div>
+      <ColorPicker
+        value={darkVal}
+        onChange={(v) => onChange(darkKey, v as DSConfig[typeof darkKey])}
+        className="w-44"
+      />
     </div>
   );
 }
@@ -204,7 +192,7 @@ export default function DesignSystemSettings() {
                 className="h-8 flex-1 border"
                 style={{
                   borderRadius: `${config.radius}rem`,
-                  background: bg + "44",
+                  background: withAlpha(bg, 0.27),
                   borderColor: i === 0 ? config.primaryLight : i === 1 ? config.primaryDark : config.borderLight,
                 }}
               />

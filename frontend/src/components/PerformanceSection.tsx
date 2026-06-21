@@ -97,7 +97,7 @@ function PerformanceSectionBase({ bots, tokens, selectedBotId, onSelectBot }: Pe
 
   return (
     // Abstand wie die erste Zeile (GlobalBotStatsBar: mb-4) + grid-gleichmäßiger Innenabstand
-    <section className="w-full flex flex-col gap-2 mb-4">
+    <section className="w-full flex flex-col gap-2 mb-4 rounded-md border border-border/30 bg-card/40 backdrop-blur-md p-3">
       {/* Inline-Variante: Überschrift + 6 Icon-KV in einer Zeile (klickbar → collapsed) */}
       {viewMode === "inline" && (
         <PerformanceInlineBar

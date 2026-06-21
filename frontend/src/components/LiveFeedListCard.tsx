@@ -169,12 +169,14 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
     return result;
   }, [entries]);
 
+  const isErrorRegime = (r?: string) => r === 'ERROR' || r === 'SKIPPED';
+
   // Combined feed data structure
   type FeedItem =
     | (AggregatedTick & { type: 'tick' })
     | (Trade & { type: 'trade' })
     | (AgentAdviceEntry & { type: 'advice' })
-    | { type: 'advice', botId: string, advice: NonNullable<AgentAdviceEntry['advice']> }
+    | { type: 'advice', botId: string, applied?: boolean, advice: NonNullable<AgentAdviceEntry['advice']> }
     | { type: 'log', timestamp: number, message: string, level: string };
 
   // Memoize the merged and sorted feed items
@@ -191,7 +193,11 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
     const seenAdviceTimestamps = new Set<number>();
     if (agentAdvice) {
       agentAdvice.forEach(a => {
-        if (a.advice?.adjustedSettings && Object.keys(a.advice.adjustedSettings).length > 0) {
+        if (!a.advice) return;
+        if (isErrorRegime(a.advice.regime)) return;
+        const hasSettings = !!(a.advice.adjustedSettings && Object.keys(a.advice.adjustedSettings).length > 0);
+        const hasText = !!(a.advice.reason || a.advice.analysis);
+        if (hasSettings || hasText) {
           seenAdviceTimestamps.add(a.advice.timestamp || Date.now());
           items.push({ type: 'advice', ...a });
         }
@@ -206,13 +212,18 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
 
     mergedHistory.forEach(h => {
       const adj = typeof h.adjustedSettings === "string" ? JSON.parse(h.adjustedSettings) : (h.adjustedSettings ?? {});
-      if (Object.keys(adj).length > 0 && !seenAdviceTimestamps.has(h.timestamp)) {
+      const hasSettings = Object.keys(adj).length > 0;
+      const hasText = !isErrorRegime(h.regime) && !!(h.reason || h.analysis);
+      if ((hasSettings || hasText) && !seenAdviceTimestamps.has(h.timestamp)) {
         items.push({
           type: 'advice',
           botId: h.botId,
+          applied: h.applied === true || h.applied === 1,
           advice: {
             regime: h.regime,
             confidence: h.confidence,
+            reason: h.reason,
+            analysis: h.analysis,
             timestamp: h.timestamp,
             adjustedSettings: adj
           }
@@ -231,11 +242,15 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
     }
     
     // Sort descending by timestamp
-    return items.sort((a, b) => {
-      const tA = a.type === 'advice' ? (a.advice?.timestamp || (a as any).timestamp || 0) : (a as any).timestamp || 0;
-      const tB = b.type === 'advice' ? (b.advice?.timestamp || (b as any).timestamp || 0) : (b as any).timestamp || 0;
-      return tB - tA;
-    });
+    const itemTimestamp = (item: FeedItem): number => {
+      if (item.type === 'advice') {
+        const adviceTs = item.advice?.timestamp;
+        if (adviceTs) return adviceTs;
+        return 'timestamp' in item ? item.timestamp ?? 0 : 0;
+      }
+      return 'timestamp' in item ? item.timestamp ?? 0 : 0;
+    };
+    return items.sort((a, b) => itemTimestamp(b) - itemTimestamp(a));
   }, [aggregatedTicks, bot.recentTrades, agentAdvice, agentHistory, localHistory, terminalLogs]);
 
   // Memoize rows mapping for LogFeedList
@@ -244,9 +259,10 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
     return displayItems.map((item, idx) => {
       if (item.type === 'advice') {
         const adv = item.advice!;
+        const isApplied = item.applied === true;
         const ts = adv.timestamp || Date.now();
         const timestampStr = new Date(ts).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        
+
         const getRegimeBadge = (r: string) => {
           const c = r === "RANGING" ? "bg-blue-500/20 text-blue-300 border-blue-500/30" : r === "TRENDING" ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30" : r === "VOLATILE" ? "bg-amber-500/20 text-amber-300 border-amber-500/30" : "bg-red-500/20 text-red-300 border-red-500/30";
           return <span className={`text-[8px] font-black uppercase tracking-wider px-1 py-0.5 rounded border ${c}`}>{r}</span>;
@@ -255,8 +271,8 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
         const displayNames: Record<string, string> = { spikeThreshold: "Spike", sellDropThreshold: "Sell Drop", floorWindow: "Floor Win", cooldownTicks: "Cooldown" };
 
         const changes = Object.keys(adv.adjustedSettings || {}).map(key => {
-          const rawNew = (adv.adjustedSettings as any)[key];
-          const rawOld = adv.previousSettings ? (adv.previousSettings as any)[key] : rawNew;
+          const rawNew = (adv.adjustedSettings as Record<string, unknown>)[key];
+          const rawOld = adv.previousSettings ? (adv.previousSettings as Record<string, unknown>)[key] : rawNew;
           if (typeof rawNew === 'object' && rawNew !== null) return null;
           const nV = Number(rawNew);
           const oV = Number(rawOld);
@@ -266,17 +282,21 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
           }
           return { key, oldValue: rawOld, newValue: rawNew, changePercent };
         }).filter(Boolean) as { key: string; oldValue: unknown; newValue: unknown; changePercent: number }[];
-          
+
+        const headerLabel = isApplied ? 'AI Applied' : 'AI Analyzed';
+
         return {
           id: `advice-${ts}-${idx}`,
           timestamp: timestampStr,
           badge: { text: "AI", variant: "purple" as BadgeVariant },
           accent: "purple" as const,
-          mainContent: <span className="font-bold text-purple-400">Strategy Config Updated</span>,
+          mainContent: isApplied
+            ? <span className="font-bold text-purple-400">Strategy Config Updated</span>
+            : <span className="font-bold text-purple-400/60">Strategy Analyzed <span className="text-[9px] font-normal text-zinc-500">(not applied)</span></span>,
           expandedContent: (
-            <div className="bg-purple-500/10 border border-purple-500/30 rounded px-2 py-1.5 mt-1 animate-in fade-in slide-in-from-top-2 duration-300 mb-1">
-              <div className="text-[9px] font-bold uppercase tracking-wider mb-1.5 flex items-center justify-between text-purple-400">
-                <span className="flex items-center gap-1"><BrainCircuit className="h-3 w-3" /> AI Updated</span>
+            <div className={`border rounded px-2 py-1.5 mt-1 animate-in fade-in slide-in-from-top-2 duration-300 mb-1 ${isApplied ? 'bg-purple-500/10 border-purple-500/30' : 'bg-zinc-800/40 border-zinc-600/30'}`}>
+              <div className={`text-[9px] font-bold uppercase tracking-wider mb-1.5 flex items-center justify-between ${isApplied ? 'text-purple-400' : 'text-zinc-400'}`}>
+                <span className="flex items-center gap-1"><BrainCircuit className="h-3 w-3" /> {headerLabel}</span>
                 <div className="flex items-center gap-1.5">
                   {adv.regime && getRegimeBadge(adv.regime)}
                   {adv.confidence !== undefined && <span className="text-[8px] font-mono text-purple-300">{(adv.confidence * 100).toFixed(0)}%</span>}
@@ -302,7 +322,21 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
                       )}
                     </div>
                   );
-                }) : <span className="text-[10px] text-purple-300/60 italic">Strategy analyzed</span>}
+                }) : (
+                  <div className="space-y-1">
+                    <span className="text-[10px] text-purple-300/60 italic">Strategy analyzed (no setting changes)</span>
+                    {adv.reason && (
+                      <p className="text-[10px] text-foreground/70 leading-relaxed">
+                        <span className="font-semibold text-purple-300/80 mr-1">Reason:</span>{adv.reason}
+                      </p>
+                    )}
+                    {adv.analysis && (
+                      <p className="text-[10px] text-cyan-200/60 leading-relaxed italic">
+                        {adv.analysis}
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           ),
@@ -378,7 +412,7 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
     bot.status === "running" ? "Collecting data…" : "Start bot to record price data.";
 
   return (
-    <Card className="border-border/30 bg-card flex flex-col h-full overflow-hidden">
+    <Card className="border-border/30 bg-card/40 backdrop-blur-md flex flex-col h-full overflow-hidden">
       <CardHeader className="p-3 pb-2 shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
