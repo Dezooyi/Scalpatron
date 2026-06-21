@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
 import type { StrategyConfig } from './strategyTypes.js';
+import type { KillSwitchConfig } from './killSwitch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_DIR = path.resolve(__dirname, '..', 'data');
@@ -132,6 +133,22 @@ export function initDB() {
 
     CREATE INDEX IF NOT EXISTS idx_lessons_bot ON lessons_learned(botId, createdAt DESC);
     CREATE INDEX IF NOT EXISTS idx_lessons_severity ON lessons_learned(botId, severity DESC);
+
+    -- ADR-015: Wallet Balance Snapshots (für Equity-Kurve & historische Analyse)
+    CREATE TABLE IF NOT EXISTS wallet_balances (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      walletAddress TEXT NOT NULL,
+      mintAddress TEXT,
+      balance REAL NOT NULL,
+      usdValue REAL,
+      source TEXT NOT NULL,
+      botId TEXT,
+      timestamp INTEGER NOT NULL,
+      createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_wallet_balances_wallet ON wallet_balances(walletAddress, timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_wallet_balances_mint ON wallet_balances(mintAddress, timestamp DESC);
   `);
 
   // Strategies table — stores StrategyConfig JSON (templates + user-saved)
@@ -177,12 +194,52 @@ export function initDB() {
     `ALTER TABLE trades ADD COLUMN paperMode INTEGER NOT NULL DEFAULT 1`,
     // ADR-012: manual trigger aggressiveness (0-100)
     `ALTER TABLE agent_history ADD COLUMN forceMultiplier INTEGER DEFAULT NULL`,
+    // bots: Kill-Switch / Circuit-Breaker Konfiguration (Stop-Strategie)
+    `ALTER TABLE bots ADD COLUMN killSwitch TEXT DEFAULT NULL`,
+    // ADR-015: Trade-Erweiterungen für Wallet-Page (Solscan-Links, Fees, Slippage)
+    `ALTER TABLE trades ADD COLUMN signature TEXT DEFAULT NULL`,
+    `ALTER TABLE trades ADD COLUMN solAmount REAL DEFAULT NULL`,
+    `ALTER TABLE trades ADD COLUMN fee REAL DEFAULT NULL`,
+    `ALTER TABLE trades ADD COLUMN slippagePct REAL DEFAULT NULL`,
+    `ALTER TABLE trades ADD COLUMN source TEXT DEFAULT 'auto'`,
   ];
+
   for (const sql of migrations) {
     try { db.exec(sql); } catch (_) { /* column already exists */ }
   }
 
+  // ADR-015: Indexes für Transaktions-Performance (idempotent)
+  const indexes = [
+    `CREATE INDEX IF NOT EXISTS idx_trades_signature ON trades(signature) WHERE signature IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_trades_bot_ts ON trades(botId, timestamp DESC)`,
+  ];
+  for (const sql of indexes) {
+    try { db.exec(sql); } catch (_) { /* index exists */ }
+  }
+
   console.log('[DB] Scalpatron Database initialized.');
+}
+
+/**
+ * WAL-Checkpoint-Guard: verhindert, dass das WAL-File bei dauerhaften Reads
+ * unbegrenzt waechst (Checkpoint-Starvation). Prueft periodisch die WAL-Groesse
+ * und loest einen RESTART-Checkpoint aus, sobald der Schwellenwert ueberschritten wird.
+ */
+export function startWalCheckpointGuard(thresholdBytes = 50 * 1024 * 1024): void {
+  const walPath = `${DB_PATH}-wal`;
+  const interval = setInterval(() => {
+    try {
+      const stat = fs.statSync(walPath);
+      if (stat.size > thresholdBytes) {
+        db.pragma('wal_checkpoint(RESTART)');
+        console.log(`[DB] WAL-Checkpoint ausgefuehrt (WAL war ${(stat.size / 1024 / 1024).toFixed(1)} MB).`);
+      }
+    } catch {
+      // WAL-Datei existiert (noch) nicht — ignorieren.
+    }
+  }, 60_000);
+  interval.unref();
 }
 
 // Agent History Functions
@@ -734,6 +791,113 @@ export interface RegimePerformance {
   totalTrades: number;
 }
 
+export interface StrategyRegimePerformance {
+  strategyType: string;
+  regime: string;
+  winRate: number;
+  avgPnl: number;
+  totalTrades: number;
+}
+
+/**
+ * Per-(strategy_type, regime) win-rate and PnL.
+ * Joins agent_history → bots → strategies to get the active strategy type per bot.
+ * Only bots with an assigned strategyId are included (legacy bots skipped).
+ * Only buckets with at least `minSamples` outcome trades are returned.
+ */
+export function getStrategyRegimePerformance(botId?: string, minSamples = 5): StrategyRegimePerformance[] {
+  let query = `
+    SELECT
+      json_extract(s.config, '$.strategy_type') AS strategyType,
+      ah.regime,
+      SUM(ah.outcomeWins)        AS wins,
+      SUM(ah.outcomeTradeCount)  AS total,
+      SUM(ah.outcomeTotalPnl)    AS totalPnl
+    FROM agent_history ah
+    JOIN bots b ON b.id = ah.botId
+    JOIN strategies s ON s.id = b.strategyId
+    WHERE ah.outcomeTradeCount > 0
+      AND json_extract(s.config, '$.strategy_type') IS NOT NULL
+  `;
+  const params: (string | number)[] = [];
+  if (botId) {
+    query += ' AND ah.botId = ?';
+    params.push(botId);
+  }
+  query += ' GROUP BY strategyType, ah.regime HAVING total >= ? ORDER BY total DESC';
+  params.push(minSamples);
+
+  const rows = db.prepare(query).all(...params) as {
+    strategyType: string; regime: string; wins: number; total: number; totalPnl: number;
+  }[];
+
+  return rows.map(r => ({
+    strategyType: r.strategyType,
+    regime: r.regime,
+    winRate: r.total > 0 ? Math.round((r.wins / r.total) * 100) : 0,
+    avgPnl: r.total > 0 ? r.totalPnl / r.total : 0,
+    totalTrades: r.total,
+  }));
+}
+
+export interface ForceMultiplierTierStats {
+  tier: 'low' | 'medium' | 'high';
+  rangeLabel: string;
+  winRate: number;
+  avgPnl: number;
+  totalTrades: number;
+  avgConfidence: number;
+}
+
+/**
+ * Correlates force-multiplier level (AI trust) with trade outcomes.
+ * Tiers: low 0-30%, medium 31-60%, high 61-100%.
+ * Only entries with at least 1 outcome trade and a known forceMultiplier are used.
+ */
+export function getForceMultiplierTierStats(botId?: string, minSamples = 3): ForceMultiplierTierStats[] {
+  let query = `
+    SELECT
+      CASE
+        WHEN forceMultiplier <= 30 THEN 'low'
+        WHEN forceMultiplier <= 60 THEN 'medium'
+        ELSE 'high'
+      END AS tier,
+      SUM(outcomeWins)       AS wins,
+      SUM(outcomeTradeCount) AS total,
+      SUM(outcomeTotalPnl)   AS totalPnl,
+      AVG(confidence)        AS avgConf
+    FROM agent_history
+    WHERE forceMultiplier IS NOT NULL
+      AND outcomeTradeCount > 0
+  `;
+  const params: (string | number)[] = [];
+  if (botId) {
+    query += ' AND botId = ?';
+    params.push(botId);
+  }
+  query += ' GROUP BY tier HAVING total >= ? ORDER BY MIN(forceMultiplier) ASC';
+  params.push(minSamples);
+
+  const RANGE: Record<string, string> = {
+    low: '0–30%',
+    medium: '31–60%',
+    high: '61–100%',
+  };
+
+  const rows = db.prepare(query).all(...params) as {
+    tier: string; wins: number; total: number; totalPnl: number; avgConf: number;
+  }[];
+
+  return rows.map(r => ({
+    tier: r.tier as ForceMultiplierTierStats['tier'],
+    rangeLabel: RANGE[r.tier] ?? r.tier,
+    winRate: r.total > 0 ? Math.round((r.wins / r.total) * 100) : 0,
+    avgPnl: r.total > 0 ? r.totalPnl / r.total : 0,
+    totalTrades: r.total,
+    avgConfidence: Math.round((r.avgConf ?? 0) * 100),
+  }));
+}
+
 /**
  * Aggregates agent_history outcome data per market regime.
  * Only includes entries that have at least 1 outcome trade.
@@ -787,6 +951,22 @@ export function setBotStrategy(botId: string, strategyId: string): void {
 export function getBotStrategyId(botId: string): string | null {
   const row = db.prepare('SELECT strategyId FROM bots WHERE id = ?').get(botId) as { strategyId: string | null } | undefined;
   return row?.strategyId ?? null;
+}
+
+// --- Bot Kill-Switch Persistence ---
+
+export function getBotKillSwitch(botId: string): KillSwitchConfig | null {
+  const row = db.prepare('SELECT killSwitch FROM bots WHERE id = ?').get(botId) as { killSwitch: string | null } | undefined;
+  if (!row?.killSwitch) return null;
+  try {
+    return JSON.parse(row.killSwitch) as KillSwitchConfig;
+  } catch {
+    return null;
+  }
+}
+
+export function setBotKillSwitch(botId: string, config: KillSwitchConfig): void {
+  db.prepare('UPDATE bots SET killSwitch = ? WHERE id = ?').run(JSON.stringify(config), botId);
 }
 
 // --- Strategy CRUD ---
@@ -889,7 +1069,6 @@ export function getTokenInfo(mintAddress: string): { symbol: string; name: strin
 // --- Trade Lifecycle (ADR-007: PENDING trade persistence) ---
 
 export interface TradeRow {
-  id: number;
   botId: string;
   timestamp: number;
   action: string;
@@ -898,6 +1077,11 @@ export interface TradeRow {
   pnlPercent: number | null;
   status: string;
   paperMode: number;
+  signature?: string | null;
+  solAmount?: number | null;
+  fee?: number | null;
+  slippagePct?: number | null;
+  source?: string | null;
 }
 
 export function insertPendingTrade(
@@ -974,4 +1158,148 @@ export function getTradesForPerformance(
 
   const query = `SELECT * FROM trades WHERE ${conditions.join(` AND `)} ORDER BY timestamp ASC`;
   return db.prepare(query).all(...params) as TradeRow[];
+}
+
+// ADR-015: Trade um Solscan-Signatur, Fee & SOL-Delta erweitern
+export function updateTradeSignature(
+  tradeId: number,
+  signature: string,
+  solAmount: number | null,
+  fee: number | null,
+  slippagePct: number | null = null,
+  source: string = 'auto',
+): void {
+  db.prepare(`
+    UPDATE trades
+    SET signature = ?, solAmount = ?, fee = ?, slippagePct = ?, source = ?
+    WHERE id = ?
+  `).run(signature, solAmount, fee, slippagePct, source, tradeId);
+}
+
+/**
+ * Liefert Trades für die Wallet-Page (BUY/SELL, mit Signaturen).
+ * Filter: botId, type, mode, range (from/to).
+ */
+export function getTradesForWallet(opts: {
+  limit?: number;
+  offset?: number;
+  botId?: string;
+  type?: 'BUY' | 'SELL';
+  mode?: 'paper' | 'live';
+  from?: number;
+  to?: number;
+} = {}): TradeRow[] {
+  const { limit = 100, offset = 0, botId, type, mode, from, to } = opts;
+  const conditions = [`status = 'CONFIRMED'`];
+  const params: (string | number)[] = [];
+
+  if (botId) {
+    conditions.push(`botId = ?`);
+    params.push(botId);
+  }
+  if (type) {
+    conditions.push(`action = ?`);
+    params.push(type);
+  }
+  if (mode === 'paper') {
+    conditions.push(`paperMode = 1`);
+  } else if (mode === 'live') {
+    conditions.push(`paperMode = 0`);
+  }
+  if (from !== undefined) {
+    conditions.push(`timestamp >= ?`);
+    params.push(from);
+  }
+  if (to !== undefined) {
+    conditions.push(`timestamp <= ?`);
+    params.push(to);
+  }
+
+  const query = `SELECT * FROM trades WHERE ${conditions.join(' AND ')} ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
+  params.push(limit, offset);
+  return db.prepare(query).all(...params) as TradeRow[];
+}
+
+// ADR-015: Wallet Balance Snapshots
+export function insertWalletBalance(snapshot: {
+  walletAddress: string;
+  mintAddress: string | null;
+  balance: number;
+  usdValue?: number | null;
+  source: 'onchain' | 'paper-sim' | 'manual';
+  botId?: string | null;
+  timestamp: number;
+}): void {
+  db.prepare(`
+    INSERT INTO wallet_balances (walletAddress, mintAddress, balance, usdValue, source, botId, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    snapshot.walletAddress,
+    snapshot.mintAddress,
+    snapshot.balance,
+    snapshot.usdValue ?? null,
+    snapshot.source,
+    snapshot.botId ?? null,
+    snapshot.timestamp,
+  );
+}
+
+export interface WalletBalanceRow {
+  id: number;
+  walletAddress: string;
+  mintAddress: string | null;
+  balance: number;
+  usdValue: number | null;
+  source: string;
+  botId: string | null;
+  timestamp: number;
+}
+
+export function getWalletBalanceHistory(opts: {
+  walletAddress: string;
+  mintAddress?: string | null;
+  from?: number;
+  to?: number;
+  limit?: number;
+}): WalletBalanceRow[] {
+  const { walletAddress, mintAddress, from, to, limit = 500 } = opts;
+  const conditions = [`walletAddress = ?`];
+  const params: (string | number)[] = [walletAddress];
+
+  if (mintAddress !== undefined) {
+    if (mintAddress === null) {
+      conditions.push(`mintAddress IS NULL`);
+    } else {
+      conditions.push(`mintAddress = ?`);
+      params.push(mintAddress);
+    }
+  }
+  if (from !== undefined) {
+    conditions.push(`timestamp >= ?`);
+    params.push(from);
+  }
+  if (to !== undefined) {
+    conditions.push(`timestamp <= ?`);
+    params.push(to);
+  }
+
+  const query = `SELECT * FROM wallet_balances WHERE ${conditions.join(' AND ')} ORDER BY timestamp DESC LIMIT ?`;
+  params.push(limit);
+  return db.prepare(query).all(...params) as WalletBalanceRow[];
+}
+
+export function getLatestWalletBalances(walletAddress: string): WalletBalanceRow[] {
+  return db.prepare(`
+    SELECT w1.* FROM wallet_balances w1
+    INNER JOIN (
+      SELECT mintAddress, MAX(timestamp) AS maxTs
+      FROM wallet_balances
+      WHERE walletAddress = ?
+      GROUP BY mintAddress
+    ) w2 ON
+      (w1.mintAddress IS NULL AND w2.mintAddress IS NULL OR w1.mintAddress = w2.mintAddress)
+      AND w1.timestamp = w2.maxTs
+    WHERE w1.walletAddress = ?
+    ORDER BY w1.mintAddress IS NULL DESC, w1.mintAddress ASC
+  `).all(walletAddress, walletAddress) as WalletBalanceRow[];
 }

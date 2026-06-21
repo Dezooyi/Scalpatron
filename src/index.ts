@@ -1,16 +1,22 @@
-import { initDB } from './db.js';
+import { initDB, startWalCheckpointGuard } from './db.js';
 import { BotManager } from './botManager.js';
 import { BotServer } from './server.js';
 import { PriceRecorder } from './priceRecorder.js';
 import { saveStrategy } from './db.js';
 import { loadBuiltinTemplates } from './strategyEngine.js';
 import { PriceFeed } from './priceFeed.js';
+import { startMemoryMonitor } from './memoryMonitor.js';
 
 
 console.log('Scalpatron V1 wird gestartet...');
 
 // Initialize SQLite database
 initDB();
+
+// Speicher-Diagnose: Memory-Usage alle 60s, automatische Heap-Snapshots ab 512 MB RSS.
+startMemoryMonitor({ autoSnapshotRssMB: 512 });
+// WAL-Checkpoint-Guard: verhindert unbegrenztes WAL-Wachstum.
+startWalCheckpointGuard();
 
 // Load strategy templates into DB if missing
 (async () => {
@@ -23,6 +29,26 @@ initDB();
 
 
 const recorder = new PriceRecorder();
+
+// ── Data Retention ──────────────────────────────────────────────────────────
+// Keep 7 days of price history in live_feed and prices.jsonl.
+// Run once at startup (removes accumulated backlog) then daily.
+const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+(function runCleanup() {
+  const dbRows = recorder.cleanup(RETENTION_MS);
+  const jsonlRows = recorder.pruneJSONL(RETENTION_MS);
+  if (dbRows > 0 || jsonlRows > 0) {
+    console.log(`[Cleanup] Daten älter als 7 Tage entfernt: ${dbRows} DB-Zeilen, ${jsonlRows} JSONL-Zeilen.`);
+  }
+})();
+setInterval(() => {
+  const dbRows = recorder.cleanup(RETENTION_MS);
+  const jsonlRows = recorder.pruneJSONL(RETENTION_MS);
+  if (dbRows > 0 || jsonlRows > 0) {
+    console.log(`[Cleanup] Tägliche Bereinigung: ${dbRows} DB-Zeilen, ${jsonlRows} JSONL-Zeilen entfernt.`);
+  }
+}, 24 * 60 * 60 * 1000).unref();
+
 const botManager = new BotManager();
 const server = new BotServer(botManager, recorder, 3000);
 
@@ -58,8 +84,8 @@ const savedAgentConfig = (() => {
   try { return JSON.parse(getSetting('agentConfig', '{}')); } catch { return {}; }
 })();
 const agent = new OllamaAgent(savedAgentConfig);
-agent.connect(botManager, (botId, advice) => {
-  server.broadcast('agent_advice', { botId, advice });
+agent.connect(botManager, (botId, advice, applied) => {
+  server.broadcast('agent_advice', { botId, advice, applied });
 }, (eventName, data) => {
   server.broadcast(eventName, data);
 });

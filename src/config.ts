@@ -26,8 +26,9 @@ export const CONFIG = {
   // Price Feed Konfiguration
   PRICE_FEED_PROVIDER: (process.env.PRICE_FEED_PROVIDER ?? 'dexscreener') as PriceFeedProvider,
   PRICE_FEED_TICKRATE_MS: parseInt(process.env.PRICE_FEED_TICKRATE_MS ?? '2000', 10),
-  PRICE_FEED_REQUEST_INTERVAL_MS: parseInt(process.env.PRICE_FEED_REQUEST_INTERVAL_MS ?? '800', 10),
-  PRICE_FEED_MAX_RETRIES: parseInt(process.env.PRICE_FEED_MAX_RETRIES ?? '4', 10),
+  // Scheduling-Intervall wird dynamisch in PriceFeed berechnet (SLOT_MS * N unique Mints).
+  // PRICE_FEED_REQUEST_INTERVAL_MS ist nicht mehr relevant und wurde entfernt.
+  PRICE_FEED_MAX_RETRIES: parseInt(process.env.PRICE_FEED_MAX_RETRIES ?? '3', 10),
   PRICE_FEED_CUSTOM_URL: process.env.PRICE_FEED_CUSTOM_URL ?? '',
   // Stale-Price-Handling (ADR-010): ab dieser Veraltungsdauer (ms) wird Trading blockiert.
   // Default = 3 * TICKRATE (Toleranz für 1–2 transiente Fehlpolls, Block bei anhaltendem Ausfall).

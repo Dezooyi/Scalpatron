@@ -1,0 +1,38 @@
+{
+  "strategy_name": "PAET — Predictive Anomaly & Evacuation Trigger",
+  "strategy_type": "paet",
+  "description": "Decomposes price history via STL (Trend + Seasonal + Residual) and FFT cycle detection. Triggers a SELL exactly before a projected collapse using 1st/2nd-order derivatives and Point-of-No-Return logic. Self-calibrating false-alarm penalty ω adapts over time.",
+  "market": {
+    "symbol": "UGOR/SOL",
+    "timeframe": "1m",
+    "exchange": "solana"
+  },
+  "indicators": [],
+  "entry_conditions": [],
+  "exit_conditions": [],
+  "risk_management": {
+    "position_size": 0.1,
+    "max_positions": 1,
+    "leverage": 1
+  },
+  "execution": {
+    "order_type": "market",
+    "slippage_tolerance": 0.003
+  },
+  "paet_settings": {
+    "stl_seasonal_period": 0,
+    "stl_trend_window": 60,
+    "volatility_sigma_multiplier": 2.0,
+    "collapse_threshold_pct": 0.25,
+    "evacuation_ticks": 3,
+    "safety_coefficient_k": 2,
+    "false_alarm_penalty_omega": 1.5,
+    "min_history_candles": 120,
+    "acceleration_ema_period": 5,
+    "entry_mode": "once",
+    "entry_cooldown_ticks": 10,
+    "stop_loss_pct": 0.08
+  },
+  "isTemplate": true,
+  "system_prompt": "You are a trading analysis agent for a Solana SPL Token PAET Bot.\nThe bot uses STL decomposition + FFT cycle filtering + predictive PNR logic to exit before a collapse.\n\nTASK:\nAnalyze the market data and recommend optimized PAET parameters for the NEXT cycle.\n\nRespond ONLY with valid JSON in this exact format (no markdown):\n{\n  \"regime\": \"RANGING|TRENDING|DEAD|VOLATILE\",\n  \"confidence\": 0.0-1.0,\n  \"reason\": \"short reasoning (max 120 chars)\",\n  \"analysis\": \"detailed analysis 2-3 sentences\",\n  \"aggressiveness\": 10,\n  \"paetAdjustments\": {\n    \"collapse_threshold_pct\": 0.25,\n    \"evacuation_ticks\": 3,\n    \"safety_coefficient_k\": 2,\n    \"volatility_sigma_multiplier\": 2.0\n  }\n}\n\nRULES:\n- VOLATILE: Raise collapse_threshold_pct (0.3-0.4) — need more room before treating as collapse\n- TRENDING: Lower evacuation_ticks (2-3) — exits must be faster in trending markets\n- RANGING: Standard parameters — cycles are predictable and will be filtered by FFT\n- DEAD: Lower collapse_threshold_pct (0.1-0.15) — any decline is significant in dead markets\n- collapse_threshold_pct: min 0.05, max 0.50\n- evacuation_ticks: min 1, max 10\n- safety_coefficient_k: min 1, max 5\n- volatility_sigma_multiplier: min 1.0, max 4.0"
+}

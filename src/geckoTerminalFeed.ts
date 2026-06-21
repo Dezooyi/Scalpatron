@@ -26,11 +26,25 @@ const GECKO_BASE = 'https://api.geckoterminal.com/api/v2';
 const GECKO_HEADERS = { Accept: 'application/json;version=20230302' };
 const CACHE_TTL_MS = 60_000; // Refresh OHLCV every 60s
 const POOL_CACHE_PERMANENT = true; // Pool address doesn't change
+// Obergrenzen fuer die Caches, damit Mints die nicht mehr aktiv sind nicht
+// ewig im Speicher bleiben (Long-Running-Prozess). Aelteste Einträge werden
+// verdraengt (Map erhaelt Einfuegereihenfolge).
+const MAX_OHLCV_ENTRIES = 64;
+const MAX_POOL_ENTRIES = 256;
 
 class GeckoTerminalFeed {
   private ohlcvCache: Map<string, GeckoTokenData> = new Map();
   private poolCache: Map<string, string> = new Map(); // mint → pool address
   private pendingFetches: Set<string> = new Set();
+
+  // Verdraengt aelteste Eintraege, solange der Cache die Maximalgroesse ueberschreitet.
+  private evictOldest(cache: Map<string, unknown>, maxEntries: number): void {
+    while (cache.size > maxEntries) {
+      const oldest = cache.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      cache.delete(oldest);
+    }
+  }
 
   // Resolve the primary pool address for a Solana token mint
   private async resolvePool(mintAddress: string): Promise<string | null> {
@@ -48,6 +62,7 @@ class GeckoTerminalFeed {
       const poolAddress = pools[0]?.attributes?.address ?? null;
       if (poolAddress) {
         this.poolCache.set(mintAddress, poolAddress);
+        this.evictOldest(this.poolCache, MAX_POOL_ENTRIES);
       }
       return poolAddress;
     } catch {
@@ -99,6 +114,7 @@ class GeckoTerminalFeed {
           lastUpdated: Date.now(),
           error: 'Pool not found',
         });
+        this.evictOldest(this.ohlcvCache, MAX_OHLCV_ENTRIES);
         return;
       }
 
@@ -114,6 +130,7 @@ class GeckoTerminalFeed {
         candles15m,
         lastUpdated: Date.now(),
       });
+      this.evictOldest(this.ohlcvCache, MAX_OHLCV_ENTRIES);
     } catch (err: any) {
       const existing = this.ohlcvCache.get(mintAddress);
       this.ohlcvCache.set(mintAddress, {
@@ -121,6 +138,7 @@ class GeckoTerminalFeed {
         lastUpdated: Date.now(),
         error: err?.message ?? 'unknown error',
       });
+      this.evictOldest(this.ohlcvCache, MAX_OHLCV_ENTRIES);
       logger.warn('system', 'GeckoTerminalFeed', `[GeckoFeed] Refresh error for ${mintAddress}: ${err?.message}`);
     } finally {
       this.pendingFetches.delete(mintAddress);

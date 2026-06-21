@@ -9,7 +9,7 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction 
 import { createJupiterApiClient } from '@jup-ag/api';
 import { loadOrCreateKeypair, getWalletLock } from './wallet.js';
 import { CONFIG } from './config.js';
-import { insertPendingTrade, confirmTrade, failTrade } from './db.js';
+import { insertPendingTrade, confirmTrade, failTrade, updateTradeSignature } from './db.js';
 
 export interface Position {
   entryPrice: number;
@@ -239,7 +239,16 @@ export class Trader {
     }
   }
 
-  private async executeLiveSwap(inputMint: string, outputMint: string, amountLamports: number): Promise<{ success: boolean; error?: string; txid?: string; meta?: unknown }> {
+  private async executeLiveSwap(inputMint: string, outputMint: string, amountLamports: number): Promise<{
+    success: boolean;
+    error?: string;
+    txid?: string;
+    meta?: unknown;
+    fee?: number;
+    expectedOutAmount?: number;
+    actualOutAmount?: number;
+    slippagePct?: number;
+  }> {
     if (!this.connection || !this.keypair || !this.jupiterApi) {
       return { success: false, error: 'No connection or keypair' };
     }
@@ -252,7 +261,10 @@ export class Trader {
         slippageBps: 200,
       });
       if (!quoteResponse) return { success: false, error: 'Kein Quote erhalten' };
-      
+
+      // ADR-015: Erwartete Output-Menge für Slippage-Berechnung festhalten
+      const expectedOutAmount = parseInt(String((quoteResponse as { outAmount?: string | number }).outAmount ?? '0'), 10);
+
       console.log(`[Jupiter] Generiere Swap-Tx...`);
       const swapResult = await this.jupiterApi.swapPost({
         swapRequest: {
@@ -277,7 +289,7 @@ export class Trader {
       });
 
       console.log(`[Jupiter] Tx gesendet: ${txid}. Warte auf Bestätigung...`);
-      
+
       let confirmed = false;
       let confirmError: string | undefined;
       try {
@@ -305,13 +317,34 @@ export class Trader {
           const txInfo = await this.connection.getTransaction(txid, { maxSupportedTransactionVersion: 0 });
           if (txInfo) {
             meta = txInfo.meta;
+            const fee = typeof txInfo.meta?.fee === 'number' ? txInfo.meta.fee / LAMPORTS_PER_SOL : 0;
+            // ADR-015: Tatsächliche Output-Menge aus postTokenBalances ableiten
+            let actualOutAmount = 0;
+            try {
+              const metaObj = txInfo.meta as { preTokenBalances?: unknown; postTokenBalances?: unknown } | null;
+              if (metaObj?.preTokenBalances && metaObj?.postTokenBalances) {
+                const pre = (metaObj.preTokenBalances as Array<{ mint: string; uiTokenAmount: { amount: string; uiAmount: number | null } }>);
+                const post = (metaObj.postTokenBalances as Array<{ mint: string; uiTokenAmount: { amount: string; uiAmount: number | null } }>);
+                const findDelta = (mint: string): number => {
+                  const p = pre.find(b => b.mint === mint)?.uiTokenAmount.amount ?? '0';
+                  const q = post.find(b => b.mint === mint)?.uiTokenAmount.amount ?? '0';
+                  return parseInt(q, 10) - parseInt(p, 10);
+                };
+                const delta = findDelta(outputMint);
+                actualOutAmount = delta > 0 ? delta : 0;
+              }
+            } catch { /* ignore parse errors */ }
+            const slippagePct = expectedOutAmount > 0 && actualOutAmount > 0
+              ? ((expectedOutAmount - actualOutAmount) / expectedOutAmount) * 100
+              : undefined;
+
             if (txInfo.meta?.err === null) {
               console.log(`[Jupiter] Tx verifiziert via getTransaction! ✅`);
-              return { success: true, txid, meta };
+              return { success: true, txid, meta, fee, expectedOutAmount, actualOutAmount, slippagePct };
             } else {
               const errMsg = txInfo.meta?.err ? JSON.stringify(txInfo.meta.err) : 'Unknown error';
               console.error(`[Jupiter] Tx fehlgeschlagen on-chain: ${errMsg}`);
-              return { success: false, error: `On-chain error: ${errMsg}`, txid, meta };
+              return { success: false, error: `On-chain error: ${errMsg}`, txid, meta, fee };
             }
           }
         } catch (e: any) {
@@ -388,6 +421,17 @@ export class Trader {
             failTrade(tradeId);
             throw new Error('SWAP_FAILED');
           }
+          // ADR-015: Solscan-Signatur, Fee & SOL-Delta in DB persistieren
+          if (swapResult.txid) {
+            updateTradeSignature(
+              tradeId,
+              swapResult.txid,
+              effectiveTradeSize,
+              swapResult.fee ?? null,
+              swapResult.slippagePct ?? null,
+              'auto',
+            );
+          }
           confirmTrade(tradeId);
         });
       }
@@ -458,6 +502,23 @@ export class Trader {
           if (!swapResult.success) {
             failTrade(tradeId);
             throw new Error('SWAP_FAILED');
+          }
+          // ADR-015: Solscan-Signatur, Fee & SOL-Delta in DB persistieren
+          // Hinweis: actualOutAmount ist bei SELL (output = SOL) in Lamports (raw),
+          // muss daher nach SOL konvertiert werden, damit solAmount konsistent mit
+          // dem BUY-Pfad (effectiveTradeSize in SOL) bleibt.
+          if (swapResult.txid) {
+            const solDelta = swapResult.actualOutAmount != null
+              ? swapResult.actualOutAmount / LAMPORTS_PER_SOL
+              : sellAmount * result.currentPrice;
+            updateTradeSignature(
+              tradeId,
+              swapResult.txid,
+              solDelta,
+              swapResult.fee ?? null,
+              swapResult.slippagePct ?? null,
+              'auto',
+            );
           }
           confirmTrade(tradeId);
         });

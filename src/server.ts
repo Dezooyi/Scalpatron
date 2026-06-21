@@ -6,12 +6,14 @@ import { getAdvisorSuggestions } from './advisorEngine.js';
 import { TokenService, isValidMintAddress, saveTokenToDb } from './tokenService.js';
 import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder, getTradesForPerformance, getTimeWindowPerformance, detectTimeWindowDrift, getLessonsForBot, saveUiSettings, loadUiSettings, type UiSettings } from './db.js';
 import { loadBuiltinTemplates } from './strategyEngine.js';
-import { PriceFeed } from './priceFeed.js';
+import { PriceFeed, SLOT_MS } from './priceFeed.js';
 import type { OllamaAgent } from './ollamaAgent.js';
 import { buildSystemPrompt } from './ollamaAgent.js';
 import { validateStrategy } from './strategy.js';
 import { DEFAULT_SETTINGS } from './patternDetector.js';
 import { CONFIG } from './config.js';
+import { walletService, type RangeKey, getSolscanUrl } from './walletService.js';
+import { getTradesForWallet } from './db.js';
 
 const DEFAULT_GLOBAL_SETTINGS = {
   floorWindow: DEFAULT_SETTINGS.floorWindow,
@@ -111,6 +113,12 @@ export class BotServer {
     this.priceFeed.on('price_stale', (payload) => {
       this.broadcast('price_stale', payload);
     });
+
+    // ADR-015: Periodischer Wallet-Balance-Snapshot (alle 5 Min)
+    walletService.startSnapshotScheduler();
+    setTimeout(() => {
+      walletService.snapshotBalances().catch(() => {});
+    }, 10_000);
 
     // Periodisch Token-Preise von DexScreener aktualisieren (alle 60 Sekunden)
     setInterval(() => {
@@ -323,9 +331,10 @@ export class BotServer {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         priceFeedProvider: CONFIG.PRICE_FEED_PROVIDER,
-        priceFeedTickrateMs: CONFIG.PRICE_FEED_TICKRATE_MS,
-        priceFeedRequestIntervalMs: CONFIG.PRICE_FEED_REQUEST_INTERVAL_MS,
-        priceFeedMaxRetries: CONFIG.PRICE_FEED_MAX_RETRIES,
+        priceFeedSlotMs: SLOT_MS,
+        priceFeedSafeRpm: 55,
+        priceFeedActiveMints: this.priceFeed.getActiveMintCount(),
+        priceFeedEffectiveIntervalMs: this.priceFeed.getEffectiveIntervalMs(),
         priceFeedUrl: CONFIG.PRICE_FEED_PROVIDER === 'custom' ? '[REDACTED]' : CONFIG.PRICE_FEED_URL,
         pollIntervalMs: CONFIG.POLL_INTERVAL_MS,
         rpcUrl: CONFIG.RPC_URL,
@@ -575,8 +584,8 @@ export class BotServer {
         req.on('end', () => {
           try {
             const incoming = JSON.parse(body);
-            // Pattern settings
-            const { tradeSize, aggressiveness, tradingMode, walletAddress, ...patternSettings } = incoming;
+            // Pattern settings (killSwitch wird separat behandelt, nicht an PatternDetector durchreichen)
+            const { tradeSize, aggressiveness, tradingMode, walletAddress, killSwitch, ...patternSettings } = incoming;
             if (Object.keys(patternSettings).length > 0) {
               this.botManager.updateBotSettings(id, patternSettings);
             }
@@ -593,6 +602,10 @@ export class BotServer {
             // Wallet address
             if (walletAddress !== undefined) {
               this.botManager.updateBotWalletAddress(id, walletAddress);
+            }
+            // Kill-Switch / Stop-Strategie Konfiguration
+            if (killSwitch !== undefined) {
+              this.botManager.updateBotKillSwitch(id, killSwitch);
             }
             this.broadcast('state', this.botManager.getAllStates());
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -619,6 +632,15 @@ export class BotServer {
             res.end(JSON.stringify({ error: e.message }));
           }
         });
+        return;
+      }
+
+      // POST /api/bots/:id/killswitch/reset — Kill-Switch quittieren und erneut scharfschalten
+      if (req.method === 'POST' && action === 'killswitch/reset') {
+        this.botManager.resetBotKillSwitch(id);
+        this.broadcast('state', this.botManager.getAllStates());
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
         return;
       }
 
@@ -1212,8 +1234,8 @@ export class BotServer {
 
     // GET /api/agent/insights?botId=… — ADR-011 aggregated insights
     if (pathname === '/api/agent/insights' && req.method === 'GET') {
+      const botId = urlObj.searchParams.get('botId');
       try {
-        const botId = urlObj.searchParams.get('botId');
         if (!botId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'botId query param required' }));
@@ -1275,6 +1297,264 @@ export class BotServer {
       this.broadcast('state', this.botManager.getAllStates());
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, applied: true, strategyType: result }));
+      return;
+    }
+
+    // ==================== WALLET API (ADR-015) ====================
+
+    // GET /api/wallet/info — primäre Wallet, SOL-Balance, Netzwerk, Token-Count
+    if (pathname === '/api/wallet/info' && req.method === 'GET') {
+      try {
+        const info = await walletService.getInfo();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(info));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/wallet/balances — alle Token-Balances der primären Wallet
+    if (pathname === '/api/wallet/balances' && req.method === 'GET') {
+      try {
+        const address = walletService.getPrimaryAddress();
+        const allBots = this.botManager.getAllBots();
+        const liveBots = allBots.filter(b => {
+          const s = b.getState();
+          return !s.paperMode && s.walletAddress === address;
+        });
+        const mints = Array.from(new Set(liveBots.map(b => b.getState().mintAddress)));
+        const balances = await walletService.getAllTokenBalances(mints, address);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ address, balances }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/wallet/balance/history?range=24h|7d|30d|all — historische Snapshots
+    const balanceHistoryMatch = pathname.match(/^\/api\/wallet\/balance\/history$/);
+    if (balanceHistoryMatch && req.method === 'GET') {
+      try {
+        const rangeRaw = (urlObj.searchParams.get('range') ?? '24h') as RangeKey;
+        const range: RangeKey = ['1h', '24h', '7d', '30d', 'all'].includes(rangeRaw) ? rangeRaw : '24h';
+        const history = await walletService.getBalanceHistory(range);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ range, history }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/wallet/transactions?limit=100&offset=0&botId=…&type=BUY|SELL&mode=paper|live&from=<ms>&to=<ms>
+    const txMatch = pathname.match(/^\/api\/wallet\/transactions$/);
+    if (txMatch && req.method === 'GET') {
+      try {
+        const limit = Math.min(500, parseInt(urlObj.searchParams.get('limit') ?? '100', 10));
+        const offset = Math.max(0, parseInt(urlObj.searchParams.get('offset') ?? '0', 10));
+        const botId = urlObj.searchParams.get('botId') ?? undefined;
+        const typeRaw = urlObj.searchParams.get('type');
+        const type = typeRaw === 'BUY' || typeRaw === 'SELL' ? typeRaw : undefined;
+        const modeRaw = urlObj.searchParams.get('mode');
+        const mode = modeRaw === 'paper' || modeRaw === 'live' ? modeRaw : undefined;
+        const fromParam = urlObj.searchParams.get('from');
+        const toParam = urlObj.searchParams.get('to');
+        const from = fromParam ? parseInt(fromParam, 10) : undefined;
+        const to = toParam ? parseInt(toParam, 10) : undefined;
+
+        const trades = getTradesForWallet({ limit, offset, botId, type, mode, from, to });
+        const network = walletService.getPrimaryAddress()
+          ? (await walletService.getInfo()).network
+          : 'mainnet';
+        const enriched = trades.map(t => ({
+          ...t,
+          solscanUrl: t.signature ? getSolscanUrl(t.signature, network) : null,
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ limit, offset, count: enriched.length, transactions: enriched }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/wallet/transactions/onchain?limit=25 — Live-Tx direkt von Solana RPC
+    const onchainTxMatch = pathname.match(/^\/api\/wallet\/transactions\/onchain$/);
+    if (onchainTxMatch && req.method === 'GET') {
+      try {
+        const limit = Math.min(100, parseInt(urlObj.searchParams.get('limit') ?? '25', 10));
+        const txs = await walletService.getOnChainTransactions(limit);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ count: txs.length, transactions: txs }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/wallet/transactions/:signature — Tx-Detail
+    const txDetailMatch = pathname.match(/^\/api\/wallet\/transactions\/([1-9A-HJ-NP-Za-km-z]{64,88})$/);
+    if (txDetailMatch && req.method === 'GET') {
+      try {
+        const signature = txDetailMatch[1];
+        const detail = await walletService.getTransactionDetail(signature);
+        if (!detail) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Transaction not found' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(detail));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // POST /api/wallet/snapshot — manueller Snapshot-Trigger
+    if (pathname === '/api/wallet/snapshot' && req.method === 'POST') {
+      try {
+        await walletService.snapshotBalances();
+        this.broadcast('wallet_update', { walletAddress: walletService.getPrimaryAddress(), timestamp: Date.now() });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, timestamp: Date.now() }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/wallet/bots — welche Bots nutzen welche Wallet
+    if (pathname === '/api/wallet/bots' && req.method === 'GET') {
+      try {
+        const address = walletService.getPrimaryAddress();
+        const rows = this.botManager.getAllBots().map(bot => {
+          const state = bot.getState();
+          return {
+            botId: state.id,
+            botName: state.name,
+            walletAddress: state.walletAddress ?? '',
+            paperMode: state.paperMode,
+            mintAddress: state.mintAddress,
+          };
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ primaryWallet: address, bots: rows }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/wallet/config — Wallet-Setup-Konfiguration (kein Private-Key!)
+    if (pathname === '/api/wallet/config' && req.method === 'GET') {
+      try {
+        const config = walletService.getConfig();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(config));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // POST /api/wallet/setup/generate — neues Keypair generieren
+    if (pathname === '/api/wallet/setup/generate' && req.method === 'POST') {
+      try {
+        const result = walletService.generateNewWallet();
+        this.broadcast('wallet_update', { walletAddress: result.address, timestamp: Date.now() });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, address: result.address, privateKeyBase58: result.privateKeyBase58 }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // POST /api/wallet/setup/import — bestehenden Private-Key importieren
+    if (pathname === '/api/wallet/setup/import' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { privateKey } = JSON.parse(body) as { privateKey?: string };
+          if (!privateKey) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'privateKey ist erforderlich' }));
+            return;
+          }
+          const result = walletService.importPrivateKey(privateKey);
+          this.broadcast('wallet_update', { walletAddress: result.address, timestamp: Date.now() });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, address: result.address }));
+        } catch (e: any) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message ?? 'Import fehlgeschlagen' }));
+        }
+      });
+      return;
+    }
+
+    // DELETE /api/wallet/setup — Private-Key aus .env entfernen
+    if (pathname === '/api/wallet/setup' && req.method === 'DELETE') {
+      try {
+        walletService.clearPrivateKey();
+        this.broadcast('wallet_update', { walletAddress: null, timestamp: Date.now() });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // PUT /api/wallet/paper-mode-default — globaler Paper-Mode-Default
+    if (pathname === '/api/wallet/paper-mode-default' && req.method === 'PUT') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { paperMode } = JSON.parse(body) as { paperMode?: boolean };
+          if (typeof paperMode !== 'boolean') {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'paperMode (boolean) ist erforderlich' }));
+            return;
+          }
+          walletService.setPaperModeDefault(paperMode);
+          this.broadcast('state', this.botManager.getAllStates());
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, paperMode }));
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
+
+    // POST /api/wallet/test-rpc — RPC-Verbindung testen
+    if (pathname === '/api/wallet/test-rpc' && req.method === 'POST') {
+      try {
+        const result = await walletService.testRpc();
+        res.writeHead(result.ok ? 200 : 503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
       return;
     }
 

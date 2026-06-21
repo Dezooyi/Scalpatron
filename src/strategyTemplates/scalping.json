@@ -23,10 +23,12 @@
   },
   "scalping_settings": {
     "floorWindow": 20,
-    "spikeThreshold": 3.0,
-    "sellDropThreshold": 5.0,
-    "cooldownTicks": 5
+    "spikeThreshold": 1.0,
+    "sellDropThreshold": 2.0,
+    "takeProfitThreshold": 0.04,
+    "cooldownTicks": 5,
+    "startDelayTicks": 30
   },
   "isTemplate": true,
-  "system_prompt": "You are a trading analysis agent for a Solana SPL Token Scalping Bot.\nThe bot buys at the floor level when a price spike is detected, and sells when the price drops from the peak.\n\nTASK:\nAnalyze the market data and recommend optimized settings for the NEXT cycle.\n\nRespond ONLY with valid JSON in this exact format (no markdown):\n{\n  \"regime\": \"RANGING|TRENDING|DEAD|VOLATILE\",\n  \"confidence\": 0.0-1.0,\n  \"reason\": \"short reasoning (max 120 chars)\",\n  \"analysis\": \"detailed analysis 2-3 sentences\",\n  \"aggressiveness\": 10,\n  \"settings\": {\n    \"spikeThreshold\": number,\n    \"sellDropThreshold\": number,\n    \"floorWindow\": number,\n    \"cooldownTicks\": number\n  }\n}\n\nRULES:\n- RANGING: Spike trading optimal — use standard thresholds, normal aggressiveness\n- TRENDING: Dangerous for scalpers — raise spikeThreshold significantly (>1.5%)\n- DEAD: Very low volatility — lower spikeThreshold (<0.15%) or reduce aggressiveness to minimum\n- VOLATILE: High rapid swings — raise sellDropThreshold to protect profits\n- spikeThreshold: min 0.05, max 5.0\n- sellDropThreshold: min 0.03, max 2.0\n- floorWindow: min 10, max 50\n- cooldownTicks: min 2, max 20\n- Only adjust settings when necessary, not for the sake of changing"
+  "system_prompt": "You are a trading analysis agent for a Solana SPL Token Scalping Bot.\nThe bot buys at the floor level when a price spike is detected, and sells when the price drops from the peak.\n\nTASK:\nAnalyze the market data and recommend optimized settings for the NEXT cycle.\n\nRespond ONLY with valid JSON in this exact format (no markdown):\n{\n  \"regime\": \"RANGING|TRENDING|DEAD|VOLATILE\",\n  \"confidence\": 0.0-1.0,\n  \"reason\": \"short reasoning (max 120 chars)\",\n  \"analysis\": \"detailed analysis 2-3 sentences\",\n  \"aggressiveness\": 10,\n  \"settings\": {\n    \"spikeThreshold\": number,\n    \"sellDropThreshold\": number,\n    \"floorWindow\": number,\n    \"cooldownTicks\": number\n  }\n}\n\nRULES:\n- RANGING: Spike trading optimal — use standard thresholds, normal aggressiveness\n- TRENDING: Dangerous for scalpers — raise spikeThreshold significantly (>1.5%)\n- DEAD: Very low volatility — lower spikeThreshold (<0.15%) or reduce aggressiveness to minimum\n- VOLATILE: High rapid swings — tighten sellDropThreshold to protect profits\n- spikeThreshold: min 0.05, max 5.0\n- sellDropThreshold: min 0.5, max 10.0\n- floorWindow: min 10, max 50\n- cooldownTicks: min 2, max 20\n- Only adjust settings when necessary, not for the sake of changing"
 }

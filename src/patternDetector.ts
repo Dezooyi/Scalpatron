@@ -21,6 +21,7 @@ export interface PatternSettings {
   sellDropThreshold: number; // % Rückgang vom Peak = Sell-Signal (default: 0.05)
   cooldownTicks: number;     // Ticks warten nach Trade (default: 15)
   takeProfitThreshold: number; // % above entry price = take-profit sell (default: 0.10)
+  startDelayTicks: number;   // Ticks nach Bot-Start vor erstem BUY (default: 30)
 }
 
 export const DEFAULT_SETTINGS: PatternSettings = {
@@ -29,6 +30,7 @@ export const DEFAULT_SETTINGS: PatternSettings = {
   sellDropThreshold: 5.0,   // 5% trailing stop — lets moves develop before exiting
   cooldownTicks: 15,
   takeProfitThreshold: 0.10, // 10% take-profit — 8% net after 2% fee
+  startDelayTicks: 30,      // ~60s at 2s/tick — prevents immediate first buy on bot start
 };
 
 export class PatternDetector {
@@ -37,6 +39,7 @@ export class PatternDetector {
   private peakPrice = 0;
   private entryPrice = 0;
   private cooldown = 0;
+  private startDelayTicksRemaining = 0;
 
   constructor(settings?: Partial<PatternSettings>) {
     this.settings = { ...DEFAULT_SETTINGS, ...settings };
@@ -44,6 +47,11 @@ export class PatternDetector {
 
   updateSettings(settings: Partial<PatternSettings>): void {
     Object.assign(this.settings, settings);
+  }
+
+  /** Activate the post-start BUY delay. Must be called when the bot starts. */
+  startCooldown(): void {
+    this.startDelayTicksRemaining = this.settings.startDelayTicks;
   }
 
   analyze(history: PricePoint[]): PatternResult {
@@ -87,6 +95,12 @@ export class PatternDetector {
 
     if (this.cooldown > 0) {
       this.cooldown--;
+      return result;
+    }
+
+    if (this.startDelayTicksRemaining > 0) {
+      this.startDelayTicksRemaining--;
+      result.reason = `start cooldown (${this.startDelayTicksRemaining + 1}/${this.settings.startDelayTicks} ticks remaining)`;
       return result;
     }
 

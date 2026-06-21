@@ -16,6 +16,8 @@ import {
   saveAgentHistory,
   getAgentHistory as getAgentHistoryFromDb,
   getRegimePerformance,
+  getStrategyRegimePerformance,
+  getForceMultiplierTierStats,
   getRecentAdvicesWithOutcomes,
   saveAgentConfig,
   loadAgentConfig,
@@ -26,10 +28,13 @@ import {
   type TimeWindowPerformance,
   type TimeWindowDrift,
   type LessonEntry,
+  type StrategyRegimePerformance,
+  type ForceMultiplierTierStats,
   db,
 } from './db.js';
 import { generateLessons } from './lessonsGenerator.js';
 import { PriceFeed } from './priceFeed.js';
+import { isScalpingType } from './strategyEngine.js';
 
 // --- Types ---
 
@@ -90,6 +95,12 @@ export interface OllamaAdvice {
     risk_management?: { position_size?: number };
     entry_condition_hints?: string;
   };
+  paetAdjustments?: {             // PAET-specific parameter hints
+    collapse_threshold_pct?: number;
+    evacuation_ticks?: number;
+    safety_coefficient_k?: number;
+    volatility_sigma_multiplier?: number;
+  };
   strategySwitch?: {              // ADR-011 Phase B: optional strategy-type switch
     fromStrategyType: string;
     toStrategyType: string;
@@ -133,15 +144,56 @@ const OLLAMA_URL = process.env.OLLAMA_URL ?? 'http://localhost:11434';
 const STRATEGY_TYPE_GUIDANCE: Record<string, string> = {
   scalping: `STRATEGY TYPE: scalping (Range Spike Scalper)
 Optimizable parameters (in "settings" field):
-- floorWindow: 100–2000 Ticks (window for floor calculation)
+- floorWindow: 10–50 Ticks (window for floor calculation)
 - spikeThreshold: 0.05–5.0% (minimum spike above floor)
-- sellDropThreshold: 0.03–2.0% (drop from peak → SELL)
+- sellDropThreshold: 0.5–10.0% (drop from peak → SELL)
 - cooldownTicks: 2–20 (cooldown after trade)
 Recommendations by regime:
 - RANGING: normal thresholds, adjust aggressiveness based on win rate
 - TRENDING: increase spikeThreshold (>1.5%), reduce aggressiveness
 - DEAD: lower spikeThreshold (<0.15%) or set aggressiveness to minimum
-- VOLATILE: increase sellDropThreshold, reduce aggressiveness`,
+- VOLATILE: tighten sellDropThreshold to protect profits, reduce aggressiveness`,
+
+  'scalping-adaptive': `STRATEGY TYPE: scalping-adaptive (Adaptive Range Spike Scalper)
+Same optimizable parameters as the base scalping strategy — return them in the "settings" field:
+- floorWindow: 10–50 Ticks (window for floor calculation)
+- spikeThreshold: 0.05–5.0% (minimum spike above floor)
+- sellDropThreshold: 0.5–10.0% (drop from peak → SELL)
+- cooldownTicks: 2–20 (cooldown after trade)
+The bot also runs an internal adaptive fork that may temporarily widen thresholds during
+warmup, high volatility, or unfavorable conditions. Your "settings" recommendations are
+treated as the BASELINE the adaptive fork will adapt around, so optimize for the typical
+regime rather than edge cases.
+Recommendations by regime:
+- RANGING: normal thresholds, optimize for win rate vs the bot's historical average
+- TRENDING: increase spikeThreshold (>1.5%) to avoid buying pullbacks, reduce aggressiveness
+- DEAD: lower spikeThreshold (<0.15%) or set aggressiveness to minimum
+- VOLATILE: tighten sellDropThreshold to protect profits, strongly reduce aggressiveness`,
+
+  paet: `STRATEGY TYPE: paet (Predictive Anomaly & Evacuation Trigger)
+Decomposes price history via STL (Trend + Seasonal + Residual) with FFT cycle filtering
+and triggers an evacuation SELL using 1st/2nd-order derivatives + Point-of-No-Return logic.
+The bot's false-alarm penalty ω self-calibrates from observed outcomes.
+
+Optimizable parameters (in "paetAdjustments" field, NOT in "settings"):
+- collapse_threshold_pct: 0.05–0.50 (fraction of peak price that defines a collapse)
+- evacuation_ticks: 1–10 (candles allocated for safe exit before projected collapse)
+- safety_coefficient_k: 1–5 (multiplier for ω in the PNR budget formula)
+- volatility_sigma_multiplier: 1.0–4.0 (residual-band width in σ units)
+
+Static fields (informational, do not return as adjustments): stl_seasonal_period,
+stl_trend_window, min_history_candles, acceleration_ema_period, entry_mode,
+entry_cooldown_ticks, stop_loss_pct, false_alarm_penalty_omega.
+
+Recommendations by regime:
+- RANGING: standard parameters — cycles are predictable, FFT filters them out
+- TRENDING: lower evacuation_ticks (2–3) — exits must be faster in fast-moving trends
+- VOLATILE: raise collapse_threshold_pct (0.30–0.40) — more room before treating as collapse
+- DEAD: lower collapse_threshold_pct (0.10–0.15) — any sustained decline is significant
+
+RULES:
+- Return your tuned numbers ONLY inside "paetAdjustments", omit the "settings" field.
+- aggressiveness is supported normally (PAET inherits the global aggressiveness ceiling).`,
 
   trend: `STRATEGY TYPE: trend (EMA Trend Following)
 Optimizable parameters (in "strategyAdjustments.indicators" array):
@@ -406,6 +458,83 @@ function mixPatternSettings(
   return out;
 }
 
+// --- Robust JSON extraction from model output ---
+// Reasoning models (e.g. Qwen3) frequently wrap their answer in <think>…</think>
+// blocks or markdown code fences, and sometimes truncate on maxTokens. The naive
+// greedy /\{[\s\S]*\}/ regex then captures garbage or fails to parse. These
+// helpers clean the raw output and extract the first balanced JSON object.
+
+const AGENT_PARSE_ERROR_LOG = path.join(process.cwd(), 'logs', 'agent-parse-errors.jsonl');
+
+function logAgentParseFailure(botId: string | undefined, model: string | undefined, raw: string, reason: string): void {
+  try {
+    const dir = path.dirname(AGENT_PARSE_ERROR_LOG);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const entry = JSON.stringify({
+      timestamp: Date.now(),
+      botId: botId ?? null,
+      model: model ?? null,
+      reason,
+      raw,
+    });
+    fs.appendFileSync(AGENT_PARSE_ERROR_LOG, entry + '\n', 'utf-8');
+  } catch {
+    // Logging must never break the analysis loop.
+  }
+}
+
+// Remove <think>…</think> blocks (and an unterminated trailing <think>…) plus
+// markdown code fences, so the JSON extractor sees only the payload.
+function cleanModelOutput(raw: string): string {
+  let s = raw;
+  s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  s = s.replace(/<think>[\s\S]*$/gi, '');
+  s = s.replace(/```(?:json)?/gi, '');
+  return s;
+}
+
+// Extract the first top-level balanced {...} substring, respecting string
+// literals and escapes. Returns null when no balanced object exists (e.g.
+// output truncated mid-object by maxTokens).
+function extractBalancedJson(s: string): string | null {
+  const start = s.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inStr = false;
+  let escape = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (escape) escape = false;
+      else if (ch === '\\') escape = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+// Parse JSON, tolerating the trailing commas some models emit before } or ].
+// Never throws — returns null when the candidate cannot be parsed.
+function tryLenientJsonParse(candidate: string): unknown | null {
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    try {
+      const cleaned = candidate.replace(/,\s*([}\]])/g, '$1');
+      return JSON.parse(cleaned);
+    } catch {
+      return null;
+    }
+  }
+}
+
 // --- Main Agent Class ---
 
 import type { BotManager } from './botManager.js';
@@ -417,11 +546,16 @@ export class OllamaAgent {
   private running = false;
   analyzing = false;
 
+  // Defence-in-Depth: Queue ist bereits durch enqueueBot-Dedup auf die Bot-Anzahl begrenzt.
+  // Diese Kappe schuetzt zusaetzlich vor unbeabsichtigtem Wachstum, falls spaeter
+  // weitere Einreih-Stellen ohne Dedup hinzukommen.
+  private static readonly MAX_QUEUE_SIZE = 256;
+
   private analysisQueue: { botId: string; forceMultiplier?: number }[] = [];
   private drainingQueue = false;
 
   private botManager: BotManager | null = null;
-  private onAdvice: ((botId: string, advice: OllamaAdvice) => void) | null = null;
+  private onAdvice: ((botId: string, advice: OllamaAdvice, applied: boolean) => void) | null = null;
   private broadcast: ((eventName: string, data: any) => void) | null = null;
 
   private adviceHistory: OllamaAdvice[] = [];
@@ -450,7 +584,7 @@ export class OllamaAgent {
 
   connect(
     botManager: BotManager,
-    onAdvice: (botId: string, advice: OllamaAdvice) => void,
+    onAdvice: (botId: string, advice: OllamaAdvice, applied: boolean) => void,
     broadcast?: (eventName: string, data: any) => void,
   ): void {
     this.botManager = botManager;
@@ -546,9 +680,12 @@ export class OllamaAgent {
   }
 
   private enqueueBot(botId: string, forceMultiplier?: number): void {
-    if (!this.analysisQueue.some((q) => q.botId === botId)) {
-      this.analysisQueue.push({ botId, forceMultiplier });
+    if (this.analysisQueue.some((q) => q.botId === botId)) return;
+    if (this.analysisQueue.length >= OllamaAgent.MAX_QUEUE_SIZE) {
+      // Aelteste Eintraege verwerfen, um ein ungebremstes Wachstum zu verhindern.
+      this.analysisQueue.splice(0, this.analysisQueue.length - OllamaAgent.MAX_QUEUE_SIZE + 1);
     }
+    this.analysisQueue.push({ botId, forceMultiplier });
   }
 
   private async runCycle(): Promise<void> {
@@ -683,6 +820,8 @@ export class OllamaAgent {
     }
 
     const regimePerf = getRegimePerformance(state.id);
+    const strategyRegimePerf = getStrategyRegimePerformance(state.id, 3);
+    const forceMultiplierStats = getForceMultiplierTierStats(state.id, 3);
     const recentAdvices = getRecentAdvicesWithOutcomes(state.id, 5);
 
     // ADR-011 Phase A: time-window + drift for prompt
@@ -729,7 +868,7 @@ export class OllamaAgent {
       state,
       botTokenMint,
       openPositionBlock,
-      { hourPerf, dayPerf, hourDrift, dayDrift, lessons },
+      { hourPerf, dayPerf, hourDrift, dayDrift, lessons, strategyRegimePerf, forceMultiplierStats },
     );
 
     const activeStrategyType = (state as any).strategyType ?? 'scalping';
@@ -747,7 +886,7 @@ export class OllamaAgent {
       throw err;
     }
 
-    const advice = this.parseResponse(response, settings, lessons);
+    const advice = this.parseResponse(response, settings, lessons, state.id, this.config.model);
 
     if (!advice) {
       logger.warn(state.id, 'AI_AGENT', "Analysis failed: No valid JSON received.");
@@ -792,12 +931,15 @@ export class OllamaAgent {
     this.adviceHistory.unshift(advice);
     if (this.adviceHistory.length > this.maxHistoryLength) this.adviceHistory.pop();
 
-    this.onAdvice?.(state.id, advice);
-
     if (applied) {
       const mixedSettings = mixPatternSettings(settings, advice.adjustedSettings, mix);
       if (Object.keys(mixedSettings).length > 0) {
-        bot.updateSettings(mixedSettings);
+        // Persist AI-adjusted scalping settings via BotManager so they survive restarts.
+        if (this.botManager) {
+          this.botManager.updateBotSettings(state.id, mixedSettings);
+        } else {
+          bot.updateSettings(mixedSettings);
+        }
       }
       if (advice.aggressiveness !== undefined) {
         const curAggr = (state as any).aiAggressiveness ?? state.aggressiveness ?? 10;
@@ -807,8 +949,11 @@ export class OllamaAgent {
       }
       // Strategy param tweaks are only applied when the user is willing to
       // commit to a meaningful portion of the AI's recommendation (>= 50%).
-      if (advice.strategyAdjustments && mix >= 0.5) {
-        bot.applyStrategyAdjustments(advice.strategyAdjustments);
+      if ((advice.strategyAdjustments || advice.paetAdjustments) && mix >= 0.5) {
+        bot.applyStrategyAdjustments({
+          ...(advice.strategyAdjustments ?? {}),
+          paetAdjustments: advice.paetAdjustments,
+        });
       }
       // ADR-011 Phase B: strategy switch with safety gate.
       // ADR-012: a switch is treated as a high-impact change. We only allow
@@ -845,6 +990,8 @@ export class OllamaAgent {
       console.log(`[OllamaAgent] Bot ${state.name} Analyse gespeichert (nicht angewendet: ${why}, Force=${fm}%)`);
       logger.info(state.id, 'AI_AGENT', `Analyse fertig (nicht angewendet). ${why}, Force=${fm}%`);
     }
+
+    this.onAdvice?.(state.id, advice, applied);
   }
 
   private async buildPrompt(
@@ -865,6 +1012,8 @@ export class OllamaAgent {
       hourDrift: TimeWindowDrift[];
       dayDrift: TimeWindowDrift[];
       lessons: LessonEntry[];
+      strategyRegimePerf?: StrategyRegimePerformance[];
+      forceMultiplierStats?: ForceMultiplierTierStats[];
     },
   ): Promise<string> {
     // ASCII sparkline replaces verbose raw price samples (~310 token savings)
@@ -969,6 +1118,24 @@ export class OllamaAgent {
       ).join('\n');
     }
 
+    // Strategy × Regime matrix
+    let strategyRegimeBlock = 'No strategy-regime data yet.';
+    const srPerf = extra?.strategyRegimePerf ?? [];
+    if (srPerf.length > 0) {
+      strategyRegimeBlock = srPerf
+        .map(r => `- ${r.strategyType}/${r.regime}: ${r.winRate}% WR, avg PnL ${r.avgPnl.toFixed(3)}% (n=${r.totalTrades})`)
+        .join('\n');
+    }
+
+    // Force-multiplier effectiveness
+    let fmBlock = 'No force-multiplier data yet.';
+    const fmStats = extra?.forceMultiplierStats ?? [];
+    if (fmStats.length > 0) {
+      fmBlock = fmStats
+        .map(f => `- AI trust ${f.rangeLabel}: ${f.winRate}% WR, avg PnL ${f.avgPnl.toFixed(3)}%, avg conf ${f.avgConfidence}% (n=${f.totalTrades})`)
+        .join('\n');
+    }
+
     const strategyInfo = state.strategyType
       ? `Active Strategy: ${state.strategyType} (ID: ${state.strategyId ?? 'legacy'})`
       : 'Active Strategy: scalping (PatternDetector, Legacy Mode)';
@@ -1031,12 +1198,27 @@ export class OllamaAgent {
     }
 
     let currentSettingsBlock = '';
-    if (state.strategyType === 'scalping' || !state.strategyType) {
+    if (isScalpingType(state.strategyType ?? '') || !state.strategyType) {
       currentSettingsBlock = `CURRENT SETTINGS:
 - floorWindow: ${settings.floorWindow}
 - spikeThreshold: ${settings.spikeThreshold}%
 - sellDropThreshold: ${settings.sellDropThreshold}%
 - cooldownTicks: ${settings.cooldownTicks}`;
+    } else if (state.strategyType === 'paet' && state.strategyConfig?.paet_settings) {
+      const ps = state.strategyConfig.paet_settings;
+      currentSettingsBlock = `CURRENT SETTINGS (PAET):
+- collapse_threshold_pct: ${ps.collapse_threshold_pct}
+- evacuation_ticks: ${ps.evacuation_ticks}
+- safety_coefficient_k: ${ps.safety_coefficient_k}
+- volatility_sigma_multiplier: ${ps.volatility_sigma_multiplier}
+- stl_trend_window: ${ps.stl_trend_window}
+- stl_seasonal_period: ${ps.stl_seasonal_period}
+- acceleration_ema_period: ${ps.acceleration_ema_period}
+- min_history_candles: ${ps.min_history_candles}
+- entry_mode: ${ps.entry_mode}
+- entry_cooldown_ticks: ${ps.entry_cooldown_ticks}
+- stop_loss_pct: ${ps.stop_loss_pct}
+- omega (false_alarm_penalty): ${ps.false_alarm_penalty_omega}`;
     } else if (state.strategyConfig) {
       const config = state.strategyConfig;
       currentSettingsBlock = `CURRENT STRATEGY PARAMETERS (${state.strategyType}):
@@ -1096,6 +1278,12 @@ ${tradesBlock}
 REGIME PERFORMANCE (historical):
 ${regimePerfBlock}
 
+STRATEGY × REGIME MATRIX (which strategy works in which regime):
+${strategyRegimeBlock}
+
+AI TRUST EFFECTIVENESS (force-multiplier tiers):
+${fmBlock}
+
 TIME-WINDOW PERFORMANCE (per-hour / per-weekday buckets):
 ${timeWindowBlock}
 
@@ -1120,77 +1308,79 @@ ${formatCandleRows(m15Candles, 5)}`;
   private async queryOpencode(userContent: string, systemPrompt?: string): Promise<string> {
     const tempPromptPath = path.join(os.tmpdir(), `bot_prompt_${Date.now()}.txt`);
     const fullPrompt = `${systemPrompt ?? this.config.systemPrompt}\n\n${userContent}`;
-    
+
     try {
       fs.writeFileSync(tempPromptPath, fullPrompt);
       console.log(`[OllamaAgent] Querying opencode CLI (model: ${this.config.model}) via file ${tempPromptPath}...`);
-      
+
       return new Promise((resolve, reject) => {
-        // Opencode bietet ein .cmd Wrapper auf Windows, der CLI-kompatibel ist.
         const opencodeCmd = 'C:\\Users\\info\\AppData\\Roaming\\npm\\opencode.cmd';
         const args = [
           'run',
           'Analyze market data from the attached file. Respond ONLY with the requested JSON.',
           '-m', this.config.model,
-          '-f', tempPromptPath
+          '-f', tempPromptPath,
+          '--format', 'json',
         ];
-        
+
         console.log(`[OllamaAgent] Executing: ${opencodeCmd} ${args.join(' ')}`);
 
         const child = spawn(opencodeCmd, args, { shell: true, timeout: 180000 });
-
-        // WICHTIG: stdin schliessen, sonst haengt der Prozess evtl. (wartet auf Input)
         child.stdin?.end();
 
         let stdout = '';
         let stderr = '';
 
         if (child.stdout) {
-          child.stdout.on('data', (data) => {
-            stdout += data.toString();
-          });
+          child.stdout.on('data', (data) => { stdout += data.toString(); });
         }
-
         if (child.stderr) {
-          child.stderr.on('data', (data) => {
-            stderr += data.toString();
-          });
+          child.stderr.on('data', (data) => { stderr += data.toString(); });
         }
 
         child.on('close', (code) => {
-          // Cleanup
           try { if (fs.existsSync(tempPromptPath)) fs.unlinkSync(tempPromptPath); } catch (e) { /* ignore */ }
 
           if (code !== 0) {
             console.error(`[OllamaAgent] opencode error (Code ${code})`);
-            console.error(`[OllamaAgent] Stderr Snippet: ${stderr.slice(0, 500)}`);
+            console.error(`[OllamaAgent] Stderr: ${stderr.slice(0, 500)}`);
             return reject(new Error(`opencode error: ${code} - ${stderr.slice(0, 100)}`));
           }
 
-          // JSON extrahieren (zwischen erstem { und letztem })
-          // Wir entfernen vorher moegliche Markdown-Codeblocks
-          let normalized = stdout.replace(/```json/g, '').replace(/```/g, '');
+          // --format json outputs newline-delimited JSON events.
+          // We collect all type="text" parts and concatenate them into the model response.
+          const lines = stdout.split('\n');
+          let modelText = '';
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const ev = JSON.parse(trimmed) as { type?: string; part?: { type?: string; text?: string } };
+              if (ev.type === 'text' && ev.part?.type === 'text' && ev.part.text) {
+                modelText += ev.part.text;
+              }
+            } catch {
+              // not a JSON event line — ignore (can be status lines on stderr bleed-through)
+            }
+          }
 
-          const firstBrace = normalized.indexOf('{');
-          const lastBrace = normalized.lastIndexOf('}');
-          
-          let cleaned = '';
-          if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-            cleaned = normalized.substring(firstBrace, lastBrace + 1).trim();
-          } else {
-            cleaned = normalized.trim();
+          console.log(`[OllamaAgent] opencode: ${lines.length} events, modelText=${modelText.length}B`);
+          if (modelText.length === 0) {
+            console.warn(`[OllamaAgent] No text events found. stdout snippet: ${stdout.slice(0, 400)}`);
           }
-          
-          if (cleaned.length > 0) {
-            console.log(`[OllamaAgent] opencode returned ${cleaned.length} bytes.`);
-          }
-          
-          // Strip markdown if it persists
+
+          // Strip markdown code fences and thinking blocks the model may still wrap output in
+          let cleaned = modelText
+            .replace(/```json/gi, '').replace(/```/g, '')
+            .replace(/<think>[\s\S]*?<\/think>/gi, '')
+            .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+            .trim();
+
           const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
           if (jsonMatch) {
-             resolve(jsonMatch[0]);
+            resolve(jsonMatch[0]);
           } else {
-             resolve(cleaned);
+            resolve(cleaned);
           }
         });
 
@@ -1278,15 +1468,37 @@ ${formatCandleRows(m15Candles, 5)}`;
     return data.message.content;
   }
 
-  private parseResponse(raw: string, currentSettings: PatternSettings, lessons: LessonEntry[] = []): OllamaAdvice | null {
-    try {
-      const jsonMatch = raw.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        console.warn('[OllamaAgent] Kein JSON in Antwort:', raw.slice(0, 200));
-        return null;
-      }
+  private parseResponse(
+    raw: string,
+    currentSettings: PatternSettings,
+    lessons: LessonEntry[] = [],
+    botId?: string,
+    model?: string,
+  ): OllamaAdvice | null {
+    // Strip reasoning (<think>) blocks and markdown fences, then extract the
+    // first balanced JSON object. This survives Qwen3 reasoning output, code
+    // fences, and most maxTokens-truncation cases that broke the old greedy
+    // regex /\{[\s\S]*\}/.
+    const cleaned = cleanModelOutput(raw);
+    const candidate = extractBalancedJson(cleaned);
 
-      const parsed = JSON.parse(jsonMatch[0]) as {
+    if (!candidate) {
+      const reason = cleaned.includes('{') ? 'unbalanced-or-truncated-json' : 'no-json-object';
+      console.warn(`[OllamaAgent] Kein gültiges JSON (${reason}):`, raw.slice(0, 200));
+      logAgentParseFailure(botId, model, raw, reason);
+      return null;
+    }
+
+    const parsedObj = tryLenientJsonParse(candidate);
+    if (parsedObj === null || typeof parsedObj !== 'object') {
+      console.warn('[OllamaAgent] JSON Parse Fehler für Kandidat:', candidate.slice(0, 300));
+      console.warn('[OllamaAgent] Raw:', raw.slice(0, 300));
+      logAgentParseFailure(botId, model, raw, 'parse-error');
+      return null;
+    }
+
+    try {
+      const parsed = parsedObj as {
         regime?: string;
         confidence?: number;
         reason?: string;
@@ -1298,6 +1510,12 @@ ${formatCandleRows(m15Candles, 5)}`;
           scalping_settings?: Partial<PatternSettings>;
           risk_management?: { position_size?: number };
           entry_condition_hints?: string;
+        };
+        paetAdjustments?: {
+          collapse_threshold_pct?: number;
+          evacuation_ticks?: number;
+          safety_coefficient_k?: number;
+          volatility_sigma_multiplier?: number;
         };
         strategySwitch?: {
           fromStrategyType?: string;
@@ -1318,7 +1536,7 @@ ${formatCandleRows(m15Candles, 5)}`;
           newSettings.spikeThreshold = parseFloat(Math.max(0.05, Math.min(5.0, s.spikeThreshold)).toFixed(3));
         }
         if (typeof s.sellDropThreshold === 'number') {
-          newSettings.sellDropThreshold = parseFloat(Math.max(0.03, Math.min(2.0, s.sellDropThreshold)).toFixed(3));
+          newSettings.sellDropThreshold = parseFloat(Math.max(0.5, Math.min(10.0, s.sellDropThreshold)).toFixed(3));
         }
         if (typeof s.floorWindow === 'number') {
           newSettings.floorWindow = Math.max(10, Math.min(50, Math.round(s.floorWindow)));
@@ -1344,6 +1562,7 @@ ${formatCandleRows(m15Candles, 5)}`;
       }
 
       const strategyAdjustments = parsed.strategyAdjustments;
+      const paetAdjustments = parsed.paetAdjustments as OllamaAdvice['paetAdjustments'] | undefined;
 
       // ADR-011 Phase B: optional strategy switch
       let strategySwitch: OllamaAdvice['strategySwitch'] | undefined;
@@ -1381,11 +1600,13 @@ ${formatCandleRows(m15Candles, 5)}`;
         timestamp: Date.now(),
         aggressiveness,
         strategyAdjustments,
+        paetAdjustments,
         strategySwitch,
       };
     } catch (err) {
       console.warn('[OllamaAgent] JSON Parse Fehler:', (err as Error).message);
       console.warn('[OllamaAgent] Raw:', raw.slice(0, 300));
+      logAgentParseFailure(botId, model, raw, `parse-error: ${(err as Error).message}`);
       return null;
     }
   }

@@ -24,7 +24,6 @@ type DexScreenerResponse = {
   pairs: DexScreenerPair[] | null;
 };
 
-// Jupiter Price API Response
 type JupiterPriceResponse = {
   data: Record<string, {
     price: string;
@@ -34,170 +33,91 @@ type JupiterPriceResponse = {
   timeTaken: number;
 };
 
-// Rate Limiting Konfiguration (aus ENV oder Default)
-const RATE_LIMIT_CONFIG = {
-  minRequestInterval: CONFIG.PRICE_FEED_REQUEST_INTERVAL_MS, // Mindestabstand zwischen API-Calls
-  maxRetries: CONFIG.PRICE_FEED_MAX_RETRIES,                 // Maximale Retry-Versuche bei 429
-  baseRetryDelay: 5000,     // Basis Retry-Delay (5s)
-  maxRetryDelay: 60000,     // Maximales Delay (60s)
-} as const;
+// DexScreener Free Tier: 60 req/min global.
+// Wir nutzen 55 req/min (≈92 % Budget) als sicherer Zielwert mit 8 % Headroom.
+// → 1 Request alle 1091 ms. Bei N unique Mints: jeder Mint alle N*1091 ms aktualisiert.
+const SAFE_RPM = 55;
+export const SLOT_MS = Math.ceil(60_000 / SAFE_RPM); // 1091 ms pro Request-Slot
 
-// Per-token Queue für API-Requests
-// lastRequestTime ist pro Mint-Adresse getrennt, damit 6 Bots sich nicht gegenseitig blockieren
-const lastRequestTimeMap: Map<string, number> = new Map();
-let pendingRequests: Map<string, Promise<number | null>> = new Map();
+// Per-Mint 429-Backoff: Slot wird in diesem Zyklus übersprungen.
+const backoffUntil: Map<string, number> = new Map();
 
-async function wait(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function fetchTokenPrice(mintAddress: string, retryCount = 0): Promise<number | null> {
-  // Prüfen ob bereits eine Anfrage für diese Mint-Adresse läuft (Deduplizierung)
-  const cacheKey = mintAddress;
-  if (pendingRequests.has(cacheKey)) {
-    return pendingRequests.get(cacheKey)!;
+async function fetchTokenPrice(mintAddress: string): Promise<number | null> {
+  // Respektiere aktiven 429-Backoff für diesen Mint
+  const until = backoffUntil.get(mintAddress) ?? 0;
+  if (Date.now() < until) {
+    const remaining = Math.round((until - Date.now()) / 1000);
+    console.warn(`[PriceFeed] ⏳ ${mintAddress.slice(0, 8)}… Backoff noch ${remaining}s, überspringe.`);
+    return null;
   }
 
-  // Rate Limiting: Warten bis Mindestabstand eingehalten ist (pro Token getrennt)
-  const now = Date.now();
-  const lastRequest = lastRequestTimeMap.get(mintAddress) ?? 0;
-  const timeSinceLastRequest = now - lastRequest;
-  if (timeSinceLastRequest < RATE_LIMIT_CONFIG.minRequestInterval) {
-    const delay = RATE_LIMIT_CONFIG.minRequestInterval - timeSinceLastRequest;
-    console.log(`[PriceFeed] Rate Limiting: Warte ${Math.round(delay)}ms vor API-Request für ${mintAddress}`);
-    await wait(delay);
-  }
+  try {
+    if (CONFIG.PRICE_FEED_PROVIDER === 'jupiter') {
+      const url = `${CONFIG.PRICE_FEED_URL}?ids=${mintAddress}&vsToken=USDC`;
+      console.log(`[PriceFeed] 📡 Jupiter: ${mintAddress}`);
+      const res = await fetch(url);
 
-  const fetchPromise = (async (): Promise<number | null> => {
-    try {
-      lastRequestTimeMap.set(mintAddress, Date.now());
-      
-      // URL und Request basierend auf Provider zusammenbauen
-      if (CONFIG.PRICE_FEED_PROVIDER === 'jupiter') {
-        // Jupiter Price API: https://price.jup.ag/v6/price?ids=SOL&vsToken=USDC
-        const url = `${CONFIG.PRICE_FEED_URL}?ids=${mintAddress}&vsToken=USDC`;
-        console.log(`[PriceFeed] 📡 Jupiter Request: ${mintAddress}`);
-        
-        const res = await fetch(url);
-        
-        // 429 Too Many Requests - Exponential Backoff
-        if (res.status === 429) {
-          const retryDelay = Math.min(
-            RATE_LIMIT_CONFIG.baseRetryDelay * Math.pow(2, retryCount),
-            RATE_LIMIT_CONFIG.maxRetryDelay
-          );
-          console.warn(
-            `[PriceFeed] ⚠️  RATE LIMIT (429) für ${mintAddress}. Retry #${retryCount + 1}/${RATE_LIMIT_CONFIG.maxRetries} in ${Math.round(retryDelay / 1000)}s`
-          );
-          
-          if (retryCount < RATE_LIMIT_CONFIG.maxRetries) {
-            await wait(retryDelay);
-            return fetchTokenPrice(mintAddress, retryCount + 1);
-          } else {
-            console.error(`[PriceFeed] ❌ Rate Limit nach ${RATE_LIMIT_CONFIG.maxRetries} Retries. Pausiere bis zum nächsten Poll-Zyklus.`);
-            return null;
-          }
-        }
-        
-        if (!res.ok) {
-          throw new Error(`Jupiter Price API ${res.status}: ${res.statusText}`);
-        }
-        
-        const json = await res.json() as JupiterPriceResponse;
-        const priceData = json.data[mintAddress];
-        if (!priceData || !priceData.price) return null;
-        
-        const price = parseFloat(priceData.price);
-        return isNaN(price) ? null : price;
-        
-      } else {
-        // DexScreener / Andere Provider
-        const url = `${CONFIG.PRICE_FEED_URL}/${mintAddress}`;
-        console.log(`[PriceFeed] 📡 Request an ${CONFIG.PRICE_FEED_PROVIDER}: ${mintAddress}`);
-        
-        const res = await fetch(url);
-        
-        // 429 Too Many Requests - Exponential Backoff
-        if (res.status === 429) {
-          const retryDelay = Math.min(
-            RATE_LIMIT_CONFIG.baseRetryDelay * Math.pow(2, retryCount),
-            RATE_LIMIT_CONFIG.maxRetryDelay
-          );
-          console.warn(
-            `[PriceFeed] ⚠️  RATE LIMIT (429) für ${mintAddress}. Retry #${retryCount + 1}/${RATE_LIMIT_CONFIG.maxRetries} in ${Math.round(retryDelay / 1000)}s`
-          );
-          
-          if (retryCount < RATE_LIMIT_CONFIG.maxRetries) {
-            await wait(retryDelay);
-            return fetchTokenPrice(mintAddress, retryCount + 1);
-          } else {
-            console.error(`[PriceFeed] ❌ Rate Limit nach ${RATE_LIMIT_CONFIG.maxRetries} Retries. Pausiere bis zum nächsten Poll-Zyklus.`);
-            return null;
-          }
-        }
-        
-        // Andere Fehler
-        if (!res.ok) {
-          throw new Error(`${CONFIG.PRICE_FEED_PROVIDER} API ${res.status}: ${res.statusText}`);
-        }
-        
-        const json = (await res.json()) as DexScreenerResponse;
-        if (!json.pairs || json.pairs.length === 0) return null;
-        
-        // Nimm das Pair mit dem höchsten 24h-Volumen (nur Pairs mit gültigem Preis)
-        const validPairs = json.pairs.filter(p => p.priceUsd != null && p.volume?.h24 != null);
-        if (validPairs.length === 0) return null;
-        
-        const best = validPairs.reduce((a, b) => (a.volume.h24 > b.volume.h24 ? a : b));
-        const price = parseFloat(best.priceUsd);
-        return isNaN(price) ? null : price;
+      if (res.status === 429) {
+        backoffUntil.set(mintAddress, Date.now() + 20_000);
+        console.warn(`[PriceFeed] ⚠️  429 Jupiter → Backoff 20s für ${mintAddress.slice(0, 8)}`);
+        return null;
       }
-      
-    } catch (error) {
-      const errorMsg = (error as Error).message;
-      
-      // Netzwerk-Fehler mit Retry
-      if (errorMsg.includes('fetch failed') || errorMsg.includes('network')) {
-        if (retryCount < RATE_LIMIT_CONFIG.maxRetries) {
-          const retryDelay = RATE_LIMIT_CONFIG.baseRetryDelay * Math.pow(2, retryCount);
-          console.warn(
-            `[PriceFeed] ⚠️  Netzwerk-Fehler für ${mintAddress}. Retry #${retryCount + 1} in ${Math.round(retryDelay / 1000)}s`
-          );
-          await wait(retryDelay);
-          return fetchTokenPrice(mintAddress, retryCount + 1);
-        }
+      if (!res.ok) throw new Error(`Jupiter ${res.status}: ${res.statusText}`);
+
+      const json = await res.json() as JupiterPriceResponse;
+      const p = json.data[mintAddress];
+      if (!p?.price) return null;
+      const price = parseFloat(p.price);
+      return isNaN(price) ? null : price;
+
+    } else {
+      // DexScreener / andere Provider
+      const url = `${CONFIG.PRICE_FEED_URL}/${mintAddress}`;
+      console.log(`[PriceFeed] 📡 ${CONFIG.PRICE_FEED_PROVIDER}: ${mintAddress}`);
+      const res = await fetch(url);
+
+      if (res.status === 429) {
+        backoffUntil.set(mintAddress, Date.now() + 20_000);
+        console.warn(`[PriceFeed] ⚠️  429 DexScreener → Backoff 20s für ${mintAddress.slice(0, 8)}`);
+        return null;
       }
-      
-      throw error;
-    } finally {
-      pendingRequests.delete(cacheKey);
+      if (!res.ok) throw new Error(`${CONFIG.PRICE_FEED_PROVIDER} ${res.status}: ${res.statusText}`);
+
+      const json = (await res.json()) as DexScreenerResponse;
+      if (!json.pairs || json.pairs.length === 0) return null;
+
+      const validPairs = json.pairs.filter(p => p.priceUsd != null && p.volume?.h24 != null);
+      if (validPairs.length === 0) return null;
+
+      const best = validPairs.reduce((a, b) => (a.volume.h24 > b.volume.h24 ? a : b));
+      const price = parseFloat(best.priceUsd);
+      return isNaN(price) ? null : price;
     }
-  })();
-  
-  pendingRequests.set(cacheKey, fetchPromise);
-  return fetchPromise;
+
+  } catch (error) {
+    console.error(`[PriceFeed] ❌ Netzwerk-Fehler für ${mintAddress}:`, (error as Error).message);
+    return null;
+  }
 }
 
 export class PriceFeed extends EventEmitter {
   private static instance: PriceFeed;
   private historyMap: Map<string, PricePoint[]> = new Map();
-  private intervalIds: Map<string, ReturnType<typeof setInterval>> = new Map();
   private subscriberCounts: Map<string, number> = new Map();
   private lastPollMap: Map<string, number> = new Map();
-  // Stale-Tracking (ADR-010): letzter Zeitpunkt eines *echten* Preises pro Mint
+  // Stale-Tracking (ADR-010)
   private lastFreshAtMap: Map<string, number> = new Map();
-  // Anzahl aufeinanderfolgender fehlgeschlagener/veralteter Polls pro Mint
   private consecutiveStaleMap: Map<string, number> = new Map();
   private getBotNamesForToken: ((mintAddress: string) => string[]) | null = null;
+
+  // Globaler Stagger-Scheduler (ersetzt per-Mint setInterval)
+  private schedulerTimeout: ReturnType<typeof setTimeout> | null = null;
+  private lastLoggedMintCount = -1;
 
   private constructor() {
     super();
   }
 
-  /**
-   * Setzt eine Callback-Funktion um Bot-Namen für ein Token zu erhalten.
-   * Wird für gruppierte Log-Ausgabe verwendet.
-   */
   public setBotNamesCallback(callback: (mintAddress: string) => string[]): void {
     this.getBotNamesForToken = callback;
   }
@@ -209,18 +129,28 @@ export class PriceFeed extends EventEmitter {
     return PriceFeed.instance;
   }
 
+  /** Effektiver Poll-Abstand pro Mint in ms bei aktueller Mint-Anzahl. */
+  public getEffectiveIntervalMs(): number {
+    const N = this.subscriberCounts.size;
+    return N === 0 ? SLOT_MS : N * SLOT_MS;
+  }
+
+  /** Anzahl unique Mints mit aktiver Subscription. */
+  public getActiveMintCount(): number {
+    return this.subscriberCounts.size;
+  }
+
   public subscribe(mintAddress: string): void {
     const currentCount = this.subscriberCounts.get(mintAddress) || 0;
     this.subscriberCounts.set(mintAddress, currentCount + 1);
 
     if (currentCount === 0) {
-      // First subscriber, start polling
       if (!this.historyMap.has(mintAddress)) {
         this.historyMap.set(mintAddress, []);
       }
+      // Sofortiger erster Tick, danach übernimmt der Scheduler
       this.poll(mintAddress);
-      const intervalId = setInterval(() => this.poll(mintAddress), CONFIG.PRICE_FEED_TICKRATE_MS);
-      this.intervalIds.set(mintAddress, intervalId);
+      this.restartScheduler();
     }
   }
 
@@ -228,19 +158,60 @@ export class PriceFeed extends EventEmitter {
     const currentCount = this.subscriberCounts.get(mintAddress) || 0;
     if (currentCount <= 1) {
       this.subscriberCounts.delete(mintAddress);
-      const intervalId = this.intervalIds.get(mintAddress);
-      if (intervalId) {
-        clearInterval(intervalId);
-        this.intervalIds.delete(mintAddress);
-      }
       this.historyMap.delete(mintAddress);
-      lastRequestTimeMap.delete(mintAddress);
-      pendingRequests.delete(mintAddress);
+      backoffUntil.delete(mintAddress);
+      this.lastPollMap.delete(mintAddress);
       this.lastFreshAtMap.delete(mintAddress);
       this.consecutiveStaleMap.delete(mintAddress);
     } else {
       this.subscriberCounts.set(mintAddress, currentCount - 1);
     }
+    this.restartScheduler();
+  }
+
+  /**
+   * Startet den globalen Stagger-Scheduler neu.
+   * Wird bei jeder Änderung der aktiven Mint-Anzahl aufgerufen.
+   * Verteilt N Mints gleichmäßig auf N * SLOT_MS Zyklusdauer:
+   *   mint[0] → t=0, mint[1] → t=SLOT_MS, mint[2] → t=2*SLOT_MS, …
+   * → Exakt 55 req/min unabhängig von der Mint-Anzahl.
+   */
+  private restartScheduler(): void {
+    if (this.schedulerTimeout !== null) {
+      clearTimeout(this.schedulerTimeout);
+      this.schedulerTimeout = null;
+    }
+
+    const mints = Array.from(this.subscriberCounts.keys());
+    const N = mints.length;
+    if (N === 0) return;
+
+    if (N !== this.lastLoggedMintCount) {
+      const cycleMs = N * SLOT_MS;
+      const updPerMin = (60_000 / cycleMs).toFixed(1);
+      console.log(
+        `[PriceFeed] ⚙️  ${N} Mint(s) aktiv | Slot ${SLOT_MS}ms | Zyklus ${(cycleMs / 1000).toFixed(2)}s` +
+        ` | ~${updPerMin} Updates/Min pro Token | ${SAFE_RPM} req/min gesamt`
+      );
+      this.lastLoggedMintCount = N;
+    }
+
+    // Erster Zyklus startet nach vollständiger Zyklusdauer, da jeder Mint
+    // bereits sofort bei subscribe() gepollt wurde.
+    this.schedulerTimeout = setTimeout(() => this.runCycle(), N * SLOT_MS);
+  }
+
+  /** Führt einen Zyklus aus: pollt alle Mints gestaffelt, plant nächsten Zyklus. */
+  private runCycle(): void {
+    const mints = Array.from(this.subscriberCounts.keys());
+    const N = mints.length;
+    if (N === 0) { this.schedulerTimeout = null; return; }
+
+    mints.forEach((mint, i) => {
+      setTimeout(() => this.poll(mint), i * SLOT_MS);
+    });
+
+    this.schedulerTimeout = setTimeout(() => this.runCycle(), N * SLOT_MS);
   }
 
   public getHistory(mintAddress: string): PricePoint[] {
@@ -265,17 +236,13 @@ export class PriceFeed extends EventEmitter {
 
   public seedHistory(mintAddress: string, points: PricePoint[]): void {
     const history = this.historyMap.get(mintAddress) || [];
-    // Concatenate and sort by timestamp, then unique by timestamp
     const uniquePoints = [...history, ...points]
       .sort((a, b) => a.timestamp - b.timestamp)
-      .filter((point, index, self) => 
+      .filter((point, index, self) =>
         index === 0 || point.timestamp !== self[index - 1].timestamp
       );
-    
-    // Limit to 1000 points
+
     this.historyMap.set(mintAddress, uniquePoints.slice(-1000));
-    // ADR-010: zuletzt bekannten echten Zeitpunkt übernehmen, damit die
-    // Veraltungsdauer auch direkt nach Start/Restore korrekt abgebildet wird.
     if (uniquePoints.length > 0) {
       this.lastFreshAtMap.set(mintAddress, uniquePoints[uniquePoints.length - 1].timestamp);
     }
@@ -286,11 +253,9 @@ export class PriceFeed extends EventEmitter {
     this.lastPollMap.set(mintAddress, Date.now());
     try {
       const price = await fetchTokenPrice(mintAddress);
-      
+
       if (price === null) {
-        // ADR-010: Stale-Price-Isolation. Kein Re-Emit mit Date.now() als „frisch".
-        // Der Bot (price:<mint>-Listener) erhält keinen Punkt -> kein Record/Persist/Trade.
-        // Stattdessen Outage-Status separat signalisieren (für UI/Circuit-Breaker).
+        // ADR-010: Stale-Price-Isolation — kein Re-Emit als frischer Preis.
         const prevCount = this.consecutiveStaleMap.get(mintAddress) ?? 0;
         this.consecutiveStaleMap.set(mintAddress, prevCount + 1);
 
@@ -306,7 +271,6 @@ export class PriceFeed extends EventEmitter {
           console.warn(`[PriceFeed] ❌ Kein Preis für ${mintAddress} und kein Fallback verfügbar.`);
         }
 
-        // Outage-Signal für UI/Stats/Circuit-Breaker (kein Trading-Pfad).
         this.emit('price_stale', {
           mintAddress,
           staleForMs,
@@ -316,13 +280,12 @@ export class PriceFeed extends EventEmitter {
         });
         return;
       }
-      
+
       // --- Echter (frischer) Preis ---
       const now = Date.now();
       const prevFreshAt = this.lastFreshAtMap.get(mintAddress);
 
-      // Outage-Recovery (ADR-010): nach langem Ausfall History bereinigen und
-      // Re-Warmup erzwingen, damit keine veraltete Floor-Basis zu Phantom-Spikes führt.
+      // Outage-Recovery (ADR-010): nach langem Ausfall History bereinigen.
       let recoveredFromOutage = false;
       if (prevFreshAt !== undefined && (now - prevFreshAt) > CONFIG.PRICE_FEED_LONG_OUTAGE_MS) {
         this.historyMap.set(mintAddress, []);
@@ -333,25 +296,22 @@ export class PriceFeed extends EventEmitter {
       this.lastFreshAtMap.set(mintAddress, now);
       this.consecutiveStaleMap.set(mintAddress, 0);
 
-      // Gruppierte Log-Ausgabe mit Token-Symbol und Bot-Namen
       const tokenInfo = getTokenInfo(mintAddress);
       const tokenSymbol = tokenInfo?.symbol ?? mintAddress.slice(0, 8);
       const botNames = this.getBotNamesForToken?.(mintAddress) ?? [];
       const botList = botNames.length > 0 ? ` → [${botNames.join(', ')}]` : '';
-      
+
       console.log(`[PriceFeed] ✅ ${tokenSymbol}: $${price}${botList}`);
       const point: PricePoint = { timestamp: now, price, recoveredFromOutage };
       const history = this.historyMap.get(mintAddress) || [];
       history.push(point);
 
-      // Limit history size to 1000 points per token to save memory
       if (history.length > 1000) history.shift();
       this.historyMap.set(mintAddress, history);
 
       this.emit(`price:${mintAddress}`, point);
-      // Also emit a general price event for the server/UI context
       this.emit('price_update', { mintAddress, ...point });
-      
+
     } catch (e) {
       console.error(`[PriceFeed] ❌ Fehler bei ${mintAddress}:`, (e as Error).message);
     }
@@ -363,8 +323,8 @@ export class PriceFeed extends EventEmitter {
 if (process.argv[1]?.endsWith('priceFeed.ts')) {
   const feed = PriceFeed.getInstance();
   const testMint = 'UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW';
-  console.log(`[Test] Starte Preis-Feed Test für ${testMint}...`);
-  
+  console.log(`[Test] Starte Preis-Feed Test für ${testMint}…`);
+
   feed.subscribe(testMint);
   let ticks = 0;
   feed.on(`price:${testMint}`, (p) => {

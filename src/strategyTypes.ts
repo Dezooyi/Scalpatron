@@ -3,13 +3,15 @@
 
 export type StrategyType =
   | 'scalping'
+  | 'scalping-adaptive'
   | 'trend'
   | 'mean_reversion'
   | 'breakout'
   | 'momentum'
   | 'grid'
   | 'dca'
-  | 'ml';
+  | 'ml'
+  | 'paet';
 
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d';
 
@@ -102,6 +104,25 @@ export interface StrategyConfig {
     interval: string;   // e.g. '1d', '4h', '1h'
     amount: number;     // amount per DCA entry in SOL
   };
+  // PAET-specific config (strategy_type === 'paet')
+  paet_settings?: {
+    stl_seasonal_period?: number;       // 0 = auto-detect via FFT
+    stl_trend_window?: number;
+    volatility_sigma_multiplier?: number;
+    collapse_threshold_pct?: number;
+    evacuation_ticks?: number;
+    safety_coefficient_k?: number;
+    false_alarm_penalty_omega?: number;
+    min_history_candles?: number;
+    acceleration_ema_period?: number;
+    // Entry mode: 'once' = buy at first opportunity after warmup;
+    // 'paet_plus' = selective entry when velocity>0 AND residual>0
+    entry_mode?: 'once' | 'paet_plus';
+    entry_cooldown_ticks?: number;      // min ticks between a SELL and the next BUY
+    // Emergency hard stop-loss as fallback if PNR/anomaly never fires (e.g. dead market).
+    // 0.08 = 8% below entry price triggers forced SELL. 0 = disabled.
+    stop_loss_pct?: number;
+  };
   // Custom system prompt for the Ollama Strategy Assistant
   // If set, overrides the auto-generated prompt for this strategy
   system_prompt?: string;
@@ -131,4 +152,17 @@ export interface StrategySignal {
   spikePercent: number;   // % from floor, or 0
   peakPrice: number;      // trailing peak for SELL calculation
   indicatorValues?: Record<string, number>;  // latest single values for each indicator
+}
+
+// Market context used by strategy forks to adapt parameters programmatically
+export interface MarketContext {
+  hourOfDay: number;              // 0-23, UTC
+  dayOfWeek: number;              // 0-6 (0 = Sunday)
+  session: 'asia' | 'london' | 'ny' | 'overlap' | 'other';
+  lookbackTicks: number;          // number of ticks in the lookback window
+  lookbackMinutes: number;        // approx. minutes covered by the lookback window
+  volatility: number;             // std-dev of returns over lookback, in percent
+  avgRange: number;               // average absolute return per tick, in percent
+  trendBias: 'up' | 'down' | 'neutral';
+  higherTimeframeSignal?: 'bullish' | 'bearish' | 'neutral';
 }

@@ -113,10 +113,35 @@ export class PriceRecorder {
   }
 
   /**
-   * Clean up old data from SQLite database
+   * Clean up old data from SQLite live_feed table.
+   * Returns number of rows deleted.
    */
   cleanup(olderThanMs: number): number {
     return cleanupOldLiveFeedData(olderThanMs);
+  }
+
+  /**
+   * Prune the prices.jsonl flat file by removing entries older than `olderThanMs`.
+   * Rewrites the file in-place; safe to call infrequently (daily).
+   * Returns number of lines removed.
+   */
+  pruneJSONL(olderThanMs: number): number {
+    if (!fs.existsSync(PRICE_FILE)) return 0;
+    const cutoff = Date.now() - olderThanMs;
+    const raw = fs.readFileSync(PRICE_FILE, 'utf-8');
+    const lines = raw.trim().split('\n').filter(Boolean);
+    const kept = lines.filter(l => {
+      try {
+        return (JSON.parse(l) as PricePoint).timestamp >= cutoff;
+      } catch {
+        return false;
+      }
+    });
+    const removed = lines.length - kept.length;
+    if (removed > 0) {
+      fs.writeFileSync(PRICE_FILE, kept.join('\n') + '\n', 'utf-8');
+    }
+    return removed;
   }
 
   /**

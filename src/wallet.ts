@@ -70,6 +70,14 @@ function updateEnvKey(key: string, value: string): void {
   fs.writeFileSync(ENV_PATH, content, 'utf-8');
 }
 
+/**
+ * Exportiert updateEnvKey für andere Module (z. B. Wallet-Setup via API).
+ * NIEMALS verwenden, um Private-Keys ohne Validierung zu schreiben.
+ */
+export function setEnvValue(key: string, value: string): void {
+  updateEnvKey(key, value);
+}
+
 export function loadOrCreateKeypair(mode: 'live' | 'dev' = 'dev'): Keypair {
   if (!CONFIG.WALLET_PRIVATE_KEY) {
     if (mode === 'live') {

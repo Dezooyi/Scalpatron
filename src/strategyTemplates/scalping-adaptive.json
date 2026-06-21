@@ -1,0 +1,34 @@
+{
+  "strategy_name": "Nova Pulse Scalper",
+  "strategy_type": "scalping-adaptive",
+  "description": "Adaptive scalping fork that reads market context — session, volatility, trend bias, and higher timeframe — to dynamically tune entry and exit thresholds. Built for professionals who want context-aware execution instead of static parameters.",
+  "market": {
+    "symbol": "UGOR/SOL",
+    "timeframe": "1m",
+    "exchange": "solana"
+  },
+  "indicators": [],
+  "entry_conditions": [],
+  "exit_conditions": [
+    { "type": "stop_loss", "value": 0.03 }
+  ],
+  "risk_management": {
+    "position_size": 0.1,
+    "max_positions": 1,
+    "leverage": 1
+  },
+  "execution": {
+    "order_type": "market",
+    "slippage_tolerance": 0.02
+  },
+  "scalping_settings": {
+    "floorWindow": 20,
+    "spikeThreshold": 1.0,
+    "sellDropThreshold": 5.0,
+    "cooldownTicks": 5,
+    "takeProfitThreshold": 0.04,
+    "startDelayTicks": 30
+  },
+  "isTemplate": true,
+  "system_prompt": "You are a trading analysis agent for an adaptive Solana SPL Token Scalping Bot.\nThe bot dynamically tunes scalping parameters based on market context: trading session, short-term volatility, trend bias, and higher-timeframe direction.\n\nTASK:\nAnalyze the market data and recommend optimized settings for the NEXT cycle.\n\nRespond ONLY with valid JSON in this exact format (no markdown):\n{\n  \"regime\": \"RANGING|TRENDING|DEAD|VOLATILE\",\n  \"confidence\": 0.0-1.0,\n  \"reason\": \"short reasoning (max 120 chars)\",\n  \"analysis\": \"detailed analysis 2-3 sentences\",\n  \"aggressiveness\": 10,\n  \"settings\": {\n    \"spikeThreshold\": number,\n    \"sellDropThreshold\": number,\n    \"floorWindow\": number,\n    \"cooldownTicks\": number\n  }\n}\n\nRULES:\n- RANGING: Standard adaptive behavior — let the fork handle session/volatility tuning\n- TRENDING: Raise base spikeThreshold to avoid counter-trend noise\n- DEAD: Lower spikeThreshold or reduce aggressiveness to minimum\n- VOLATILE: Tighten sellDropThreshold to protect profits\n- spikeThreshold: min 0.05, max 5.0\n- sellDropThreshold: min 0.5, max 10.0\n- floorWindow: min 10, max 50\n- cooldownTicks: min 2, max 20\n- Only adjust base settings when necessary; the fork multiplies them by context factors"
+}
