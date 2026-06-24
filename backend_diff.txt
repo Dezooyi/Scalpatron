@@ -1,0 +1,2987 @@
+diff --git a/src/botInstance.ts b/src/botInstance.ts
+index 050a2ea..e6fbf67 100644
+--- a/src/botInstance.ts
++++ b/src/botInstance.ts
+@@ -1,13 +1,16 @@
+ import { PriceFeed, PricePoint } from './priceFeed.js';
+-import { PatternDetector, PatternSettings } from './patternDetector.js';
++import { PatternDetector, PatternSettings, DEFAULT_SETTINGS } from './patternDetector.js';
+ import { Trader, TraderStats, type TradeLogEntry } from './trader.js';
+ import { logger } from './appLogger.js';
+-import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, listStrategies, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt } from './db.js';
++import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, listStrategies, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt, getBotKillSwitch, setBotKillSwitch, getSetting, setSetting, insertLesson } from './db.js';
+ import { PriceRecorder } from './priceRecorder.js';
+-import { StrategyEngine } from './strategyEngine.js';
++import { StrategyEngine, isScalpingType } from './strategyEngine.js';
+ import type { StrategyConfig, IndicatorConfig } from './strategyTypes.js';
+ import { TIMEFRAME_MS } from './candleAggregator.js';
+ import { CONFIG } from './config.js';
++import { KillSwitchEngine } from './killSwitch.js';
++import type { KillSwitchConfig, KillSwitchRuntime } from './killSwitch.js';
++import { adaptPAETSettings, PAET_DEFAULTS } from './strategyForks/paetAdaptiveFork.js';
+ 
+ const PRICE_FEED_TICKRATE_MS = process.env.PRICE_FEED_TICKRATE_MS
+   ? parseInt(process.env.PRICE_FEED_TICKRATE_MS, 10)
+@@ -36,6 +39,7 @@ export interface BotState {
+   strategyType?: string;
+   strategyConfig?: StrategyConfig;
+   warmupProgress?: number; // 0.0 to 1.0
++  killSwitch?: KillSwitchRuntime;
+ }
+ 
+ interface OpenPosition {
+@@ -59,6 +63,13 @@ export class BotInstance {
+   private cumulativeTicks = 0;
+   private startTime?: number;
+   private initialSOL: number;
++  private killSwitch: KillSwitchEngine;
++  // PAET: delayed outcome check — compare price 10 ticks after SELL exit
++  private paetPendingOutcome?: {
++    exitPrice: number;
++    checkAtTick: number;
++    indicatorSnapshot?: Record<string, number>;
++  };
+ 
+   constructor(
+     id: string,
+@@ -94,6 +105,7 @@ export class BotInstance {
+       targetDecimals,
+       botId: this.id
+     });
++    this.killSwitch = new KillSwitchEngine(getBotKillSwitch(this.id) ?? undefined);
+     this.restoreStatsFromDB();
+   }
+ 
+@@ -103,7 +115,8 @@ export class BotInstance {
+     ).all(this.id) as { timestamp: number; action: string; price: number; amount: number | null; pnlPercent: number | null; status: string }[];
+ 
+     let totalTrades = 0, wins = 0, losses = 0, totalPnlPercent = 0;
+-    
++    let consecutiveLosses = 0;
++
+     let currentBalanceSOL = this.trader.getStats().balanceSOL;
+     let currentBalanceToken = 0;
+ 
+@@ -126,11 +139,25 @@ export class BotInstance {
+         totalTrades++;
+         const pnl = row.pnlPercent ?? 0;
+         totalPnlPercent += pnl;
+-        if (pnl > 0) wins++;
+-        else losses++;
+-        
+-        const returnSOL = row.amount * row.price;
+-        currentBalanceSOL += returnSOL;
++        if (pnl > 0) {
++          wins++;
++          consecutiveLosses = 0;
++        } else {
++          losses++;
++          consecutiveLosses++;
++        }
++
++        // Deduct the roundtrip fee using the weighted-average entry price from
++        // the preceding open positions — mirrors what trader.sell() does in paper mode.
++        const totalOpenAmount = openPositions.reduce((s, p) => s + p.amount, 0);
++        const avgEntryPrice = totalOpenAmount > 0
++          ? openPositions.reduce((s, p) => s + p.entryPrice * p.amount, 0) / totalOpenAmount
++          : 0;
++        const grossReturn = row.amount * row.price;
++        const feeDeduction = avgEntryPrice > 0
++          ? row.amount * avgEntryPrice * CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT
++          : 0;
++        currentBalanceSOL += grossReturn - feeDeduction;
+         currentBalanceToken -= row.amount;
+         openPositions = [];
+       }
+@@ -141,6 +168,7 @@ export class BotInstance {
+ 
+     this.trader.restoreStats(totalTrades, wins, losses, totalPnlPercent, currentBalanceSOL, currentBalanceToken);
+     this.trader.restorePositions(openPositions);
++    this.killSwitch.restoreCounters(totalTrades, consecutiveLosses);
+   }
+ 
+   /** Reset bot stats and optionally clear trades/prices */
+@@ -160,6 +188,12 @@ export class BotInstance {
+       db.prepare('DELETE FROM live_feed WHERE mintAddress = ?').run(this.mintAddress);
+     }
+ 
++    // Kill-Switch mit zurücksetzen, wenn Trades gelöscht werden
++    if (clearTrades) {
++      this.killSwitch.restoreCounters(0, 0);
++      this.killSwitch.reset();
++    }
++
+     logger.info(this.id, 'SYSTEM', `Bot Stats zurückgesetzt (Trades: ${clearTrades}, Preise: ${clearPrices})`);
+   }
+ 
+@@ -180,6 +214,15 @@ export class BotInstance {
+     // Restore per-bot custom system prompt
+     this.customSystemPrompt = getBotCustomSystemPrompt(this.id);
+ 
++    // Post-start cooldown for scalping: block the first BUY for startDelayTicks
++    // so the bot does not jump into a trade immediately after creation.
++    const isScalpingStrategy = !this.activeStrategyConfig || isScalpingType(this.activeStrategyConfig.strategy_type);
++    if (isScalpingStrategy) {
++      this.detector.startCooldown();
++      this.strategyEngine?.startCooldown();
++      logger.info(this.id, 'SYSTEM', `Start-Cooldown aktiv: erster BUY wird fuer ${this.detector.settings.startDelayTicks} Ticks blockiert`);
++    }
++
+     const feed = PriceFeed.getInstance();
+ 
+     // Load historical price data from SQLite database (persistent storage)
+@@ -232,7 +275,7 @@ export class BotInstance {
+     this.detector.updateSettings(newSettings);
+     this.detector.reset();
+     // Also update strategy engine if it's a scalping type
+-    if (this.strategyEngine && this.activeStrategyConfig?.strategy_type === 'scalping') {
++    if (this.strategyEngine && this.activeStrategyConfig && isScalpingType(this.activeStrategyConfig.strategy_type)) {
+       this.strategyEngine.updateScalpingSettings(newSettings);
+     }
+   }
+@@ -241,6 +284,19 @@ export class BotInstance {
+     return this.detector.settings;
+   }
+ 
++  /**
++   * ADR-014: single source of truth for the scalping settings that drive the
++   * UI (getState) and the warmup-gate. Prefers the StrategyEngine's inner
++   * scalpingDetector — which reflects the live-adapted values for
++   * scalping-adaptive (ADR-012) — and falls back to the outer PatternDetector
++   * for legacy bots and non-scalping strategies. Display and engine are already
++   * kept in sync by updateSettings/updateStrategy; this helper makes the read
++   * path explicit and prepares the consolidation towards ADR-014 Option 3.
++   */
++  private getEffectiveScalpingSettings(): PatternSettings {
++    return this.strategyEngine?.getScalpingSettings() ?? this.detector.settings;
++  }
++
+   public getTrader(): Trader {
+     return this.trader;
+   }
+@@ -249,6 +305,23 @@ export class BotInstance {
+     this.trader.updateTradeConfig(tradeSize, aggressiveness, tradingMode);
+   }
+ 
++  /** Kill-Switch Konfiguration setzen und persistieren */
++  public setKillSwitchConfig(config: KillSwitchConfig): void {
++    this.killSwitch.setConfig(config);
++    setBotKillSwitch(this.id, config);
++    logger.info(this.id, 'SYSTEM', `Kill-Switch ${config.enabled ? 'aktiviert' : 'deaktiviert'}.`);
++  }
++
++  /** Kill-Switch zurücksetzen (Alarm quittieren + Session neu verankern) */
++  public resetKillSwitch(): void {
++    this.killSwitch.reset();
++    logger.action(this.id, 'SYSTEM', 'Kill-Switch zurückgesetzt (re-armed).');
++  }
++
++  public getKillSwitch(): KillSwitchEngine {
++    return this.killSwitch;
++  }
++
+   /** AI agent sets effective aggressiveness (capped by user max) */
+   public setAgentAggressiveness(value: number): void {
+     this.trader.setAgentAggressiveness(value);
+@@ -259,18 +332,57 @@ export class BotInstance {
+     this.activeStrategyConfig = config;
+     this.strategyEngine = new StrategyEngine(config);
+     // If scalping, also sync the PatternDetector settings
+-    if (config.strategy_type === 'scalping' && config.scalping_settings) {
++    if (isScalpingType(config.strategy_type) && config.scalping_settings) {
+       this.detector.updateSettings(config.scalping_settings);
+       this.detector.reset();
+     }
++    // PAET: restore persisted ω from DB so calibration survives bot restarts
++    if (config.strategy_type === 'paet') {
++      const savedOmega = getSetting(`paet_omega_${this.id}`, '');
++      if (savedOmega !== '') {
++        const omega = parseFloat(savedOmega);
++        if (!isNaN(omega)) {
++          this.strategyEngine.getPaetEngine()?.setOmega(omega);
++        }
++      }
++    }
+     logger.info(this.id, 'SYSTEM', `Strategie aktualisiert: ${config.strategy_name} (${config.strategy_type})`);
+   }
+ 
++  /** Programmatic PAET adaptation — derives optimal settings from live STL/FFT output. */
++  private applyPAETAdaptation(
++    trendPrice: number,
++    indicatorValues: Record<string, number> | undefined,
++  ): void {
++    if (!this.activeStrategyConfig || !indicatorValues) return;
++
++    const sigma = indicatorValues['paet_sigma'];
++    const period = indicatorValues['paet_period'];
++    const omega = indicatorValues['paet_omega'];
++
++    if (isNaN(sigma) || isNaN(period) || period <= 1) return;
++
++    const current: Required<NonNullable<typeof this.activeStrategyConfig.paet_settings>> = {
++      ...PAET_DEFAULTS,
++      ...(this.activeStrategyConfig.paet_settings ?? {}),
++    };
++
++    const adapted = adaptPAETSettings(current, { sigma, period, trendPrice, omega });
++    if (Object.keys(adapted).length === 0) return;
++
++    this.activeStrategyConfig.paet_settings = {
++      ...(this.activeStrategyConfig.paet_settings ?? {}),
++      ...adapted,
++    };
++    this.strategyEngine?.updateConfig(this.activeStrategyConfig);
++  }
++
+   /** Apply strategy parameter adjustments from AI agent */
+   public applyStrategyAdjustments(adjustments: {
+     indicators?: IndicatorConfig[];
+     risk_management?: Partial<{ position_size: number; max_positions: number; leverage: number }>;
+     scalping_settings?: Partial<PatternSettings>;
++    paetAdjustments?: Partial<NonNullable<StrategyConfig['paet_settings']>>;
+   }): void {
+     if (!this.activeStrategyConfig) return;
+ 
+@@ -286,6 +398,23 @@ export class BotInstance {
+         ...adjustments.scalping_settings,
+       };
+       this.updateSettings(adjustments.scalping_settings);
++      // ADR-014: mirror AI-adjusted scalping_settings into bots.settings so they
++      // survive a server restart. Otherwise the persisted bots.settings keeps the
++      // stale values and overrides the strategy's scalping_settings on next load.
++      if (isScalpingType(this.activeStrategyConfig.strategy_type)) {
++        try {
++          const persistable = { ...DEFAULT_SETTINGS, ...(this.activeStrategyConfig.scalping_settings ?? {}) };
++          db.prepare('UPDATE bots SET settings = ? WHERE id = ?').run(JSON.stringify(persistable), this.id);
++        } catch (e) {
++          console.warn(`[BotInstance] ADR-014: Fehler beim Spiegeln der scalping_settings in bots.settings: ${(e as Error).message}`);
++        }
++      }
++    }
++    if (adjustments.paetAdjustments && this.activeStrategyConfig.strategy_type === 'paet') {
++      this.activeStrategyConfig.paet_settings = {
++        ...(this.activeStrategyConfig.paet_settings ?? {}),
++        ...adjustments.paetAdjustments,
++      };
+     }
+     if (this.strategyEngine) {
+       this.strategyEngine.updateConfig(this.activeStrategyConfig);
+@@ -345,6 +474,11 @@ export class BotInstance {
+     this.updateStrategy(newConfig);
+     try {
+       db.prepare('UPDATE bots SET strategyId = ? WHERE id = ?').run(newConfig.id ?? null, this.id);
++      // ADR-014: keep persisted settings in sync with the new template so the
++      // next restart does not override the switched strategy with stale values
++      // (loadBotsFromDB applies bots.settings last, which would otherwise win).
++      const persistable = { ...DEFAULT_SETTINGS, ...(newConfig.scalping_settings ?? {}) };
++      db.prepare('UPDATE bots SET settings = ? WHERE id = ?').run(JSON.stringify(persistable), this.id);
+     } catch { /* best effort */ }
+     logger.action(
+       this.id,
+@@ -487,7 +621,7 @@ export class BotInstance {
+       id: this.id,
+       name: this.name,
+       mintAddress: this.mintAddress,
+-      settings: this.detector.settings,
++      settings: this.getEffectiveScalpingSettings(),
+       stats: this.trader.getStats(),
+       status: this.status,
+       paperMode: this.trader.paperMode,
+@@ -506,6 +640,7 @@ export class BotInstance {
+       strategyType: this.activeStrategyConfig?.strategy_type,
+       strategyConfig: this.activeStrategyConfig,
+       warmupProgress: this.getWarmupProgress(),
++      killSwitch: this.killSwitch.getRuntime(),
+     };
+ 
+     // Diagnostic log for history
+@@ -528,9 +663,15 @@ export class BotInstance {
+     const history = feed.getHistory(this.mintAddress);
+     const currentTicks = history.length;
+ 
+-    if (!this.activeStrategyConfig || this.activeStrategyConfig.strategy_type === 'scalping') {
+-      const required = this.detector.settings.floorWindow;
+-      return Math.min(1, currentTicks / required);
++    if (!this.activeStrategyConfig || isScalpingType(this.activeStrategyConfig.strategy_type)) {
++      const required = this.getEffectiveScalpingSettings().floorWindow;
++      const floorProgress = Math.min(1, currentTicks / required);
++      // For scalping-adaptive also respect the progressive adaptive warmup.
++      if (this.activeStrategyConfig?.strategy_type === 'scalping-adaptive') {
++        const adaptiveProgress = this.strategyEngine?.getAdaptiveWarmupProgress() ?? 1;
++        return Math.min(floorProgress, adaptiveProgress);
++      }
++      return floorProgress;
+     }
+ 
+     // Strategy Warmup
+@@ -572,12 +713,40 @@ export class BotInstance {
+     // Record price to persistent storage (SQLite + JSONL)
+     this.recorder.record(point, this.mintAddress);
+ 
++    // PAET: resolve deferred outcome check (10 ticks after a SELL)
++    if (this.paetPendingOutcome && this.cumulativeTicks >= this.paetPendingOutcome.checkAtTick) {
++      const priceChange = (point.price - this.paetPendingOutcome.exitPrice) / this.paetPendingOutcome.exitPrice;
++      const paetEngine = this.strategyEngine?.getPaetEngine();
++      if (paetEngine) {
++        paetEngine.recordOutcome(priceChange);
++        setSetting(`paet_omega_${this.id}`, String(paetEngine.getOmega()));
++
++        // False alarm: price recovered after our exit → ω rises → lesson for AI prompt
++        const wasFalseAlarm = priceChange > 0.02;
++        const iv = this.paetPendingOutcome.indicatorSnapshot ?? {};
++        if (wasFalseAlarm) {
++          const pct = (priceChange * 100).toFixed(1);
++          const omega = paetEngine.getOmega().toFixed(2);
++          const period = iv['paet_period'] != null ? `${Math.round(iv['paet_period'])}c` : '?';
++          const sigma = iv['paet_sigma'] != null ? iv['paet_sigma'].toFixed(6) : '?';
++          insertLesson(
++            this.id,
++            'regime',
++            `PAET false alarm — price recovered +${pct}% post-exit (ω=${omega}, period=${period}, σ=${sigma})`,
++            { priceChange, omega: paetEngine.getOmega(), period: iv['paet_period'], sigma: iv['paet_sigma'] },
++            Math.min(1.0, 0.3 + Math.abs(priceChange) * 2),
++          );
++        }
++      }
++      this.paetPendingOutcome = undefined;
++    }
++
+     // Update last price in trader for stats
+     this.trader.updatePrice(point.price);
+ 
+     // Heartbeat every 5 ticks to keep terminal alive
+     if (history.length % 5 === 0) {
+-      logger.info(this.id, 'FEED', `Tick #${history.length} empfangen: $${point.price.toFixed(8)} | Buffer: ${history.length}/${this.detector.settings.floorWindow}`);
++      logger.info(this.id, 'FEED', `Tick #${history.length} empfangen: $${point.price.toFixed(8)} | Buffer: ${history.length}/${this.getEffectiveScalpingSettings().floorWindow}`);
+     }
+ 
+     // ADR-010: Trading-Circuit-Breaker. Bei veraltetem Feed keine Entscheidungen
+@@ -594,26 +763,51 @@ export class BotInstance {
+     // reliable floor/spike values — enforce 100% warmup externally.
+     // Indicator strategies (StrategyEngine) have their own internal 60%-rule warmup guard
+     // (see analyzeGeneric) and return HOLD until ready — no outer block needed.
+-    const isScalping = !this.activeStrategyConfig || this.activeStrategyConfig.strategy_type === 'scalping';
+-    if (isScalping && history.length < this.detector.settings.floorWindow) {
++    const isScalping = !this.activeStrategyConfig || isScalpingType(this.activeStrategyConfig.strategy_type);
++    if (isScalping && history.length < this.getEffectiveScalpingSettings().floorWindow) {
+       return;
+     }
+ 
+     // Check balance if running but no trades yet
+     const stats = this.trader.getStats();
+-    if (stats.balanceSOL < 0.01 && stats.totalTrades === 0 && history.length === this.detector.settings.floorWindow) {
++    if (stats.balanceSOL < 0.01 && stats.totalTrades === 0 && history.length === this.getEffectiveScalpingSettings().floorWindow) {
+       logger.warn(this.id, 'TRADER', `Warnung: Kontostand ($${stats.balanceSOL.toFixed(4)} SOL) reicht evtl. nicht fuer Trades aus!`);
+     }
+ 
++    // Kill-Switch: Mark-to-Market Equity pro Tick aktualisieren (Drawdown/Session-Bezug)
++    const equity = stats.balanceSOL + stats.balanceToken * stats.lastPrice;
++    this.killSwitch.updateEquity(equity, Date.now());
++
+     // Use StrategyEngine if a non-scalping strategy is assigned, else PatternDetector
+     const result = this.strategyEngine
+       ? this.strategyEngine.analyze(history, stats)
+       : this.detector.analyze(history);
+ 
++    // PAET programmatic adaptation — every 30 ticks, derive optimal settings
++    // from the engine's own STL/FFT output (no LLM or external data needed).
++    if (
++      this.activeStrategyConfig?.strategy_type === 'paet' &&
++      this.cumulativeTicks % 30 === 0
++    ) {
++      this.applyPAETAdaptation(result.floor, result.indicatorValues);
++    }
++
+     if (result.signal === 'BUY') {
+       logger.action(this.id, 'DETECTOR', `Kauf-Signal erkannt! Spike: ${result.spikePercent.toFixed(2)}% | Strategie: ${this.activeStrategyConfig?.strategy_type ?? 'scalping'}`);
+     }
+ 
++    // Kill-Switch: Circuit-Breaker prüfen. Bei aktivem Alarm neue Einstiege blockieren,
++    // Ausstiege (SELL) aber zulassen, um offene Positionen kontrolliert zu glätten.
++    const ks = this.killSwitch.check();
++    if (ks.stop) {
++      if (result.signal === 'BUY') {
++        logger.warn(this.id, 'TRADER', `Trading blockiert (Kill-Switch): ${ks.reason} — Reset im UI erforderlich.`);
++        return;
++      } else if (result.signal === 'SELL') {
++        logger.warn(this.id, 'TRADER', `Kill-Switch aktiv (${ks.reason}) — nur Ausstieg (SELL) erlaubt.`);
++      }
++    }
++
+     const maxPositions = this.activeStrategyConfig?.risk_management?.max_positions ?? 1;
+     const positionSizePct = this.activeStrategyConfig?.risk_management?.position_size ?? null;
+     const trade = await this.trader.handleSignal(
+@@ -646,6 +840,16 @@ export class BotInstance {
+        // Feedback loop: attribute SELL outcome to the active agent advice entry
+        if (trade.action === 'SELL' && trade.pnlPercent !== undefined) {
+          updateAgentOutcome(this.id, trade.pnlPercent, trade.pnlPercent > 0);
++         this.killSwitch.recordTradeClosed(trade.pnlPercent);
++
++         // PAET: schedule a delayed price check (10 ticks) to adapt ω
++         if (this.activeStrategyConfig?.strategy_type === 'paet') {
++           this.paetPendingOutcome = {
++             exitPrice: trade.price,
++             checkAtTick: this.cumulativeTicks + 10,
++             indicatorSnapshot: result.indicatorValues ? { ...result.indicatorValues } : undefined,
++           };
++         }
+        }
+     } else if (result.signal === 'BUY') {
+       // BUY signal fired but no trade executed — log the reason
+diff --git a/src/botManager.ts b/src/botManager.ts
+index b8f7b3e..abfa2a1 100644
+--- a/src/botManager.ts
++++ b/src/botManager.ts
+@@ -3,6 +3,7 @@ import { db, wipeLiveFeed, setBotStrategy, getStrategy, getBotStrategyId } from
+ import { DEFAULT_SETTINGS, PatternSettings } from './patternDetector.js';
+ import { randomUUID } from 'crypto';
+ import { loadOrCreateKeypair } from './wallet.js';
++import type { KillSwitchConfig } from './killSwitch.js';
+ 
+ interface BotConfig {
+   id?: string;
+@@ -14,7 +15,7 @@ interface BotConfig {
+   tradeSize?: number;
+   aggressiveness?: number;
+   tradingMode?: 'fixed' | 'aggressive';
+-  settings?: PatternSettings;
++  settings?: Partial<PatternSettings>;
+   strategyId?: string;   // assign a strategy from Strategy Management at creation
+ }
+ 
+@@ -41,14 +42,35 @@ export class BotManager {
+         walletAddress, row.tradeSize ?? 1, row.aggressiveness ?? 10,
+         (row.tradingMode ?? 'fixed') as 'fixed' | 'aggressive',
+       );
+-      bot.updateSettings(settings);
+-
++      // Load assigned strategy first so per-bot persisted settings can override template defaults
+       const strategyId = getBotStrategyId(bot.id);
+-      if (strategyId) {
+-        const config = getStrategy(strategyId);
+-        if (config) bot.updateStrategy(config);
++      const strategyConfig = strategyId ? getStrategy(strategyId) : undefined;
++      if (strategyConfig) bot.updateStrategy(strategyConfig);
++
++      // ADR-014: best-effort migration. Legacy bots were persisted with
++      // settings = DEFAULT_SETTINGS while they actually traded on the assigned
++      // strategy template's scalping_settings (which only lived in memory at
++      // creation time). Detect the placeholder and adopt the template values so
++      // DB and engine stay consistent across restarts (no Template → DEFAULT jump).
++      let effectiveSettings: PatternSettings = settings;
++      if (
++        strategyConfig?.scalping_settings &&
++        JSON.stringify(settings) === JSON.stringify(DEFAULT_SETTINGS)
++      ) {
++        effectiveSettings = { ...DEFAULT_SETTINGS, ...strategyConfig.scalping_settings };
++        try {
++          db.prepare('UPDATE bots SET settings = ? WHERE id = ?').run(
++            JSON.stringify(effectiveSettings), bot.id,
++          );
++          console.log(`[BotManager] ADR-014 Migration: Bot ${bot.id} settings auf Template-Werte aktualisiert`);
++        } catch (e) {
++          console.warn(`[BotManager] ADR-014 Migration fehlgeschlagen fuer Bot ${bot.id}: ${(e as Error).message}`);
++        }
+       }
+ 
++      // Apply persisted bot-specific settings last (authoritative override)
++      bot.updateSettings(effectiveSettings);
++
+       this.bots.set(bot.id, bot);
+       
+       // Auto-start if it was running? For now leave them stopped on boot for safety.
+@@ -62,7 +84,22 @@ export class BotManager {
+ 
+   public createBot(config: BotConfig): BotInstance {
+     const id = config.id || randomUUID();
+-    const settings = config.settings || DEFAULT_SETTINGS;
++
++    // ADR-014: resolve effective settings in priority order:
++    //   1) explicit settings from the request (e.g. Advisor scalpingSettings),
++    //   2) the assigned strategy template's scalping_settings (so DB and engine
++    //      match from creation — no Template → DEFAULT jump on restart),
++    //   3) DEFAULT_SETTINGS (legacy / non-scalping path).
++    const strategyConfig = config.strategyId ? getStrategy(config.strategyId) : undefined;
++    let settings: PatternSettings;
++    if (config.settings) {
++      settings = { ...DEFAULT_SETTINGS, ...config.settings };
++    } else if (strategyConfig?.scalping_settings) {
++      settings = { ...DEFAULT_SETTINGS, ...strategyConfig.scalping_settings };
++    } else {
++      settings = { ...DEFAULT_SETTINGS };
++    }
++
+     let walletAddress = config.walletAddress ?? '';
+     
+     // Auto-fill wallet address if live mode and empty
+@@ -91,12 +128,9 @@ export class BotManager {
+     bot.updateSettings(settings);
+ 
+     // Assign strategy at creation if strategyId provided
+-    if (config.strategyId) {
+-      const strategyConfig = getStrategy(config.strategyId);
+-      if (strategyConfig) {
+-        bot.updateStrategy(strategyConfig);
+-        setBotStrategy(id, config.strategyId);
+-      }
++    if (config.strategyId && strategyConfig) {
++      bot.updateStrategy(strategyConfig);
++      setBotStrategy(id, config.strategyId);
+     }
+ 
+     this.bots.set(id, bot);
+@@ -169,6 +203,19 @@ export class BotManager {
+     db.prepare('UPDATE bots SET walletAddress = ? WHERE id = ?').run(walletAddress, id);
+   }
+ 
++  public updateBotKillSwitch(id: string, config: KillSwitchConfig) {
++    const bot = this.bots.get(id);
++    if (!bot) return;
++    // setKillSwitchConfig aktualisiert die Engine UND persistiert in die DB
++    bot.setKillSwitchConfig(config);
++  }
++
++  public resetBotKillSwitch(id: string) {
++    const bot = this.bots.get(id);
++    if (!bot) return;
++    bot.resetKillSwitch();
++  }
++
+   public updateBotPaperMode(id: string, paperMode: boolean) {
+     const bot = this.bots.get(id);
+     if (!bot) return;
+diff --git a/src/config.ts b/src/config.ts
+index bd4d4fe..0df67d5 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -26,8 +26,9 @@ export const CONFIG = {
+   // Price Feed Konfiguration
+   PRICE_FEED_PROVIDER: (process.env.PRICE_FEED_PROVIDER ?? 'dexscreener') as PriceFeedProvider,
+   PRICE_FEED_TICKRATE_MS: parseInt(process.env.PRICE_FEED_TICKRATE_MS ?? '2000', 10),
+-  PRICE_FEED_REQUEST_INTERVAL_MS: parseInt(process.env.PRICE_FEED_REQUEST_INTERVAL_MS ?? '800', 10),
+-  PRICE_FEED_MAX_RETRIES: parseInt(process.env.PRICE_FEED_MAX_RETRIES ?? '4', 10),
++  // Scheduling-Intervall wird dynamisch in PriceFeed berechnet (SLOT_MS * N unique Mints).
++  // PRICE_FEED_REQUEST_INTERVAL_MS ist nicht mehr relevant und wurde entfernt.
++  PRICE_FEED_MAX_RETRIES: parseInt(process.env.PRICE_FEED_MAX_RETRIES ?? '3', 10),
+   PRICE_FEED_CUSTOM_URL: process.env.PRICE_FEED_CUSTOM_URL ?? '',
+   // Stale-Price-Handling (ADR-010): ab dieser Veraltungsdauer (ms) wird Trading blockiert.
+   // Default = 3 * TICKRATE (Toleranz für 1–2 transiente Fehlpolls, Block bei anhaltendem Ausfall).
+diff --git a/src/db.ts b/src/db.ts
+index f6b57de..c20646c 100644
+--- a/src/db.ts
++++ b/src/db.ts
+@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
+ import fs from 'fs';
+ import { randomUUID } from 'crypto';
+ import type { StrategyConfig } from './strategyTypes.js';
++import type { KillSwitchConfig } from './killSwitch.js';
+ 
+ const __dirname = path.dirname(fileURLToPath(import.meta.url));
+ const DB_DIR = path.resolve(__dirname, '..', 'data');
+@@ -132,6 +133,22 @@ export function initDB() {
+ 
+     CREATE INDEX IF NOT EXISTS idx_lessons_bot ON lessons_learned(botId, createdAt DESC);
+     CREATE INDEX IF NOT EXISTS idx_lessons_severity ON lessons_learned(botId, severity DESC);
++
++    -- ADR-015: Wallet Balance Snapshots (für Equity-Kurve & historische Analyse)
++    CREATE TABLE IF NOT EXISTS wallet_balances (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      walletAddress TEXT NOT NULL,
++      mintAddress TEXT,
++      balance REAL NOT NULL,
++      usdValue REAL,
++      source TEXT NOT NULL,
++      botId TEXT,
++      timestamp INTEGER NOT NULL,
++      createdAt INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
++    );
++
++    CREATE INDEX IF NOT EXISTS idx_wallet_balances_wallet ON wallet_balances(walletAddress, timestamp DESC);
++    CREATE INDEX IF NOT EXISTS idx_wallet_balances_mint ON wallet_balances(mintAddress, timestamp DESC);
+   `);
+ 
+   // Strategies table — stores StrategyConfig JSON (templates + user-saved)
+@@ -177,14 +194,54 @@ export function initDB() {
+     `ALTER TABLE trades ADD COLUMN paperMode INTEGER NOT NULL DEFAULT 1`,
+     // ADR-012: manual trigger aggressiveness (0-100)
+     `ALTER TABLE agent_history ADD COLUMN forceMultiplier INTEGER DEFAULT NULL`,
++    // bots: Kill-Switch / Circuit-Breaker Konfiguration (Stop-Strategie)
++    `ALTER TABLE bots ADD COLUMN killSwitch TEXT DEFAULT NULL`,
++    // ADR-015: Trade-Erweiterungen für Wallet-Page (Solscan-Links, Fees, Slippage)
++    `ALTER TABLE trades ADD COLUMN signature TEXT DEFAULT NULL`,
++    `ALTER TABLE trades ADD COLUMN solAmount REAL DEFAULT NULL`,
++    `ALTER TABLE trades ADD COLUMN fee REAL DEFAULT NULL`,
++    `ALTER TABLE trades ADD COLUMN slippagePct REAL DEFAULT NULL`,
++    `ALTER TABLE trades ADD COLUMN source TEXT DEFAULT 'auto'`,
+   ];
++
+   for (const sql of migrations) {
+     try { db.exec(sql); } catch (_) { /* column already exists */ }
+   }
+ 
++  // ADR-015: Indexes für Transaktions-Performance (idempotent)
++  const indexes = [
++    `CREATE INDEX IF NOT EXISTS idx_trades_signature ON trades(signature) WHERE signature IS NOT NULL`,
++    `CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp DESC)`,
++    `CREATE INDEX IF NOT EXISTS idx_trades_bot_ts ON trades(botId, timestamp DESC)`,
++  ];
++  for (const sql of indexes) {
++    try { db.exec(sql); } catch (_) { /* index exists */ }
++  }
++
+   console.log('[DB] Scalpatron Database initialized.');
+ }
+ 
++/**
++ * WAL-Checkpoint-Guard: verhindert, dass das WAL-File bei dauerhaften Reads
++ * unbegrenzt waechst (Checkpoint-Starvation). Prueft periodisch die WAL-Groesse
++ * und loest einen RESTART-Checkpoint aus, sobald der Schwellenwert ueberschritten wird.
++ */
++export function startWalCheckpointGuard(thresholdBytes = 50 * 1024 * 1024): void {
++  const walPath = `${DB_PATH}-wal`;
++  const interval = setInterval(() => {
++    try {
++      const stat = fs.statSync(walPath);
++      if (stat.size > thresholdBytes) {
++        db.pragma('wal_checkpoint(RESTART)');
++        console.log(`[DB] WAL-Checkpoint ausgefuehrt (WAL war ${(stat.size / 1024 / 1024).toFixed(1)} MB).`);
++      }
++    } catch {
++      // WAL-Datei existiert (noch) nicht — ignorieren.
++    }
++  }, 60_000);
++  interval.unref();
++}
++
+ // Agent History Functions
+ export function saveAgentHistory(
+   botId: string,
+@@ -734,6 +791,113 @@ export interface RegimePerformance {
+   totalTrades: number;
+ }
+ 
++export interface StrategyRegimePerformance {
++  strategyType: string;
++  regime: string;
++  winRate: number;
++  avgPnl: number;
++  totalTrades: number;
++}
++
++/**
++ * Per-(strategy_type, regime) win-rate and PnL.
++ * Joins agent_history → bots → strategies to get the active strategy type per bot.
++ * Only bots with an assigned strategyId are included (legacy bots skipped).
++ * Only buckets with at least `minSamples` outcome trades are returned.
++ */
++export function getStrategyRegimePerformance(botId?: string, minSamples = 5): StrategyRegimePerformance[] {
++  let query = `
++    SELECT
++      json_extract(s.config, '$.strategy_type') AS strategyType,
++      ah.regime,
++      SUM(ah.outcomeWins)        AS wins,
++      SUM(ah.outcomeTradeCount)  AS total,
++      SUM(ah.outcomeTotalPnl)    AS totalPnl
++    FROM agent_history ah
++    JOIN bots b ON b.id = ah.botId
++    JOIN strategies s ON s.id = b.strategyId
++    WHERE ah.outcomeTradeCount > 0
++      AND json_extract(s.config, '$.strategy_type') IS NOT NULL
++  `;
++  const params: (string | number)[] = [];
++  if (botId) {
++    query += ' AND ah.botId = ?';
++    params.push(botId);
++  }
++  query += ' GROUP BY strategyType, ah.regime HAVING total >= ? ORDER BY total DESC';
++  params.push(minSamples);
++
++  const rows = db.prepare(query).all(...params) as {
++    strategyType: string; regime: string; wins: number; total: number; totalPnl: number;
++  }[];
++
++  return rows.map(r => ({
++    strategyType: r.strategyType,
++    regime: r.regime,
++    winRate: r.total > 0 ? Math.round((r.wins / r.total) * 100) : 0,
++    avgPnl: r.total > 0 ? r.totalPnl / r.total : 0,
++    totalTrades: r.total,
++  }));
++}
++
++export interface ForceMultiplierTierStats {
++  tier: 'low' | 'medium' | 'high';
++  rangeLabel: string;
++  winRate: number;
++  avgPnl: number;
++  totalTrades: number;
++  avgConfidence: number;
++}
++
++/**
++ * Correlates force-multiplier level (AI trust) with trade outcomes.
++ * Tiers: low 0-30%, medium 31-60%, high 61-100%.
++ * Only entries with at least 1 outcome trade and a known forceMultiplier are used.
++ */
++export function getForceMultiplierTierStats(botId?: string, minSamples = 3): ForceMultiplierTierStats[] {
++  let query = `
++    SELECT
++      CASE
++        WHEN forceMultiplier <= 30 THEN 'low'
++        WHEN forceMultiplier <= 60 THEN 'medium'
++        ELSE 'high'
++      END AS tier,
++      SUM(outcomeWins)       AS wins,
++      SUM(outcomeTradeCount) AS total,
++      SUM(outcomeTotalPnl)   AS totalPnl,
++      AVG(confidence)        AS avgConf
++    FROM agent_history
++    WHERE forceMultiplier IS NOT NULL
++      AND outcomeTradeCount > 0
++  `;
++  const params: (string | number)[] = [];
++  if (botId) {
++    query += ' AND botId = ?';
++    params.push(botId);
++  }
++  query += ' GROUP BY tier HAVING total >= ? ORDER BY MIN(forceMultiplier) ASC';
++  params.push(minSamples);
++
++  const RANGE: Record<string, string> = {
++    low: '0–30%',
++    medium: '31–60%',
++    high: '61–100%',
++  };
++
++  const rows = db.prepare(query).all(...params) as {
++    tier: string; wins: number; total: number; totalPnl: number; avgConf: number;
++  }[];
++
++  return rows.map(r => ({
++    tier: r.tier as ForceMultiplierTierStats['tier'],
++    rangeLabel: RANGE[r.tier] ?? r.tier,
++    winRate: r.total > 0 ? Math.round((r.wins / r.total) * 100) : 0,
++    avgPnl: r.total > 0 ? r.totalPnl / r.total : 0,
++    totalTrades: r.total,
++    avgConfidence: Math.round((r.avgConf ?? 0) * 100),
++  }));
++}
++
+ /**
+  * Aggregates agent_history outcome data per market regime.
+  * Only includes entries that have at least 1 outcome trade.
+@@ -789,6 +953,22 @@ export function getBotStrategyId(botId: string): string | null {
+   return row?.strategyId ?? null;
+ }
+ 
++// --- Bot Kill-Switch Persistence ---
++
++export function getBotKillSwitch(botId: string): KillSwitchConfig | null {
++  const row = db.prepare('SELECT killSwitch FROM bots WHERE id = ?').get(botId) as { killSwitch: string | null } | undefined;
++  if (!row?.killSwitch) return null;
++  try {
++    return JSON.parse(row.killSwitch) as KillSwitchConfig;
++  } catch {
++    return null;
++  }
++}
++
++export function setBotKillSwitch(botId: string, config: KillSwitchConfig): void {
++  db.prepare('UPDATE bots SET killSwitch = ? WHERE id = ?').run(JSON.stringify(config), botId);
++}
++
+ // --- Strategy CRUD ---
+ 
+ export function saveStrategy(config: StrategyConfig, isTemplate = false): string {
+@@ -889,7 +1069,6 @@ export function getTokenInfo(mintAddress: string): { symbol: string; name: strin
+ // --- Trade Lifecycle (ADR-007: PENDING trade persistence) ---
+ 
+ export interface TradeRow {
+-  id: number;
+   botId: string;
+   timestamp: number;
+   action: string;
+@@ -898,6 +1077,11 @@ export interface TradeRow {
+   pnlPercent: number | null;
+   status: string;
+   paperMode: number;
++  signature?: string | null;
++  solAmount?: number | null;
++  fee?: number | null;
++  slippagePct?: number | null;
++  source?: string | null;
+ }
+ 
+ export function insertPendingTrade(
+@@ -975,3 +1159,147 @@ export function getTradesForPerformance(
+   const query = `SELECT * FROM trades WHERE ${conditions.join(` AND `)} ORDER BY timestamp ASC`;
+   return db.prepare(query).all(...params) as TradeRow[];
+ }
++
++// ADR-015: Trade um Solscan-Signatur, Fee & SOL-Delta erweitern
++export function updateTradeSignature(
++  tradeId: number,
++  signature: string,
++  solAmount: number | null,
++  fee: number | null,
++  slippagePct: number | null = null,
++  source: string = 'auto',
++): void {
++  db.prepare(`
++    UPDATE trades
++    SET signature = ?, solAmount = ?, fee = ?, slippagePct = ?, source = ?
++    WHERE id = ?
++  `).run(signature, solAmount, fee, slippagePct, source, tradeId);
++}
++
++/**
++ * Liefert Trades für die Wallet-Page (BUY/SELL, mit Signaturen).
++ * Filter: botId, type, mode, range (from/to).
++ */
++export function getTradesForWallet(opts: {
++  limit?: number;
++  offset?: number;
++  botId?: string;
++  type?: 'BUY' | 'SELL';
++  mode?: 'paper' | 'live';
++  from?: number;
++  to?: number;
++} = {}): TradeRow[] {
++  const { limit = 100, offset = 0, botId, type, mode, from, to } = opts;
++  const conditions = [`status = 'CONFIRMED'`];
++  const params: (string | number)[] = [];
++
++  if (botId) {
++    conditions.push(`botId = ?`);
++    params.push(botId);
++  }
++  if (type) {
++    conditions.push(`action = ?`);
++    params.push(type);
++  }
++  if (mode === 'paper') {
++    conditions.push(`paperMode = 1`);
++  } else if (mode === 'live') {
++    conditions.push(`paperMode = 0`);
++  }
++  if (from !== undefined) {
++    conditions.push(`timestamp >= ?`);
++    params.push(from);
++  }
++  if (to !== undefined) {
++    conditions.push(`timestamp <= ?`);
++    params.push(to);
++  }
++
++  const query = `SELECT * FROM trades WHERE ${conditions.join(' AND ')} ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
++  params.push(limit, offset);
++  return db.prepare(query).all(...params) as TradeRow[];
++}
++
++// ADR-015: Wallet Balance Snapshots
++export function insertWalletBalance(snapshot: {
++  walletAddress: string;
++  mintAddress: string | null;
++  balance: number;
++  usdValue?: number | null;
++  source: 'onchain' | 'paper-sim' | 'manual';
++  botId?: string | null;
++  timestamp: number;
++}): void {
++  db.prepare(`
++    INSERT INTO wallet_balances (walletAddress, mintAddress, balance, usdValue, source, botId, timestamp)
++    VALUES (?, ?, ?, ?, ?, ?, ?)
++  `).run(
++    snapshot.walletAddress,
++    snapshot.mintAddress,
++    snapshot.balance,
++    snapshot.usdValue ?? null,
++    snapshot.source,
++    snapshot.botId ?? null,
++    snapshot.timestamp,
++  );
++}
++
++export interface WalletBalanceRow {
++  id: number;
++  walletAddress: string;
++  mintAddress: string | null;
++  balance: number;
++  usdValue: number | null;
++  source: string;
++  botId: string | null;
++  timestamp: number;
++}
++
++export function getWalletBalanceHistory(opts: {
++  walletAddress: string;
++  mintAddress?: string | null;
++  from?: number;
++  to?: number;
++  limit?: number;
++}): WalletBalanceRow[] {
++  const { walletAddress, mintAddress, from, to, limit = 500 } = opts;
++  const conditions = [`walletAddress = ?`];
++  const params: (string | number)[] = [walletAddress];
++
++  if (mintAddress !== undefined) {
++    if (mintAddress === null) {
++      conditions.push(`mintAddress IS NULL`);
++    } else {
++      conditions.push(`mintAddress = ?`);
++      params.push(mintAddress);
++    }
++  }
++  if (from !== undefined) {
++    conditions.push(`timestamp >= ?`);
++    params.push(from);
++  }
++  if (to !== undefined) {
++    conditions.push(`timestamp <= ?`);
++    params.push(to);
++  }
++
++  const query = `SELECT * FROM wallet_balances WHERE ${conditions.join(' AND ')} ORDER BY timestamp DESC LIMIT ?`;
++  params.push(limit);
++  return db.prepare(query).all(...params) as WalletBalanceRow[];
++}
++
++export function getLatestWalletBalances(walletAddress: string): WalletBalanceRow[] {
++  return db.prepare(`
++    SELECT w1.* FROM wallet_balances w1
++    INNER JOIN (
++      SELECT mintAddress, MAX(timestamp) AS maxTs
++      FROM wallet_balances
++      WHERE walletAddress = ?
++      GROUP BY mintAddress
++    ) w2 ON
++      (w1.mintAddress IS NULL AND w2.mintAddress IS NULL OR w1.mintAddress = w2.mintAddress)
++      AND w1.timestamp = w2.maxTs
++    WHERE w1.walletAddress = ?
++    ORDER BY w1.mintAddress IS NULL DESC, w1.mintAddress ASC
++  `).all(walletAddress, walletAddress) as WalletBalanceRow[];
++}
+diff --git a/src/geckoTerminalFeed.ts b/src/geckoTerminalFeed.ts
+index 11c5613..c76dc54 100644
+--- a/src/geckoTerminalFeed.ts
++++ b/src/geckoTerminalFeed.ts
+@@ -26,12 +26,26 @@ const GECKO_BASE = 'https://api.geckoterminal.com/api/v2';
+ const GECKO_HEADERS = { Accept: 'application/json;version=20230302' };
+ const CACHE_TTL_MS = 60_000; // Refresh OHLCV every 60s
+ const POOL_CACHE_PERMANENT = true; // Pool address doesn't change
++// Obergrenzen fuer die Caches, damit Mints die nicht mehr aktiv sind nicht
++// ewig im Speicher bleiben (Long-Running-Prozess). Aelteste Einträge werden
++// verdraengt (Map erhaelt Einfuegereihenfolge).
++const MAX_OHLCV_ENTRIES = 64;
++const MAX_POOL_ENTRIES = 256;
+ 
+ class GeckoTerminalFeed {
+   private ohlcvCache: Map<string, GeckoTokenData> = new Map();
+   private poolCache: Map<string, string> = new Map(); // mint → pool address
+   private pendingFetches: Set<string> = new Set();
+ 
++  // Verdraengt aelteste Eintraege, solange der Cache die Maximalgroesse ueberschreitet.
++  private evictOldest(cache: Map<string, unknown>, maxEntries: number): void {
++    while (cache.size > maxEntries) {
++      const oldest = cache.keys().next().value as string | undefined;
++      if (oldest === undefined) break;
++      cache.delete(oldest);
++    }
++  }
++
+   // Resolve the primary pool address for a Solana token mint
+   private async resolvePool(mintAddress: string): Promise<string | null> {
+     if (POOL_CACHE_PERMANENT && this.poolCache.has(mintAddress)) {
+@@ -48,6 +62,7 @@ class GeckoTerminalFeed {
+       const poolAddress = pools[0]?.attributes?.address ?? null;
+       if (poolAddress) {
+         this.poolCache.set(mintAddress, poolAddress);
++        this.evictOldest(this.poolCache, MAX_POOL_ENTRIES);
+       }
+       return poolAddress;
+     } catch {
+@@ -99,6 +114,7 @@ class GeckoTerminalFeed {
+           lastUpdated: Date.now(),
+           error: 'Pool not found',
+         });
++        this.evictOldest(this.ohlcvCache, MAX_OHLCV_ENTRIES);
+         return;
+       }
+ 
+@@ -114,6 +130,7 @@ class GeckoTerminalFeed {
+         candles15m,
+         lastUpdated: Date.now(),
+       });
++      this.evictOldest(this.ohlcvCache, MAX_OHLCV_ENTRIES);
+     } catch (err: any) {
+       const existing = this.ohlcvCache.get(mintAddress);
+       this.ohlcvCache.set(mintAddress, {
+@@ -121,6 +138,7 @@ class GeckoTerminalFeed {
+         lastUpdated: Date.now(),
+         error: err?.message ?? 'unknown error',
+       });
++      this.evictOldest(this.ohlcvCache, MAX_OHLCV_ENTRIES);
+       logger.warn('system', 'GeckoTerminalFeed', `[GeckoFeed] Refresh error for ${mintAddress}: ${err?.message}`);
+     } finally {
+       this.pendingFetches.delete(mintAddress);
+diff --git a/src/index.ts b/src/index.ts
+index d5669e1..218aa17 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,10 +1,11 @@
+-import { initDB } from './db.js';
++import { initDB, startWalCheckpointGuard } from './db.js';
+ import { BotManager } from './botManager.js';
+ import { BotServer } from './server.js';
+ import { PriceRecorder } from './priceRecorder.js';
+ import { saveStrategy } from './db.js';
+ import { loadBuiltinTemplates } from './strategyEngine.js';
+ import { PriceFeed } from './priceFeed.js';
++import { startMemoryMonitor } from './memoryMonitor.js';
+ 
+ 
+ console.log('Scalpatron V1 wird gestartet...');
+@@ -12,6 +13,11 @@ console.log('Scalpatron V1 wird gestartet...');
+ // Initialize SQLite database
+ initDB();
+ 
++// Speicher-Diagnose: Memory-Usage alle 60s, automatische Heap-Snapshots ab 512 MB RSS.
++startMemoryMonitor({ autoSnapshotRssMB: 512 });
++// WAL-Checkpoint-Guard: verhindert unbegrenztes WAL-Wachstum.
++startWalCheckpointGuard();
++
+ // Load strategy templates into DB if missing
+ (async () => {
+     const templates = await loadBuiltinTemplates();
+@@ -23,6 +29,26 @@ initDB();
+ 
+ 
+ const recorder = new PriceRecorder();
++
++// ── Data Retention ──────────────────────────────────────────────────────────
++// Keep 7 days of price history in live_feed and prices.jsonl.
++// Run once at startup (removes accumulated backlog) then daily.
++const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
++(function runCleanup() {
++  const dbRows = recorder.cleanup(RETENTION_MS);
++  const jsonlRows = recorder.pruneJSONL(RETENTION_MS);
++  if (dbRows > 0 || jsonlRows > 0) {
++    console.log(`[Cleanup] Daten älter als 7 Tage entfernt: ${dbRows} DB-Zeilen, ${jsonlRows} JSONL-Zeilen.`);
++  }
++})();
++setInterval(() => {
++  const dbRows = recorder.cleanup(RETENTION_MS);
++  const jsonlRows = recorder.pruneJSONL(RETENTION_MS);
++  if (dbRows > 0 || jsonlRows > 0) {
++    console.log(`[Cleanup] Tägliche Bereinigung: ${dbRows} DB-Zeilen, ${jsonlRows} JSONL-Zeilen entfernt.`);
++  }
++}, 24 * 60 * 60 * 1000).unref();
++
+ const botManager = new BotManager();
+ const server = new BotServer(botManager, recorder, 3000);
+ 
+@@ -58,8 +84,8 @@ const savedAgentConfig = (() => {
+   try { return JSON.parse(getSetting('agentConfig', '{}')); } catch { return {}; }
+ })();
+ const agent = new OllamaAgent(savedAgentConfig);
+-agent.connect(botManager, (botId, advice) => {
+-  server.broadcast('agent_advice', { botId, advice });
++agent.connect(botManager, (botId, advice, applied) => {
++  server.broadcast('agent_advice', { botId, advice, applied });
+ }, (eventName, data) => {
+   server.broadcast(eventName, data);
+ });
+diff --git a/src/ollamaAgent.ts b/src/ollamaAgent.ts
+index 8055b50..dfacade 100644
+--- a/src/ollamaAgent.ts
++++ b/src/ollamaAgent.ts
+@@ -16,6 +16,8 @@ import {
+   saveAgentHistory,
+   getAgentHistory as getAgentHistoryFromDb,
+   getRegimePerformance,
++  getStrategyRegimePerformance,
++  getForceMultiplierTierStats,
+   getRecentAdvicesWithOutcomes,
+   saveAgentConfig,
+   loadAgentConfig,
+@@ -26,10 +28,13 @@ import {
+   type TimeWindowPerformance,
+   type TimeWindowDrift,
+   type LessonEntry,
++  type StrategyRegimePerformance,
++  type ForceMultiplierTierStats,
+   db,
+ } from './db.js';
+ import { generateLessons } from './lessonsGenerator.js';
+ import { PriceFeed } from './priceFeed.js';
++import { isScalpingType } from './strategyEngine.js';
+ 
+ // --- Types ---
+ 
+@@ -90,6 +95,12 @@ export interface OllamaAdvice {
+     risk_management?: { position_size?: number };
+     entry_condition_hints?: string;
+   };
++  paetAdjustments?: {             // PAET-specific parameter hints
++    collapse_threshold_pct?: number;
++    evacuation_ticks?: number;
++    safety_coefficient_k?: number;
++    volatility_sigma_multiplier?: number;
++  };
+   strategySwitch?: {              // ADR-011 Phase B: optional strategy-type switch
+     fromStrategyType: string;
+     toStrategyType: string;
+@@ -143,6 +154,47 @@ Recommendations by regime:
+ - DEAD: lower spikeThreshold (<0.15%) or set aggressiveness to minimum
+ - VOLATILE: increase sellDropThreshold, reduce aggressiveness`,
+ 
++  'scalping-adaptive': `STRATEGY TYPE: scalping-adaptive (Adaptive Range Spike Scalper)
++Same optimizable parameters as the base scalping strategy — return them in the "settings" field:
++- floorWindow: 100–2000 Ticks (window for floor calculation)
++- spikeThreshold: 0.05–5.0% (minimum spike above floor)
++- sellDropThreshold: 0.03–2.0% (drop from peak → SELL)
++- cooldownTicks: 2–20 (cooldown after trade)
++The bot also runs an internal adaptive fork that may temporarily widen thresholds during
++warmup, high volatility, or unfavorable conditions. Your "settings" recommendations are
++treated as the BASELINE the adaptive fork will adapt around, so optimize for the typical
++regime rather than edge cases.
++Recommendations by regime:
++- RANGING: normal thresholds, optimize for win rate vs the bot's historical average
++- TRENDING: increase spikeThreshold (>1.5%) to avoid buying pullbacks, reduce aggressiveness
++- DEAD: lower spikeThreshold (<0.15%) or set aggressiveness to minimum
++- VOLATILE: increase sellDropThreshold, strongly reduce aggressiveness`,
++
++  paet: `STRATEGY TYPE: paet (Predictive Anomaly & Evacuation Trigger)
++Decomposes price history via STL (Trend + Seasonal + Residual) with FFT cycle filtering
++and triggers an evacuation SELL using 1st/2nd-order derivatives + Point-of-No-Return logic.
++The bot's false-alarm penalty ω self-calibrates from observed outcomes.
++
++Optimizable parameters (in "paetAdjustments" field, NOT in "settings"):
++- collapse_threshold_pct: 0.05–0.50 (fraction of peak price that defines a collapse)
++- evacuation_ticks: 1–10 (candles allocated for safe exit before projected collapse)
++- safety_coefficient_k: 1–5 (multiplier for ω in the PNR budget formula)
++- volatility_sigma_multiplier: 1.0–4.0 (residual-band width in σ units)
++
++Static fields (informational, do not return as adjustments): stl_seasonal_period,
++stl_trend_window, min_history_candles, acceleration_ema_period, entry_mode,
++entry_cooldown_ticks, stop_loss_pct, false_alarm_penalty_omega.
++
++Recommendations by regime:
++- RANGING: standard parameters — cycles are predictable, FFT filters them out
++- TRENDING: lower evacuation_ticks (2–3) — exits must be faster in fast-moving trends
++- VOLATILE: raise collapse_threshold_pct (0.30–0.40) — more room before treating as collapse
++- DEAD: lower collapse_threshold_pct (0.10–0.15) — any sustained decline is significant
++
++RULES:
++- Return your tuned numbers ONLY inside "paetAdjustments", omit the "settings" field.
++- aggressiveness is supported normally (PAET inherits the global aggressiveness ceiling).`,
++
+   trend: `STRATEGY TYPE: trend (EMA Trend Following)
+ Optimizable parameters (in "strategyAdjustments.indicators" array):
+ - EMA_fast period: 5–20 (shorter EMA, reacts faster)
+@@ -406,6 +458,83 @@ function mixPatternSettings(
+   return out;
+ }
+ 
++// --- Robust JSON extraction from model output ---
++// Reasoning models (e.g. Qwen3) frequently wrap their answer in <think>…</think>
++// blocks or markdown code fences, and sometimes truncate on maxTokens. The naive
++// greedy /\{[\s\S]*\}/ regex then captures garbage or fails to parse. These
++// helpers clean the raw output and extract the first balanced JSON object.
++
++const AGENT_PARSE_ERROR_LOG = path.join(process.cwd(), 'logs', 'agent-parse-errors.jsonl');
++
++function logAgentParseFailure(botId: string | undefined, model: string | undefined, raw: string, reason: string): void {
++  try {
++    const dir = path.dirname(AGENT_PARSE_ERROR_LOG);
++    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
++    const entry = JSON.stringify({
++      timestamp: Date.now(),
++      botId: botId ?? null,
++      model: model ?? null,
++      reason,
++      raw,
++    });
++    fs.appendFileSync(AGENT_PARSE_ERROR_LOG, entry + '\n', 'utf-8');
++  } catch {
++    // Logging must never break the analysis loop.
++  }
++}
++
++// Remove <think>…</think> blocks (and an unterminated trailing <think>…) plus
++// markdown code fences, so the JSON extractor sees only the payload.
++function cleanModelOutput(raw: string): string {
++  let s = raw;
++  s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
++  s = s.replace(/<think>[\s\S]*$/gi, '');
++  s = s.replace(/```(?:json)?/gi, '');
++  return s;
++}
++
++// Extract the first top-level balanced {...} substring, respecting string
++// literals and escapes. Returns null when no balanced object exists (e.g.
++// output truncated mid-object by maxTokens).
++function extractBalancedJson(s: string): string | null {
++  const start = s.indexOf('{');
++  if (start === -1) return null;
++  let depth = 0;
++  let inStr = false;
++  let escape = false;
++  for (let i = start; i < s.length; i++) {
++    const ch = s[i];
++    if (inStr) {
++      if (escape) escape = false;
++      else if (ch === '\\') escape = true;
++      else if (ch === '"') inStr = false;
++      continue;
++    }
++    if (ch === '"') { inStr = true; continue; }
++    if (ch === '{') depth++;
++    else if (ch === '}') {
++      depth--;
++      if (depth === 0) return s.slice(start, i + 1);
++    }
++  }
++  return null;
++}
++
++// Parse JSON, tolerating the trailing commas some models emit before } or ].
++// Never throws — returns null when the candidate cannot be parsed.
++function tryLenientJsonParse(candidate: string): unknown | null {
++  try {
++    return JSON.parse(candidate);
++  } catch {
++    try {
++      const cleaned = candidate.replace(/,\s*([}\]])/g, '$1');
++      return JSON.parse(cleaned);
++    } catch {
++      return null;
++    }
++  }
++}
++
+ // --- Main Agent Class ---
+ 
+ import type { BotManager } from './botManager.js';
+@@ -417,11 +546,16 @@ export class OllamaAgent {
+   private running = false;
+   analyzing = false;
+ 
++  // Defence-in-Depth: Queue ist bereits durch enqueueBot-Dedup auf die Bot-Anzahl begrenzt.
++  // Diese Kappe schuetzt zusaetzlich vor unbeabsichtigtem Wachstum, falls spaeter
++  // weitere Einreih-Stellen ohne Dedup hinzukommen.
++  private static readonly MAX_QUEUE_SIZE = 256;
++
+   private analysisQueue: { botId: string; forceMultiplier?: number }[] = [];
+   private drainingQueue = false;
+ 
+   private botManager: BotManager | null = null;
+-  private onAdvice: ((botId: string, advice: OllamaAdvice) => void) | null = null;
++  private onAdvice: ((botId: string, advice: OllamaAdvice, applied: boolean) => void) | null = null;
+   private broadcast: ((eventName: string, data: any) => void) | null = null;
+ 
+   private adviceHistory: OllamaAdvice[] = [];
+@@ -450,7 +584,7 @@ export class OllamaAgent {
+ 
+   connect(
+     botManager: BotManager,
+-    onAdvice: (botId: string, advice: OllamaAdvice) => void,
++    onAdvice: (botId: string, advice: OllamaAdvice, applied: boolean) => void,
+     broadcast?: (eventName: string, data: any) => void,
+   ): void {
+     this.botManager = botManager;
+@@ -546,9 +680,12 @@ export class OllamaAgent {
+   }
+ 
+   private enqueueBot(botId: string, forceMultiplier?: number): void {
+-    if (!this.analysisQueue.some((q) => q.botId === botId)) {
+-      this.analysisQueue.push({ botId, forceMultiplier });
++    if (this.analysisQueue.some((q) => q.botId === botId)) return;
++    if (this.analysisQueue.length >= OllamaAgent.MAX_QUEUE_SIZE) {
++      // Aelteste Eintraege verwerfen, um ein ungebremstes Wachstum zu verhindern.
++      this.analysisQueue.splice(0, this.analysisQueue.length - OllamaAgent.MAX_QUEUE_SIZE + 1);
+     }
++    this.analysisQueue.push({ botId, forceMultiplier });
+   }
+ 
+   private async runCycle(): Promise<void> {
+@@ -683,6 +820,8 @@ export class OllamaAgent {
+     }
+ 
+     const regimePerf = getRegimePerformance(state.id);
++    const strategyRegimePerf = getStrategyRegimePerformance(state.id, 3);
++    const forceMultiplierStats = getForceMultiplierTierStats(state.id, 3);
+     const recentAdvices = getRecentAdvicesWithOutcomes(state.id, 5);
+ 
+     // ADR-011 Phase A: time-window + drift for prompt
+@@ -729,7 +868,7 @@ export class OllamaAgent {
+       state,
+       botTokenMint,
+       openPositionBlock,
+-      { hourPerf, dayPerf, hourDrift, dayDrift, lessons },
++      { hourPerf, dayPerf, hourDrift, dayDrift, lessons, strategyRegimePerf, forceMultiplierStats },
+     );
+ 
+     const activeStrategyType = (state as any).strategyType ?? 'scalping';
+@@ -747,7 +886,7 @@ export class OllamaAgent {
+       throw err;
+     }
+ 
+-    const advice = this.parseResponse(response, settings, lessons);
++    const advice = this.parseResponse(response, settings, lessons, state.id, this.config.model);
+ 
+     if (!advice) {
+       logger.warn(state.id, 'AI_AGENT', "Analysis failed: No valid JSON received.");
+@@ -792,12 +931,15 @@ export class OllamaAgent {
+     this.adviceHistory.unshift(advice);
+     if (this.adviceHistory.length > this.maxHistoryLength) this.adviceHistory.pop();
+ 
+-    this.onAdvice?.(state.id, advice);
+-
+     if (applied) {
+       const mixedSettings = mixPatternSettings(settings, advice.adjustedSettings, mix);
+       if (Object.keys(mixedSettings).length > 0) {
+-        bot.updateSettings(mixedSettings);
++        // Persist AI-adjusted scalping settings via BotManager so they survive restarts.
++        if (this.botManager) {
++          this.botManager.updateBotSettings(state.id, mixedSettings);
++        } else {
++          bot.updateSettings(mixedSettings);
++        }
+       }
+       if (advice.aggressiveness !== undefined) {
+         const curAggr = (state as any).aiAggressiveness ?? state.aggressiveness ?? 10;
+@@ -807,8 +949,11 @@ export class OllamaAgent {
+       }
+       // Strategy param tweaks are only applied when the user is willing to
+       // commit to a meaningful portion of the AI's recommendation (>= 50%).
+-      if (advice.strategyAdjustments && mix >= 0.5) {
+-        bot.applyStrategyAdjustments(advice.strategyAdjustments);
++      if ((advice.strategyAdjustments || advice.paetAdjustments) && mix >= 0.5) {
++        bot.applyStrategyAdjustments({
++          ...(advice.strategyAdjustments ?? {}),
++          paetAdjustments: advice.paetAdjustments,
++        });
+       }
+       // ADR-011 Phase B: strategy switch with safety gate.
+       // ADR-012: a switch is treated as a high-impact change. We only allow
+@@ -845,6 +990,8 @@ export class OllamaAgent {
+       console.log(`[OllamaAgent] Bot ${state.name} Analyse gespeichert (nicht angewendet: ${why}, Force=${fm}%)`);
+       logger.info(state.id, 'AI_AGENT', `Analyse fertig (nicht angewendet). ${why}, Force=${fm}%`);
+     }
++
++    this.onAdvice?.(state.id, advice, applied);
+   }
+ 
+   private async buildPrompt(
+@@ -865,6 +1012,8 @@ export class OllamaAgent {
+       hourDrift: TimeWindowDrift[];
+       dayDrift: TimeWindowDrift[];
+       lessons: LessonEntry[];
++      strategyRegimePerf?: StrategyRegimePerformance[];
++      forceMultiplierStats?: ForceMultiplierTierStats[];
+     },
+   ): Promise<string> {
+     // ASCII sparkline replaces verbose raw price samples (~310 token savings)
+@@ -969,6 +1118,24 @@ export class OllamaAgent {
+       ).join('\n');
+     }
+ 
++    // Strategy × Regime matrix
++    let strategyRegimeBlock = 'No strategy-regime data yet.';
++    const srPerf = extra?.strategyRegimePerf ?? [];
++    if (srPerf.length > 0) {
++      strategyRegimeBlock = srPerf
++        .map(r => `- ${r.strategyType}/${r.regime}: ${r.winRate}% WR, avg PnL ${r.avgPnl.toFixed(3)}% (n=${r.totalTrades})`)
++        .join('\n');
++    }
++
++    // Force-multiplier effectiveness
++    let fmBlock = 'No force-multiplier data yet.';
++    const fmStats = extra?.forceMultiplierStats ?? [];
++    if (fmStats.length > 0) {
++      fmBlock = fmStats
++        .map(f => `- AI trust ${f.rangeLabel}: ${f.winRate}% WR, avg PnL ${f.avgPnl.toFixed(3)}%, avg conf ${f.avgConfidence}% (n=${f.totalTrades})`)
++        .join('\n');
++    }
++
+     const strategyInfo = state.strategyType
+       ? `Active Strategy: ${state.strategyType} (ID: ${state.strategyId ?? 'legacy'})`
+       : 'Active Strategy: scalping (PatternDetector, Legacy Mode)';
+@@ -1031,12 +1198,27 @@ export class OllamaAgent {
+     }
+ 
+     let currentSettingsBlock = '';
+-    if (state.strategyType === 'scalping' || !state.strategyType) {
++    if (isScalpingType(state.strategyType ?? '') || !state.strategyType) {
+       currentSettingsBlock = `CURRENT SETTINGS:
+ - floorWindow: ${settings.floorWindow}
+ - spikeThreshold: ${settings.spikeThreshold}%
+ - sellDropThreshold: ${settings.sellDropThreshold}%
+ - cooldownTicks: ${settings.cooldownTicks}`;
++    } else if (state.strategyType === 'paet' && state.strategyConfig?.paet_settings) {
++      const ps = state.strategyConfig.paet_settings;
++      currentSettingsBlock = `CURRENT SETTINGS (PAET):
++- collapse_threshold_pct: ${ps.collapse_threshold_pct}
++- evacuation_ticks: ${ps.evacuation_ticks}
++- safety_coefficient_k: ${ps.safety_coefficient_k}
++- volatility_sigma_multiplier: ${ps.volatility_sigma_multiplier}
++- stl_trend_window: ${ps.stl_trend_window}
++- stl_seasonal_period: ${ps.stl_seasonal_period}
++- acceleration_ema_period: ${ps.acceleration_ema_period}
++- min_history_candles: ${ps.min_history_candles}
++- entry_mode: ${ps.entry_mode}
++- entry_cooldown_ticks: ${ps.entry_cooldown_ticks}
++- stop_loss_pct: ${ps.stop_loss_pct}
++- omega (false_alarm_penalty): ${ps.false_alarm_penalty_omega}`;
+     } else if (state.strategyConfig) {
+       const config = state.strategyConfig;
+       currentSettingsBlock = `CURRENT STRATEGY PARAMETERS (${state.strategyType}):
+@@ -1096,6 +1278,12 @@ ${tradesBlock}
+ REGIME PERFORMANCE (historical):
+ ${regimePerfBlock}
+ 
++STRATEGY × REGIME MATRIX (which strategy works in which regime):
++${strategyRegimeBlock}
++
++AI TRUST EFFECTIVENESS (force-multiplier tiers):
++${fmBlock}
++
+ TIME-WINDOW PERFORMANCE (per-hour / per-weekday buckets):
+ ${timeWindowBlock}
+ 
+@@ -1120,77 +1308,79 @@ ${formatCandleRows(m15Candles, 5)}`;
+   private async queryOpencode(userContent: string, systemPrompt?: string): Promise<string> {
+     const tempPromptPath = path.join(os.tmpdir(), `bot_prompt_${Date.now()}.txt`);
+     const fullPrompt = `${systemPrompt ?? this.config.systemPrompt}\n\n${userContent}`;
+-    
++
+     try {
+       fs.writeFileSync(tempPromptPath, fullPrompt);
+       console.log(`[OllamaAgent] Querying opencode CLI (model: ${this.config.model}) via file ${tempPromptPath}...`);
+-      
++
+       return new Promise((resolve, reject) => {
+-        // Opencode bietet ein .cmd Wrapper auf Windows, der CLI-kompatibel ist.
+         const opencodeCmd = 'C:\\Users\\info\\AppData\\Roaming\\npm\\opencode.cmd';
+         const args = [
+           'run',
+           'Analyze market data from the attached file. Respond ONLY with the requested JSON.',
+           '-m', this.config.model,
+-          '-f', tempPromptPath
++          '-f', tempPromptPath,
++          '--format', 'json',
+         ];
+-        
++
+         console.log(`[OllamaAgent] Executing: ${opencodeCmd} ${args.join(' ')}`);
+ 
+         const child = spawn(opencodeCmd, args, { shell: true, timeout: 180000 });
+-
+-        // WICHTIG: stdin schliessen, sonst haengt der Prozess evtl. (wartet auf Input)
+         child.stdin?.end();
+ 
+         let stdout = '';
+         let stderr = '';
+ 
+         if (child.stdout) {
+-          child.stdout.on('data', (data) => {
+-            stdout += data.toString();
+-          });
++          child.stdout.on('data', (data) => { stdout += data.toString(); });
+         }
+-
+         if (child.stderr) {
+-          child.stderr.on('data', (data) => {
+-            stderr += data.toString();
+-          });
++          child.stderr.on('data', (data) => { stderr += data.toString(); });
+         }
+ 
+         child.on('close', (code) => {
+-          // Cleanup
+           try { if (fs.existsSync(tempPromptPath)) fs.unlinkSync(tempPromptPath); } catch (e) { /* ignore */ }
+ 
+           if (code !== 0) {
+             console.error(`[OllamaAgent] opencode error (Code ${code})`);
+-            console.error(`[OllamaAgent] Stderr Snippet: ${stderr.slice(0, 500)}`);
++            console.error(`[OllamaAgent] Stderr: ${stderr.slice(0, 500)}`);
+             return reject(new Error(`opencode error: ${code} - ${stderr.slice(0, 100)}`));
+           }
+ 
+-          // JSON extrahieren (zwischen erstem { und letztem })
+-          // Wir entfernen vorher moegliche Markdown-Codeblocks
+-          let normalized = stdout.replace(/```json/g, '').replace(/```/g, '');
+-
+-          const firstBrace = normalized.indexOf('{');
+-          const lastBrace = normalized.lastIndexOf('}');
+-          
+-          let cleaned = '';
+-          if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+-            cleaned = normalized.substring(firstBrace, lastBrace + 1).trim();
+-          } else {
+-            cleaned = normalized.trim();
++          // --format json outputs newline-delimited JSON events.
++          // We collect all type="text" parts and concatenate them into the model response.
++          const lines = stdout.split('\n');
++          let modelText = '';
++          for (const line of lines) {
++            const trimmed = line.trim();
++            if (!trimmed) continue;
++            try {
++              const ev = JSON.parse(trimmed) as { type?: string; part?: { type?: string; text?: string } };
++              if (ev.type === 'text' && ev.part?.type === 'text' && ev.part.text) {
++                modelText += ev.part.text;
++              }
++            } catch {
++              // not a JSON event line — ignore (can be status lines on stderr bleed-through)
++            }
+           }
+-          
+-          if (cleaned.length > 0) {
+-            console.log(`[OllamaAgent] opencode returned ${cleaned.length} bytes.`);
++
++          console.log(`[OllamaAgent] opencode: ${lines.length} events, modelText=${modelText.length}B`);
++          if (modelText.length === 0) {
++            console.warn(`[OllamaAgent] No text events found. stdout snippet: ${stdout.slice(0, 400)}`);
+           }
+-          
+-          // Strip markdown if it persists
++
++          // Strip markdown code fences and thinking blocks the model may still wrap output in
++          let cleaned = modelText
++            .replace(/```json/gi, '').replace(/```/g, '')
++            .replace(/<think>[\s\S]*?<\/think>/gi, '')
++            .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
++            .trim();
++
+           const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+           if (jsonMatch) {
+-             resolve(jsonMatch[0]);
++            resolve(jsonMatch[0]);
+           } else {
+-             resolve(cleaned);
++            resolve(cleaned);
+           }
+         });
+ 
+@@ -1278,15 +1468,37 @@ ${formatCandleRows(m15Candles, 5)}`;
+     return data.message.content;
+   }
+ 
+-  private parseResponse(raw: string, currentSettings: PatternSettings, lessons: LessonEntry[] = []): OllamaAdvice | null {
+-    try {
+-      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+-      if (!jsonMatch) {
+-        console.warn('[OllamaAgent] Kein JSON in Antwort:', raw.slice(0, 200));
+-        return null;
+-      }
++  private parseResponse(
++    raw: string,
++    currentSettings: PatternSettings,
++    lessons: LessonEntry[] = [],
++    botId?: string,
++    model?: string,
++  ): OllamaAdvice | null {
++    // Strip reasoning (<think>) blocks and markdown fences, then extract the
++    // first balanced JSON object. This survives Qwen3 reasoning output, code
++    // fences, and most maxTokens-truncation cases that broke the old greedy
++    // regex /\{[\s\S]*\}/.
++    const cleaned = cleanModelOutput(raw);
++    const candidate = extractBalancedJson(cleaned);
++
++    if (!candidate) {
++      const reason = cleaned.includes('{') ? 'unbalanced-or-truncated-json' : 'no-json-object';
++      console.warn(`[OllamaAgent] Kein gültiges JSON (${reason}):`, raw.slice(0, 200));
++      logAgentParseFailure(botId, model, raw, reason);
++      return null;
++    }
++
++    const parsedObj = tryLenientJsonParse(candidate);
++    if (parsedObj === null || typeof parsedObj !== 'object') {
++      console.warn('[OllamaAgent] JSON Parse Fehler für Kandidat:', candidate.slice(0, 300));
++      console.warn('[OllamaAgent] Raw:', raw.slice(0, 300));
++      logAgentParseFailure(botId, model, raw, 'parse-error');
++      return null;
++    }
+ 
+-      const parsed = JSON.parse(jsonMatch[0]) as {
++    try {
++      const parsed = parsedObj as {
+         regime?: string;
+         confidence?: number;
+         reason?: string;
+@@ -1299,6 +1511,12 @@ ${formatCandleRows(m15Candles, 5)}`;
+           risk_management?: { position_size?: number };
+           entry_condition_hints?: string;
+         };
++        paetAdjustments?: {
++          collapse_threshold_pct?: number;
++          evacuation_ticks?: number;
++          safety_coefficient_k?: number;
++          volatility_sigma_multiplier?: number;
++        };
+         strategySwitch?: {
+           fromStrategyType?: string;
+           toStrategyType?: string;
+@@ -1344,6 +1562,7 @@ ${formatCandleRows(m15Candles, 5)}`;
+       }
+ 
+       const strategyAdjustments = parsed.strategyAdjustments;
++      const paetAdjustments = parsed.paetAdjustments as OllamaAdvice['paetAdjustments'] | undefined;
+ 
+       // ADR-011 Phase B: optional strategy switch
+       let strategySwitch: OllamaAdvice['strategySwitch'] | undefined;
+@@ -1381,11 +1600,13 @@ ${formatCandleRows(m15Candles, 5)}`;
+         timestamp: Date.now(),
+         aggressiveness,
+         strategyAdjustments,
++        paetAdjustments,
+         strategySwitch,
+       };
+     } catch (err) {
+       console.warn('[OllamaAgent] JSON Parse Fehler:', (err as Error).message);
+       console.warn('[OllamaAgent] Raw:', raw.slice(0, 300));
++      logAgentParseFailure(botId, model, raw, `parse-error: ${(err as Error).message}`);
+       return null;
+     }
+   }
+diff --git a/src/patternDetector.ts b/src/patternDetector.ts
+index ba8fa1a..fe9e110 100644
+--- a/src/patternDetector.ts
++++ b/src/patternDetector.ts
+@@ -21,6 +21,7 @@ export interface PatternSettings {
+   sellDropThreshold: number; // % Rückgang vom Peak = Sell-Signal (default: 0.05)
+   cooldownTicks: number;     // Ticks warten nach Trade (default: 15)
+   takeProfitThreshold: number; // % above entry price = take-profit sell (default: 0.10)
++  startDelayTicks: number;   // Ticks nach Bot-Start vor erstem BUY (default: 30)
+ }
+ 
+ export const DEFAULT_SETTINGS: PatternSettings = {
+@@ -29,6 +30,7 @@ export const DEFAULT_SETTINGS: PatternSettings = {
+   sellDropThreshold: 5.0,   // 5% trailing stop — lets moves develop before exiting
+   cooldownTicks: 15,
+   takeProfitThreshold: 0.10, // 10% take-profit — 8% net after 2% fee
++  startDelayTicks: 30,      // ~60s at 2s/tick — prevents immediate first buy on bot start
+ };
+ 
+ export class PatternDetector {
+@@ -37,6 +39,7 @@ export class PatternDetector {
+   private peakPrice = 0;
+   private entryPrice = 0;
+   private cooldown = 0;
++  private startDelayTicksRemaining = 0;
+ 
+   constructor(settings?: Partial<PatternSettings>) {
+     this.settings = { ...DEFAULT_SETTINGS, ...settings };
+@@ -46,6 +49,11 @@ export class PatternDetector {
+     Object.assign(this.settings, settings);
+   }
+ 
++  /** Activate the post-start BUY delay. Must be called when the bot starts. */
++  startCooldown(): void {
++    this.startDelayTicksRemaining = this.settings.startDelayTicks;
++  }
++
+   analyze(history: PricePoint[]): PatternResult {
+     if (history.length === 0) {
+       return {
+@@ -90,6 +98,12 @@ export class PatternDetector {
+       return result;
+     }
+ 
++    if (this.startDelayTicksRemaining > 0) {
++      this.startDelayTicksRemaining--;
++      result.reason = `start cooldown (${this.startDelayTicksRemaining + 1}/${this.settings.startDelayTicks} ticks remaining)`;
++      return result;
++    }
++
+     if (!this.inSpike) {
+       if (spikePercent >= this.settings.spikeThreshold) {
+         this.inSpike = true;
+diff --git a/src/priceFeed.ts b/src/priceFeed.ts
+index f446ddf..d42260f 100644
+--- a/src/priceFeed.ts
++++ b/src/priceFeed.ts
+@@ -24,7 +24,6 @@ type DexScreenerResponse = {
+   pairs: DexScreenerPair[] | null;
+ };
+ 
+-// Jupiter Price API Response
+ type JupiterPriceResponse = {
+   data: Record<string, {
+     price: string;
+@@ -34,170 +33,91 @@ type JupiterPriceResponse = {
+   timeTaken: number;
+ };
+ 
+-// Rate Limiting Konfiguration (aus ENV oder Default)
+-const RATE_LIMIT_CONFIG = {
+-  minRequestInterval: CONFIG.PRICE_FEED_REQUEST_INTERVAL_MS, // Mindestabstand zwischen API-Calls
+-  maxRetries: CONFIG.PRICE_FEED_MAX_RETRIES,                 // Maximale Retry-Versuche bei 429
+-  baseRetryDelay: 5000,     // Basis Retry-Delay (5s)
+-  maxRetryDelay: 60000,     // Maximales Delay (60s)
+-} as const;
+-
+-// Per-token Queue für API-Requests
+-// lastRequestTime ist pro Mint-Adresse getrennt, damit 6 Bots sich nicht gegenseitig blockieren
+-const lastRequestTimeMap: Map<string, number> = new Map();
+-let pendingRequests: Map<string, Promise<number | null>> = new Map();
+-
+-async function wait(ms: number): Promise<void> {
+-  return new Promise(resolve => setTimeout(resolve, ms));
+-}
+-
+-async function fetchTokenPrice(mintAddress: string, retryCount = 0): Promise<number | null> {
+-  // Prüfen ob bereits eine Anfrage für diese Mint-Adresse läuft (Deduplizierung)
+-  const cacheKey = mintAddress;
+-  if (pendingRequests.has(cacheKey)) {
+-    return pendingRequests.get(cacheKey)!;
++// DexScreener Free Tier: 60 req/min global.
++// Wir nutzen 55 req/min (≈92 % Budget) als sicherer Zielwert mit 8 % Headroom.
++// → 1 Request alle 1091 ms. Bei N unique Mints: jeder Mint alle N*1091 ms aktualisiert.
++const SAFE_RPM = 55;
++export const SLOT_MS = Math.ceil(60_000 / SAFE_RPM); // 1091 ms pro Request-Slot
++
++// Per-Mint 429-Backoff: Slot wird in diesem Zyklus übersprungen.
++const backoffUntil: Map<string, number> = new Map();
++
++async function fetchTokenPrice(mintAddress: string): Promise<number | null> {
++  // Respektiere aktiven 429-Backoff für diesen Mint
++  const until = backoffUntil.get(mintAddress) ?? 0;
++  if (Date.now() < until) {
++    const remaining = Math.round((until - Date.now()) / 1000);
++    console.warn(`[PriceFeed] ⏳ ${mintAddress.slice(0, 8)}… Backoff noch ${remaining}s, überspringe.`);
++    return null;
+   }
+ 
+-  // Rate Limiting: Warten bis Mindestabstand eingehalten ist (pro Token getrennt)
+-  const now = Date.now();
+-  const lastRequest = lastRequestTimeMap.get(mintAddress) ?? 0;
+-  const timeSinceLastRequest = now - lastRequest;
+-  if (timeSinceLastRequest < RATE_LIMIT_CONFIG.minRequestInterval) {
+-    const delay = RATE_LIMIT_CONFIG.minRequestInterval - timeSinceLastRequest;
+-    console.log(`[PriceFeed] Rate Limiting: Warte ${Math.round(delay)}ms vor API-Request für ${mintAddress}`);
+-    await wait(delay);
+-  }
++  try {
++    if (CONFIG.PRICE_FEED_PROVIDER === 'jupiter') {
++      const url = `${CONFIG.PRICE_FEED_URL}?ids=${mintAddress}&vsToken=USDC`;
++      console.log(`[PriceFeed] 📡 Jupiter: ${mintAddress}`);
++      const res = await fetch(url);
+ 
+-  const fetchPromise = (async (): Promise<number | null> => {
+-    try {
+-      lastRequestTimeMap.set(mintAddress, Date.now());
+-      
+-      // URL und Request basierend auf Provider zusammenbauen
+-      if (CONFIG.PRICE_FEED_PROVIDER === 'jupiter') {
+-        // Jupiter Price API: https://price.jup.ag/v6/price?ids=SOL&vsToken=USDC
+-        const url = `${CONFIG.PRICE_FEED_URL}?ids=${mintAddress}&vsToken=USDC`;
+-        console.log(`[PriceFeed] 📡 Jupiter Request: ${mintAddress}`);
+-        
+-        const res = await fetch(url);
+-        
+-        // 429 Too Many Requests - Exponential Backoff
+-        if (res.status === 429) {
+-          const retryDelay = Math.min(
+-            RATE_LIMIT_CONFIG.baseRetryDelay * Math.pow(2, retryCount),
+-            RATE_LIMIT_CONFIG.maxRetryDelay
+-          );
+-          console.warn(
+-            `[PriceFeed] ⚠️  RATE LIMIT (429) für ${mintAddress}. Retry #${retryCount + 1}/${RATE_LIMIT_CONFIG.maxRetries} in ${Math.round(retryDelay / 1000)}s`
+-          );
+-          
+-          if (retryCount < RATE_LIMIT_CONFIG.maxRetries) {
+-            await wait(retryDelay);
+-            return fetchTokenPrice(mintAddress, retryCount + 1);
+-          } else {
+-            console.error(`[PriceFeed] ❌ Rate Limit nach ${RATE_LIMIT_CONFIG.maxRetries} Retries. Pausiere bis zum nächsten Poll-Zyklus.`);
+-            return null;
+-          }
+-        }
+-        
+-        if (!res.ok) {
+-          throw new Error(`Jupiter Price API ${res.status}: ${res.statusText}`);
+-        }
+-        
+-        const json = await res.json() as JupiterPriceResponse;
+-        const priceData = json.data[mintAddress];
+-        if (!priceData || !priceData.price) return null;
+-        
+-        const price = parseFloat(priceData.price);
+-        return isNaN(price) ? null : price;
+-        
+-      } else {
+-        // DexScreener / Andere Provider
+-        const url = `${CONFIG.PRICE_FEED_URL}/${mintAddress}`;
+-        console.log(`[PriceFeed] 📡 Request an ${CONFIG.PRICE_FEED_PROVIDER}: ${mintAddress}`);
+-        
+-        const res = await fetch(url);
+-        
+-        // 429 Too Many Requests - Exponential Backoff
+-        if (res.status === 429) {
+-          const retryDelay = Math.min(
+-            RATE_LIMIT_CONFIG.baseRetryDelay * Math.pow(2, retryCount),
+-            RATE_LIMIT_CONFIG.maxRetryDelay
+-          );
+-          console.warn(
+-            `[PriceFeed] ⚠️  RATE LIMIT (429) für ${mintAddress}. Retry #${retryCount + 1}/${RATE_LIMIT_CONFIG.maxRetries} in ${Math.round(retryDelay / 1000)}s`
+-          );
+-          
+-          if (retryCount < RATE_LIMIT_CONFIG.maxRetries) {
+-            await wait(retryDelay);
+-            return fetchTokenPrice(mintAddress, retryCount + 1);
+-          } else {
+-            console.error(`[PriceFeed] ❌ Rate Limit nach ${RATE_LIMIT_CONFIG.maxRetries} Retries. Pausiere bis zum nächsten Poll-Zyklus.`);
+-            return null;
+-          }
+-        }
+-        
+-        // Andere Fehler
+-        if (!res.ok) {
+-          throw new Error(`${CONFIG.PRICE_FEED_PROVIDER} API ${res.status}: ${res.statusText}`);
+-        }
+-        
+-        const json = (await res.json()) as DexScreenerResponse;
+-        if (!json.pairs || json.pairs.length === 0) return null;
+-        
+-        // Nimm das Pair mit dem höchsten 24h-Volumen (nur Pairs mit gültigem Preis)
+-        const validPairs = json.pairs.filter(p => p.priceUsd != null && p.volume?.h24 != null);
+-        if (validPairs.length === 0) return null;
+-        
+-        const best = validPairs.reduce((a, b) => (a.volume.h24 > b.volume.h24 ? a : b));
+-        const price = parseFloat(best.priceUsd);
+-        return isNaN(price) ? null : price;
++      if (res.status === 429) {
++        backoffUntil.set(mintAddress, Date.now() + 20_000);
++        console.warn(`[PriceFeed] ⚠️  429 Jupiter → Backoff 20s für ${mintAddress.slice(0, 8)}`);
++        return null;
+       }
+-      
+-    } catch (error) {
+-      const errorMsg = (error as Error).message;
+-      
+-      // Netzwerk-Fehler mit Retry
+-      if (errorMsg.includes('fetch failed') || errorMsg.includes('network')) {
+-        if (retryCount < RATE_LIMIT_CONFIG.maxRetries) {
+-          const retryDelay = RATE_LIMIT_CONFIG.baseRetryDelay * Math.pow(2, retryCount);
+-          console.warn(
+-            `[PriceFeed] ⚠️  Netzwerk-Fehler für ${mintAddress}. Retry #${retryCount + 1} in ${Math.round(retryDelay / 1000)}s`
+-          );
+-          await wait(retryDelay);
+-          return fetchTokenPrice(mintAddress, retryCount + 1);
+-        }
++      if (!res.ok) throw new Error(`Jupiter ${res.status}: ${res.statusText}`);
++
++      const json = await res.json() as JupiterPriceResponse;
++      const p = json.data[mintAddress];
++      if (!p?.price) return null;
++      const price = parseFloat(p.price);
++      return isNaN(price) ? null : price;
++
++    } else {
++      // DexScreener / andere Provider
++      const url = `${CONFIG.PRICE_FEED_URL}/${mintAddress}`;
++      console.log(`[PriceFeed] 📡 ${CONFIG.PRICE_FEED_PROVIDER}: ${mintAddress}`);
++      const res = await fetch(url);
++
++      if (res.status === 429) {
++        backoffUntil.set(mintAddress, Date.now() + 20_000);
++        console.warn(`[PriceFeed] ⚠️  429 DexScreener → Backoff 20s für ${mintAddress.slice(0, 8)}`);
++        return null;
+       }
+-      
+-      throw error;
+-    } finally {
+-      pendingRequests.delete(cacheKey);
++      if (!res.ok) throw new Error(`${CONFIG.PRICE_FEED_PROVIDER} ${res.status}: ${res.statusText}`);
++
++      const json = (await res.json()) as DexScreenerResponse;
++      if (!json.pairs || json.pairs.length === 0) return null;
++
++      const validPairs = json.pairs.filter(p => p.priceUsd != null && p.volume?.h24 != null);
++      if (validPairs.length === 0) return null;
++
++      const best = validPairs.reduce((a, b) => (a.volume.h24 > b.volume.h24 ? a : b));
++      const price = parseFloat(best.priceUsd);
++      return isNaN(price) ? null : price;
+     }
+-  })();
+-  
+-  pendingRequests.set(cacheKey, fetchPromise);
+-  return fetchPromise;
++
++  } catch (error) {
++    console.error(`[PriceFeed] ❌ Netzwerk-Fehler für ${mintAddress}:`, (error as Error).message);
++    return null;
++  }
+ }
+ 
+ export class PriceFeed extends EventEmitter {
+   private static instance: PriceFeed;
+   private historyMap: Map<string, PricePoint[]> = new Map();
+-  private intervalIds: Map<string, ReturnType<typeof setInterval>> = new Map();
+   private subscriberCounts: Map<string, number> = new Map();
+   private lastPollMap: Map<string, number> = new Map();
+-  // Stale-Tracking (ADR-010): letzter Zeitpunkt eines *echten* Preises pro Mint
++  // Stale-Tracking (ADR-010)
+   private lastFreshAtMap: Map<string, number> = new Map();
+-  // Anzahl aufeinanderfolgender fehlgeschlagener/veralteter Polls pro Mint
+   private consecutiveStaleMap: Map<string, number> = new Map();
+   private getBotNamesForToken: ((mintAddress: string) => string[]) | null = null;
+ 
++  // Globaler Stagger-Scheduler (ersetzt per-Mint setInterval)
++  private schedulerTimeout: ReturnType<typeof setTimeout> | null = null;
++  private lastLoggedMintCount = -1;
++
+   private constructor() {
+     super();
+   }
+ 
+-  /**
+-   * Setzt eine Callback-Funktion um Bot-Namen für ein Token zu erhalten.
+-   * Wird für gruppierte Log-Ausgabe verwendet.
+-   */
+   public setBotNamesCallback(callback: (mintAddress: string) => string[]): void {
+     this.getBotNamesForToken = callback;
+   }
+@@ -209,18 +129,28 @@ export class PriceFeed extends EventEmitter {
+     return PriceFeed.instance;
+   }
+ 
++  /** Effektiver Poll-Abstand pro Mint in ms bei aktueller Mint-Anzahl. */
++  public getEffectiveIntervalMs(): number {
++    const N = this.subscriberCounts.size;
++    return N === 0 ? SLOT_MS : N * SLOT_MS;
++  }
++
++  /** Anzahl unique Mints mit aktiver Subscription. */
++  public getActiveMintCount(): number {
++    return this.subscriberCounts.size;
++  }
++
+   public subscribe(mintAddress: string): void {
+     const currentCount = this.subscriberCounts.get(mintAddress) || 0;
+     this.subscriberCounts.set(mintAddress, currentCount + 1);
+ 
+     if (currentCount === 0) {
+-      // First subscriber, start polling
+       if (!this.historyMap.has(mintAddress)) {
+         this.historyMap.set(mintAddress, []);
+       }
++      // Sofortiger erster Tick, danach übernimmt der Scheduler
+       this.poll(mintAddress);
+-      const intervalId = setInterval(() => this.poll(mintAddress), CONFIG.PRICE_FEED_TICKRATE_MS);
+-      this.intervalIds.set(mintAddress, intervalId);
++      this.restartScheduler();
+     }
+   }
+ 
+@@ -228,19 +158,60 @@ export class PriceFeed extends EventEmitter {
+     const currentCount = this.subscriberCounts.get(mintAddress) || 0;
+     if (currentCount <= 1) {
+       this.subscriberCounts.delete(mintAddress);
+-      const intervalId = this.intervalIds.get(mintAddress);
+-      if (intervalId) {
+-        clearInterval(intervalId);
+-        this.intervalIds.delete(mintAddress);
+-      }
+       this.historyMap.delete(mintAddress);
+-      lastRequestTimeMap.delete(mintAddress);
+-      pendingRequests.delete(mintAddress);
++      backoffUntil.delete(mintAddress);
++      this.lastPollMap.delete(mintAddress);
+       this.lastFreshAtMap.delete(mintAddress);
+       this.consecutiveStaleMap.delete(mintAddress);
+     } else {
+       this.subscriberCounts.set(mintAddress, currentCount - 1);
+     }
++    this.restartScheduler();
++  }
++
++  /**
++   * Startet den globalen Stagger-Scheduler neu.
++   * Wird bei jeder Änderung der aktiven Mint-Anzahl aufgerufen.
++   * Verteilt N Mints gleichmäßig auf N * SLOT_MS Zyklusdauer:
++   *   mint[0] → t=0, mint[1] → t=SLOT_MS, mint[2] → t=2*SLOT_MS, …
++   * → Exakt 55 req/min unabhängig von der Mint-Anzahl.
++   */
++  private restartScheduler(): void {
++    if (this.schedulerTimeout !== null) {
++      clearTimeout(this.schedulerTimeout);
++      this.schedulerTimeout = null;
++    }
++
++    const mints = Array.from(this.subscriberCounts.keys());
++    const N = mints.length;
++    if (N === 0) return;
++
++    if (N !== this.lastLoggedMintCount) {
++      const cycleMs = N * SLOT_MS;
++      const updPerMin = (60_000 / cycleMs).toFixed(1);
++      console.log(
++        `[PriceFeed] ⚙️  ${N} Mint(s) aktiv | Slot ${SLOT_MS}ms | Zyklus ${(cycleMs / 1000).toFixed(2)}s` +
++        ` | ~${updPerMin} Updates/Min pro Token | ${SAFE_RPM} req/min gesamt`
++      );
++      this.lastLoggedMintCount = N;
++    }
++
++    // Erster Zyklus startet nach vollständiger Zyklusdauer, da jeder Mint
++    // bereits sofort bei subscribe() gepollt wurde.
++    this.schedulerTimeout = setTimeout(() => this.runCycle(), N * SLOT_MS);
++  }
++
++  /** Führt einen Zyklus aus: pollt alle Mints gestaffelt, plant nächsten Zyklus. */
++  private runCycle(): void {
++    const mints = Array.from(this.subscriberCounts.keys());
++    const N = mints.length;
++    if (N === 0) { this.schedulerTimeout = null; return; }
++
++    mints.forEach((mint, i) => {
++      setTimeout(() => this.poll(mint), i * SLOT_MS);
++    });
++
++    this.schedulerTimeout = setTimeout(() => this.runCycle(), N * SLOT_MS);
+   }
+ 
+   public getHistory(mintAddress: string): PricePoint[] {
+@@ -265,17 +236,13 @@ export class PriceFeed extends EventEmitter {
+ 
+   public seedHistory(mintAddress: string, points: PricePoint[]): void {
+     const history = this.historyMap.get(mintAddress) || [];
+-    // Concatenate and sort by timestamp, then unique by timestamp
+     const uniquePoints = [...history, ...points]
+       .sort((a, b) => a.timestamp - b.timestamp)
+-      .filter((point, index, self) => 
++      .filter((point, index, self) =>
+         index === 0 || point.timestamp !== self[index - 1].timestamp
+       );
+-    
+-    // Limit to 1000 points
++
+     this.historyMap.set(mintAddress, uniquePoints.slice(-1000));
+-    // ADR-010: zuletzt bekannten echten Zeitpunkt übernehmen, damit die
+-    // Veraltungsdauer auch direkt nach Start/Restore korrekt abgebildet wird.
+     if (uniquePoints.length > 0) {
+       this.lastFreshAtMap.set(mintAddress, uniquePoints[uniquePoints.length - 1].timestamp);
+     }
+@@ -286,11 +253,9 @@ export class PriceFeed extends EventEmitter {
+     this.lastPollMap.set(mintAddress, Date.now());
+     try {
+       const price = await fetchTokenPrice(mintAddress);
+-      
++
+       if (price === null) {
+-        // ADR-010: Stale-Price-Isolation. Kein Re-Emit mit Date.now() als „frisch".
+-        // Der Bot (price:<mint>-Listener) erhält keinen Punkt -> kein Record/Persist/Trade.
+-        // Stattdessen Outage-Status separat signalisieren (für UI/Circuit-Breaker).
++        // ADR-010: Stale-Price-Isolation — kein Re-Emit als frischer Preis.
+         const prevCount = this.consecutiveStaleMap.get(mintAddress) ?? 0;
+         this.consecutiveStaleMap.set(mintAddress, prevCount + 1);
+ 
+@@ -306,7 +271,6 @@ export class PriceFeed extends EventEmitter {
+           console.warn(`[PriceFeed] ❌ Kein Preis für ${mintAddress} und kein Fallback verfügbar.`);
+         }
+ 
+-        // Outage-Signal für UI/Stats/Circuit-Breaker (kein Trading-Pfad).
+         this.emit('price_stale', {
+           mintAddress,
+           staleForMs,
+@@ -316,13 +280,12 @@ export class PriceFeed extends EventEmitter {
+         });
+         return;
+       }
+-      
++
+       // --- Echter (frischer) Preis ---
+       const now = Date.now();
+       const prevFreshAt = this.lastFreshAtMap.get(mintAddress);
+ 
+-      // Outage-Recovery (ADR-010): nach langem Ausfall History bereinigen und
+-      // Re-Warmup erzwingen, damit keine veraltete Floor-Basis zu Phantom-Spikes führt.
++      // Outage-Recovery (ADR-010): nach langem Ausfall History bereinigen.
+       let recoveredFromOutage = false;
+       if (prevFreshAt !== undefined && (now - prevFreshAt) > CONFIG.PRICE_FEED_LONG_OUTAGE_MS) {
+         this.historyMap.set(mintAddress, []);
+@@ -333,25 +296,22 @@ export class PriceFeed extends EventEmitter {
+       this.lastFreshAtMap.set(mintAddress, now);
+       this.consecutiveStaleMap.set(mintAddress, 0);
+ 
+-      // Gruppierte Log-Ausgabe mit Token-Symbol und Bot-Namen
+       const tokenInfo = getTokenInfo(mintAddress);
+       const tokenSymbol = tokenInfo?.symbol ?? mintAddress.slice(0, 8);
+       const botNames = this.getBotNamesForToken?.(mintAddress) ?? [];
+       const botList = botNames.length > 0 ? ` → [${botNames.join(', ')}]` : '';
+-      
++
+       console.log(`[PriceFeed] ✅ ${tokenSymbol}: $${price}${botList}`);
+       const point: PricePoint = { timestamp: now, price, recoveredFromOutage };
+       const history = this.historyMap.get(mintAddress) || [];
+       history.push(point);
+ 
+-      // Limit history size to 1000 points per token to save memory
+       if (history.length > 1000) history.shift();
+       this.historyMap.set(mintAddress, history);
+ 
+       this.emit(`price:${mintAddress}`, point);
+-      // Also emit a general price event for the server/UI context
+       this.emit('price_update', { mintAddress, ...point });
+-      
++
+     } catch (e) {
+       console.error(`[PriceFeed] ❌ Fehler bei ${mintAddress}:`, (e as Error).message);
+     }
+@@ -363,8 +323,8 @@ export class PriceFeed extends EventEmitter {
+ if (process.argv[1]?.endsWith('priceFeed.ts')) {
+   const feed = PriceFeed.getInstance();
+   const testMint = 'UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW';
+-  console.log(`[Test] Starte Preis-Feed Test für ${testMint}...`);
+-  
++  console.log(`[Test] Starte Preis-Feed Test für ${testMint}…`);
++
+   feed.subscribe(testMint);
+   let ticks = 0;
+   feed.on(`price:${testMint}`, (p) => {
+diff --git a/src/priceRecorder.ts b/src/priceRecorder.ts
+index 160e4ba..5efc16d 100644
+--- a/src/priceRecorder.ts
++++ b/src/priceRecorder.ts
+@@ -113,12 +113,37 @@ export class PriceRecorder {
+   }
+ 
+   /**
+-   * Clean up old data from SQLite database
++   * Clean up old data from SQLite live_feed table.
++   * Returns number of rows deleted.
+    */
+   cleanup(olderThanMs: number): number {
+     return cleanupOldLiveFeedData(olderThanMs);
+   }
+ 
++  /**
++   * Prune the prices.jsonl flat file by removing entries older than `olderThanMs`.
++   * Rewrites the file in-place; safe to call infrequently (daily).
++   * Returns number of lines removed.
++   */
++  pruneJSONL(olderThanMs: number): number {
++    if (!fs.existsSync(PRICE_FILE)) return 0;
++    const cutoff = Date.now() - olderThanMs;
++    const raw = fs.readFileSync(PRICE_FILE, 'utf-8');
++    const lines = raw.trim().split('\n').filter(Boolean);
++    const kept = lines.filter(l => {
++      try {
++        return (JSON.parse(l) as PricePoint).timestamp >= cutoff;
++      } catch {
++        return false;
++      }
++    });
++    const removed = lines.length - kept.length;
++    if (removed > 0) {
++      fs.writeFileSync(PRICE_FILE, kept.join('\n') + '\n', 'utf-8');
++    }
++    return removed;
++  }
++
+   /**
+    * Import historical 1-minute candles from GeckoTerminal.
+    * Each candle's close price becomes a PricePoint.
+diff --git a/src/server.ts b/src/server.ts
+index 720b15c..fd6a758 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -6,12 +6,14 @@ import { getAdvisorSuggestions } from './advisorEngine.js';
+ import { TokenService, isValidMintAddress, saveTokenToDb } from './tokenService.js';
+ import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder, getTradesForPerformance, getTimeWindowPerformance, detectTimeWindowDrift, getLessonsForBot, saveUiSettings, loadUiSettings, type UiSettings } from './db.js';
+ import { loadBuiltinTemplates } from './strategyEngine.js';
+-import { PriceFeed } from './priceFeed.js';
++import { PriceFeed, SLOT_MS } from './priceFeed.js';
+ import type { OllamaAgent } from './ollamaAgent.js';
+ import { buildSystemPrompt } from './ollamaAgent.js';
+ import { validateStrategy } from './strategy.js';
+ import { DEFAULT_SETTINGS } from './patternDetector.js';
+ import { CONFIG } from './config.js';
++import { walletService, type RangeKey, getSolscanUrl } from './walletService.js';
++import { getTradesForWallet } from './db.js';
+ 
+ const DEFAULT_GLOBAL_SETTINGS = {
+   floorWindow: DEFAULT_SETTINGS.floorWindow,
+@@ -112,6 +114,12 @@ export class BotServer {
+       this.broadcast('price_stale', payload);
+     });
+ 
++    // ADR-015: Periodischer Wallet-Balance-Snapshot (alle 5 Min)
++    walletService.startSnapshotScheduler();
++    setTimeout(() => {
++      walletService.snapshotBalances().catch(() => {});
++    }, 10_000);
++
+     // Periodisch Token-Preise von DexScreener aktualisieren (alle 60 Sekunden)
+     setInterval(() => {
+       this.tokenService.refreshAllTokenPrices().catch(() => {});
+@@ -323,9 +331,10 @@ export class BotServer {
+       res.writeHead(200, { 'Content-Type': 'application/json' });
+       res.end(JSON.stringify({
+         priceFeedProvider: CONFIG.PRICE_FEED_PROVIDER,
+-        priceFeedTickrateMs: CONFIG.PRICE_FEED_TICKRATE_MS,
+-        priceFeedRequestIntervalMs: CONFIG.PRICE_FEED_REQUEST_INTERVAL_MS,
+-        priceFeedMaxRetries: CONFIG.PRICE_FEED_MAX_RETRIES,
++        priceFeedSlotMs: SLOT_MS,
++        priceFeedSafeRpm: 55,
++        priceFeedActiveMints: this.priceFeed.getActiveMintCount(),
++        priceFeedEffectiveIntervalMs: this.priceFeed.getEffectiveIntervalMs(),
+         priceFeedUrl: CONFIG.PRICE_FEED_PROVIDER === 'custom' ? '[REDACTED]' : CONFIG.PRICE_FEED_URL,
+         pollIntervalMs: CONFIG.POLL_INTERVAL_MS,
+         rpcUrl: CONFIG.RPC_URL,
+@@ -575,8 +584,8 @@ export class BotServer {
+         req.on('end', () => {
+           try {
+             const incoming = JSON.parse(body);
+-            // Pattern settings
+-            const { tradeSize, aggressiveness, tradingMode, walletAddress, ...patternSettings } = incoming;
++            // Pattern settings (killSwitch wird separat behandelt, nicht an PatternDetector durchreichen)
++            const { tradeSize, aggressiveness, tradingMode, walletAddress, killSwitch, ...patternSettings } = incoming;
+             if (Object.keys(patternSettings).length > 0) {
+               this.botManager.updateBotSettings(id, patternSettings);
+             }
+@@ -594,6 +603,10 @@ export class BotServer {
+             if (walletAddress !== undefined) {
+               this.botManager.updateBotWalletAddress(id, walletAddress);
+             }
++            // Kill-Switch / Stop-Strategie Konfiguration
++            if (killSwitch !== undefined) {
++              this.botManager.updateBotKillSwitch(id, killSwitch);
++            }
+             this.broadcast('state', this.botManager.getAllStates());
+             res.writeHead(200, { 'Content-Type': 'application/json' });
+             res.end(JSON.stringify({ ok: true, settings: bot.getSettings() }));
+@@ -622,6 +635,15 @@ export class BotServer {
+         return;
+       }
+ 
++      // POST /api/bots/:id/killswitch/reset — Kill-Switch quittieren und erneut scharfschalten
++      if (req.method === 'POST' && action === 'killswitch/reset') {
++        this.botManager.resetBotKillSwitch(id);
++        this.broadcast('state', this.botManager.getAllStates());
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ ok: true }));
++        return;
++      }
++
+       // POST /api/bots/:id/trade - Manual BUY/SELL trading
+       if (req.method === 'POST' && action === 'trade') {
+         let body = '';
+@@ -1212,8 +1234,8 @@ export class BotServer {
+ 
+     // GET /api/agent/insights?botId=… — ADR-011 aggregated insights
+     if (pathname === '/api/agent/insights' && req.method === 'GET') {
++      const botId = urlObj.searchParams.get('botId');
+       try {
+-        const botId = urlObj.searchParams.get('botId');
+         if (!botId) {
+           res.writeHead(400, { 'Content-Type': 'application/json' });
+           res.end(JSON.stringify({ error: 'botId query param required' }));
+@@ -1278,6 +1300,264 @@ export class BotServer {
+       return;
+     }
+ 
++    // ==================== WALLET API (ADR-015) ====================
++
++    // GET /api/wallet/info — primäre Wallet, SOL-Balance, Netzwerk, Token-Count
++    if (pathname === '/api/wallet/info' && req.method === 'GET') {
++      try {
++        const info = await walletService.getInfo();
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify(info));
++      } catch (e: any) {
++        res.writeHead(500, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ error: e.message }));
++      }
++      return;
++    }
++
++    // GET /api/wallet/balances — alle Token-Balances der primären Wallet
++    if (pathname === '/api/wallet/balances' && req.method === 'GET') {
++      try {
++        const address = walletService.getPrimaryAddress();
++        const allBots = this.botManager.getAllBots();
++        const liveBots = allBots.filter(b => {
++          const s = b.getState();
++          return !s.paperMode && s.walletAddress === address;
++        });
++        const mints = Array.from(new Set(liveBots.map(b => b.getState().mintAddress)));
++        const balances = await walletService.getAllTokenBalances(mints, address);
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ address, balances }));
++      } catch (e: any) {
++        res.writeHead(500, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ error: e.message }));
++      }
++      return;
++    }
++
++    // GET /api/wallet/balance/history?range=24h|7d|30d|all — historische Snapshots
++    const balanceHistoryMatch = pathname.match(/^\/api\/wallet\/balance\/history$/);
++    if (balanceHistoryMatch && req.method === 'GET') {
++      try {
++        const rangeRaw = (urlObj.searchParams.get('range') ?? '24h') as RangeKey;
++        const range: RangeKey = ['1h', '24h', '7d', '30d', 'all'].includes(rangeRaw) ? rangeRaw : '24h';
++        const history = await walletService.getBalanceHistory(range);
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ range, history }));
++      } catch (e: any) {
++        res.writeHead(500, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ error: e.message }));
++      }
++      return;
++    }
++
++    // GET /api/wallet/transactions?limit=100&offset=0&botId=…&type=BUY|SELL&mode=paper|live&from=<ms>&to=<ms>
++    const txMatch = pathname.match(/^\/api\/wallet\/transactions$/);
++    if (txMatch && req.method === 'GET') {
++      try {
++        const limit = Math.min(500, parseInt(urlObj.searchParams.get('limit') ?? '100', 10));
++        const offset = Math.max(0, parseInt(urlObj.searchParams.get('offset') ?? '0', 10));
++        const botId = urlObj.searchParams.get('botId') ?? undefined;
++        const typeRaw = urlObj.searchParams.get('type');
++        const type = typeRaw === 'BUY' || typeRaw === 'SELL' ? typeRaw : undefined;
++        const modeRaw = urlObj.searchParams.get('mode');
++        const mode = modeRaw === 'paper' || modeRaw === 'live' ? modeRaw : undefined;
++        const fromParam = urlObj.searchParams.get('from');
++        const toParam = urlObj.searchParams.get('to');
++        const from = fromParam ? parseInt(fromParam, 10) : undefined;
++        const to = toParam ? parseInt(toParam, 10) : undefined;
++
++        const trades = getTradesForWallet({ limit, offset, botId, type, mode, from, to });
++        const network = walletService.getPrimaryAddress()
++          ? (await walletService.getInfo()).network
++          : 'mainnet';
++        const enriched = trades.map(t => ({
++          ...t,
++          solscanUrl: t.signature ? getSolscanUrl(t.signature, network) : null,
++        }));
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ limit, offset, count: enriched.length, transactions: enriched }));
++      } catch (e: any) {
++        res.writeHead(500, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ error: e.message }));
++      }
++      return;
++    }
++
++    // GET /api/wallet/transactions/onchain?limit=25 — Live-Tx direkt von Solana RPC
++    const onchainTxMatch = pathname.match(/^\/api\/wallet\/transactions\/onchain$/);
++    if (onchainTxMatch && req.method === 'GET') {
++      try {
++        const limit = Math.min(100, parseInt(urlObj.searchParams.get('limit') ?? '25', 10));
++        const txs = await walletService.getOnChainTransactions(limit);
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ count: txs.length, transactions: txs }));
++      } catch (e: any) {
++        res.writeHead(500, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ error: e.message }));
++      }
++      return;
++    }
++
++    // GET /api/wallet/transactions/:signature — Tx-Detail
++    const txDetailMatch = pathname.match(/^\/api\/wallet\/transactions\/([1-9A-HJ-NP-Za-km-z]{64,88})$/);
++    if (txDetailMatch && req.method === 'GET') {
++      try {
++        const signature = txDetailMatch[1];
++        const detail = await walletService.getTransactionDetail(signature);
++        if (!detail) {
++          res.writeHead(404, { 'Content-Type': 'application/json' });
++          res.end(JSON.stringify({ error: 'Transaction not found' }));
++          return;
++        }
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify(detail));
++      } catch (e: any) {
++        res.writeHead(500, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ error: e.message }));
++      }
++      return;
++    }
++
++    // POST /api/wallet/snapshot — manueller Snapshot-Trigger
++    if (pathname === '/api/wallet/snapshot' && req.method === 'POST') {
++      try {
++        await walletService.snapshotBalances();
++        this.broadcast('wallet_update', { walletAddress: walletService.getPrimaryAddress(), timestamp: Date.now() });
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ ok: true, timestamp: Date.now() }));
++      } catch (e: any) {
++        res.writeHead(500, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ error: e.message }));
++      }
++      return;
++    }
++
++    // GET /api/wallet/bots — welche Bots nutzen welche Wallet
++    if (pathname === '/api/wallet/bots' && req.method === 'GET') {
++      try {
++        const address = walletService.getPrimaryAddress();
++        const rows = this.botManager.getAllBots().map(bot => {
++          const state = bot.getState();
++          return {
++            botId: state.id,
++            botName: state.name,
++            walletAddress: state.walletAddress ?? '',
++            paperMode: state.paperMode,
++            mintAddress: state.mintAddress,
++          };
++        });
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ primaryWallet: address, bots: rows }));
++      } catch (e: any) {
++        res.writeHead(500, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ error: e.message }));
++      }
++      return;
++    }
++
++    // GET /api/wallet/config — Wallet-Setup-Konfiguration (kein Private-Key!)
++    if (pathname === '/api/wallet/config' && req.method === 'GET') {
++      try {
++        const config = walletService.getConfig();
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify(config));
++      } catch (e: any) {
++        res.writeHead(500, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ error: e.message }));
++      }
++      return;
++    }
++
++    // POST /api/wallet/setup/generate — neues Keypair generieren
++    if (pathname === '/api/wallet/setup/generate' && req.method === 'POST') {
++      try {
++        const result = walletService.generateNewWallet();
++        this.broadcast('wallet_update', { walletAddress: result.address, timestamp: Date.now() });
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ ok: true, address: result.address, privateKeyBase58: result.privateKeyBase58 }));
++      } catch (e: any) {
++        res.writeHead(500, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ error: e.message }));
++      }
++      return;
++    }
++
++    // POST /api/wallet/setup/import — bestehenden Private-Key importieren
++    if (pathname === '/api/wallet/setup/import' && req.method === 'POST') {
++      let body = '';
++      req.on('data', chunk => body += chunk);
++      req.on('end', () => {
++        try {
++          const { privateKey } = JSON.parse(body) as { privateKey?: string };
++          if (!privateKey) {
++            res.writeHead(400, { 'Content-Type': 'application/json' });
++            res.end(JSON.stringify({ error: 'privateKey ist erforderlich' }));
++            return;
++          }
++          const result = walletService.importPrivateKey(privateKey);
++          this.broadcast('wallet_update', { walletAddress: result.address, timestamp: Date.now() });
++          res.writeHead(200, { 'Content-Type': 'application/json' });
++          res.end(JSON.stringify({ ok: true, address: result.address }));
++        } catch (e: any) {
++          res.writeHead(400, { 'Content-Type': 'application/json' });
++          res.end(JSON.stringify({ error: e.message ?? 'Import fehlgeschlagen' }));
++        }
++      });
++      return;
++    }
++
++    // DELETE /api/wallet/setup — Private-Key aus .env entfernen
++    if (pathname === '/api/wallet/setup' && req.method === 'DELETE') {
++      try {
++        walletService.clearPrivateKey();
++        this.broadcast('wallet_update', { walletAddress: null, timestamp: Date.now() });
++        res.writeHead(200, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ ok: true }));
++      } catch (e: any) {
++        res.writeHead(500, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ error: e.message }));
++      }
++      return;
++    }
++
++    // PUT /api/wallet/paper-mode-default — globaler Paper-Mode-Default
++    if (pathname === '/api/wallet/paper-mode-default' && req.method === 'PUT') {
++      let body = '';
++      req.on('data', chunk => body += chunk);
++      req.on('end', () => {
++        try {
++          const { paperMode } = JSON.parse(body) as { paperMode?: boolean };
++          if (typeof paperMode !== 'boolean') {
++            res.writeHead(400, { 'Content-Type': 'application/json' });
++            res.end(JSON.stringify({ error: 'paperMode (boolean) ist erforderlich' }));
++            return;
++          }
++          walletService.setPaperModeDefault(paperMode);
++          this.broadcast('state', this.botManager.getAllStates());
++          res.writeHead(200, { 'Content-Type': 'application/json' });
++          res.end(JSON.stringify({ ok: true, paperMode }));
++        } catch (e: any) {
++          res.writeHead(500, { 'Content-Type': 'application/json' });
++          res.end(JSON.stringify({ error: e.message }));
++        }
++      });
++      return;
++    }
++
++    // POST /api/wallet/test-rpc — RPC-Verbindung testen
++    if (pathname === '/api/wallet/test-rpc' && req.method === 'POST') {
++      try {
++        const result = await walletService.testRpc();
++        res.writeHead(result.ok ? 200 : 503, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify(result));
++      } catch (e: any) {
++        res.writeHead(500, { 'Content-Type': 'application/json' });
++        res.end(JSON.stringify({ error: e.message }));
++      }
++      return;
++    }
++
+     // GET /api/performance — bestätigte Trades für Performance-Analyse (alle Bots, zeitgefiltert)
+     // Query-Parameter: from=<ms>, to=<ms>, botIds=<comma-separierte IDs>, mode=paper|live
+     if (pathname === '/api/performance' && req.method === 'GET') {
+diff --git a/src/strategyEngine.ts b/src/strategyEngine.ts
+index e4feec9..9dbf96a 100644
+--- a/src/strategyEngine.ts
++++ b/src/strategyEngine.ts
+@@ -2,16 +2,34 @@
+ // Falls back to PatternDetector for strategy_type === 'scalping'
+ 
+ import type { PricePoint } from './priceFeed.js';
+-import type { PatternResult } from './patternDetector.js';
++import type { PatternResult, PatternSettings } from './patternDetector.js';
+ import { PatternDetector, DEFAULT_SETTINGS } from './patternDetector.js';
+ import type { StrategyConfig, Condition, ExitCondition } from './strategyTypes.js';
+ import { aggregate } from './candleAggregator.js';
+ import { computeAll, lastValue, hasCrossover, hasCrossunder } from './indicatorEngine.js';
+ import type { IndicatorValues } from './strategyTypes.js';
++import { ForkRegistry } from './strategyForks/types.js';
++import { adaptiveScalpingFork } from './strategyForks/adaptiveScalpingFork.js';
++import { buildMarketContext } from './marketContext.js';
++import { PAETEngine } from './paetEngine.js';
++
++function clamp(value: number, min: number, max: number): number {
++  return Math.max(min, Math.min(max, value));
++}
++
++/** Global registry for strategy forks. Forks are registered once at module load time. */
++export const globalForkRegistry = new ForkRegistry();
++globalForkRegistry.register(adaptiveScalpingFork);
++
++export function isScalpingType(type: string): boolean {
++  return type === 'scalping' || type === 'scalping-adaptive';
++}
+ 
+ export class StrategyEngine {
+   private config: StrategyConfig;
+   private scalpingDetector?: PatternDetector;
++  private paetEngine?: PAETEngine;
++  private forkRegistry: ForkRegistry;
+ 
+   // State for non-scalping strategies
+   private inPosition = false;
+@@ -21,21 +39,34 @@ export class StrategyEngine {
+   // Latest computed indicator values — exposed via getLatestIndicatorValues()
+   private latestValues: Record<string, number> = {};
+ 
+-  constructor(config: StrategyConfig) {
++  // Tracks last logged adaptive settings to avoid log spam.
++  private lastLoggedSettings?: string;
++
++  // ADR-012: progressive warmup for scalping-adaptive.
++  // In the first ADAPTIVE_WARMUP_TICKS after start/reset the effective spike threshold
++  // is lifted so the bot does not buy on an unstable floor.
++  private warmupTicksElapsed = 0;
++
++  constructor(config: StrategyConfig, forkRegistry?: ForkRegistry) {
+     this.config = config;
++    this.forkRegistry = forkRegistry ?? globalForkRegistry;
+ 
+-    if (config.strategy_type === 'scalping') {
++    if (isScalpingType(config.strategy_type)) {
+       const ss = config.scalping_settings ?? {};
+       this.scalpingDetector = new PatternDetector({
+         ...DEFAULT_SETTINGS,
+         ...ss,
+       });
+     }
++
++    if (config.strategy_type === 'paet') {
++      this.paetEngine = new PAETEngine(config.paet_settings ?? {});
++    }
+   }
+ 
+   updateConfig(config: StrategyConfig): void {
+     this.config = config;
+-    if (config.strategy_type === 'scalping') {
++    if (isScalpingType(config.strategy_type)) {
+       const ss = config.scalping_settings ?? {};
+       if (this.scalpingDetector) {
+         this.scalpingDetector.updateSettings({ ...DEFAULT_SETTINGS, ...ss });
+@@ -43,14 +74,31 @@ export class StrategyEngine {
+         this.scalpingDetector = new PatternDetector({ ...DEFAULT_SETTINGS, ...ss });
+       }
+     }
++
++    if (config.strategy_type === 'paet') {
++      if (this.paetEngine) {
++        // Preserve runtime state (peakPrice, ω) — only update cfg.
++        this.paetEngine.updateSettings(config.paet_settings ?? {});
++      } else {
++        this.paetEngine = new PAETEngine(config.paet_settings ?? {});
++      }
++    }
+   }
+ 
+   reset(): void {
+     this.scalpingDetector?.reset();
++    this.paetEngine?.reset();
+     this.inPosition = false;
+     this.entryPrice = 0;
+     this.peakPrice = 0;
+     this.latestValues = {};
++    this.warmupTicksElapsed = 0;
++  }
++
++  /** Activate the post-start BUY delay for scalping strategies. */
++  startCooldown(): void {
++    this.scalpingDetector?.startCooldown();
++    this.warmupTicksElapsed = 0;
+   }
+ 
+   /** Returns latest computed indicator values for live UI display */
+@@ -58,10 +106,107 @@ export class StrategyEngine {
+     return { ...this.latestValues };
+   }
+ 
++  /** Returns the progressive warmup progress for scalping-adaptive (0–1). */
++  getAdaptiveWarmupProgress(): number {
++    if (this.config.strategy_type !== 'scalping-adaptive') return 1;
++    const ADAPTIVE_WARMUP_TICKS = 60;
++    return Math.min(1, this.warmupTicksElapsed / ADAPTIVE_WARMUP_TICKS);
++  }
++
+   analyze(ticks: PricePoint[], stats?: import('./trader.js').TraderStats): PatternResult {
++    if (this.config.strategy_type === 'scalping-adaptive' && this.scalpingDetector) {
++      const context = buildMarketContext(ticks);
++      const adaptedConfig = this.forkRegistry.adapt(this.config, context);
++      const adaptedSettings: PatternSettings = {
++        ...DEFAULT_SETTINGS,
++        ...(adaptedConfig.scalping_settings ?? {}),
++      };
++
++      // Only update detector settings when the fork produced different values.
++      // This keeps the hot path cheap and avoids unnecessary object churn.
++      this.scalpingDetector.updateSettings(adaptedSettings);
++
++      this.warmupTicksElapsed++;
++
++      const ADAPTIVE_WARMUP_TICKS = 60;
++      const warmupProgress = Math.min(1, this.warmupTicksElapsed / ADAPTIVE_WARMUP_TICKS);
++      const warmupMultiplier = 2.0 - warmupProgress; // 2.0 → 1.0
++
++      if (warmupProgress < 1) {
++        adaptedSettings.spikeThreshold = clamp(
++          adaptedSettings.spikeThreshold * warmupMultiplier,
++          0.05,
++          5.0,
++        );
++        // Re-apply the detector with the warmup-lifted threshold.
++        this.scalpingDetector.updateSettings(adaptedSettings);
++      }
++
++      const settingsKey = JSON.stringify(adaptedConfig.scalping_settings);
++      if (settingsKey !== this.lastLoggedSettings) {
++        console.log(
++          `[StrategyEngine] adaptive scalping context: session=${context.session}, volatility=${context.volatility.toFixed(2)}%, ` +
++          `trend=${context.trendBias}, htf=${context.higherTimeframeSignal ?? 'n/a'} | ` +
++          `spike=${adaptedSettings.spikeThreshold.toFixed(2)}%, drop=${adaptedSettings.sellDropThreshold.toFixed(2)}%, ` +
++          `cooldown=${adaptedSettings.cooldownTicks}${warmupProgress < 1 ? ` (warmup ${(warmupProgress * 100).toFixed(0)}%)` : ''}`
++        );
++        this.lastLoggedSettings = settingsKey;
++      }
++
++      const result = this.scalpingDetector.analyze(ticks);
++
++      // Expose adaptive context + effective settings for the UI scanner.
++      // Numeric codes are used because indicatorValues is Record<string, number>.
++      const sessionCode = { asia: 1, london: 2, ny: 3, overlap: 4, other: 5 }[context.session] ?? 5;
++      const trendCode = { down: -1, neutral: 0, up: 1 }[context.trendBias] ?? 0;
++      const htfCode = context.higherTimeframeSignal
++        ? { bearish: -1, neutral: 0, bullish: 1 }[context.higherTimeframeSignal] ?? 0
++        : 0;
++
++      result.indicatorValues = {
++        ...result.indicatorValues,
++        adaptive_volatility: parseFloat(context.volatility.toFixed(2)),
++        adaptive_avgRange: parseFloat(context.avgRange.toFixed(2)),
++        adaptive_session: sessionCode,
++        adaptive_trendBias: trendCode,
++        adaptive_higherTimeframeSignal: htfCode,
++        adaptive_spikeThreshold: parseFloat(adaptedSettings.spikeThreshold.toFixed(2)),
++        adaptive_sellDropThreshold: parseFloat(adaptedSettings.sellDropThreshold.toFixed(2)),
++        adaptive_takeProfitThreshold: parseFloat(adaptedSettings.takeProfitThreshold.toFixed(2)),
++        adaptive_cooldownTicks: adaptedSettings.cooldownTicks,
++        adaptive_floorWindow: adaptedSettings.floorWindow,
++      };
++      this.latestValues = { ...result.indicatorValues };
++
++      return result;
++    }
++
+     if (this.config.strategy_type === 'scalping' && this.scalpingDetector) {
+       return this.scalpingDetector.analyze(ticks);
+     }
++
++    if (this.config.strategy_type === 'paet' && this.paetEngine) {
++      const paetResult = this.paetEngine.analyze(ticks, stats?.openPositionsCount ?? 0);
++      // Emergency hard stop-loss: triggered when PAET PNR/anomaly logic never fires
++      // (e.g. dead market with no volatility). Default: 8% below entry price.
++      const stopLossPct = this.config.paet_settings?.stop_loss_pct ?? 0.08;
++      if (
++        stopLossPct > 0 &&
++        paetResult.signal !== 'SELL' &&
++        (stats?.openPositionsCount ?? 0) > 0
++      ) {
++        const entryPrice = stats?.currentPosition?.entryPrice ?? 0;
++        const currentPrice = ticks[ticks.length - 1]?.price ?? 0;
++        if (entryPrice > 0 && currentPrice > 0 && currentPrice < entryPrice * (1 - stopLossPct)) {
++          const lossPct = ((entryPrice - currentPrice) / entryPrice * 100).toFixed(1);
++          paetResult.signal = 'SELL';
++          paetResult.reason = `PAET emergency stop-loss: -${lossPct}% (threshold: ${(stopLossPct * 100).toFixed(0)}%)`;
++        }
++      }
++      this.latestValues = { ...paetResult.indicatorValues };
++      return paetResult;
++    }
++
+     // Fallback to analyzeGeneric for grid and dca to allow basic entry/exit logic
+     return this.analyzeGeneric(ticks, stats);
+   }
+@@ -396,6 +541,11 @@ export class StrategyEngine {
+       this.scalpingDetector.reset();
+     }
+   }
++
++  /** Returns the PAETEngine instance if this is a PAET strategy, otherwise undefined. */
++  getPaetEngine(): PAETEngine | undefined {
++    return this.paetEngine;
++  }
+ }
+ 
+ /**
+diff --git a/src/strategyTypes.ts b/src/strategyTypes.ts
+index b41ebeb..fb9034c 100644
+--- a/src/strategyTypes.ts
++++ b/src/strategyTypes.ts
+@@ -3,13 +3,15 @@
+ 
+ export type StrategyType =
+   | 'scalping'
++  | 'scalping-adaptive'
+   | 'trend'
+   | 'mean_reversion'
+   | 'breakout'
+   | 'momentum'
+   | 'grid'
+   | 'dca'
+-  | 'ml';
++  | 'ml'
++  | 'paet';
+ 
+ export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d';
+ 
+@@ -102,6 +104,25 @@ export interface StrategyConfig {
+     interval: string;   // e.g. '1d', '4h', '1h'
+     amount: number;     // amount per DCA entry in SOL
+   };
++  // PAET-specific config (strategy_type === 'paet')
++  paet_settings?: {
++    stl_seasonal_period?: number;       // 0 = auto-detect via FFT
++    stl_trend_window?: number;
++    volatility_sigma_multiplier?: number;
++    collapse_threshold_pct?: number;
++    evacuation_ticks?: number;
++    safety_coefficient_k?: number;
++    false_alarm_penalty_omega?: number;
++    min_history_candles?: number;
++    acceleration_ema_period?: number;
++    // Entry mode: 'once' = buy at first opportunity after warmup;
++    // 'paet_plus' = selective entry when velocity>0 AND residual>0
++    entry_mode?: 'once' | 'paet_plus';
++    entry_cooldown_ticks?: number;      // min ticks between a SELL and the next BUY
++    // Emergency hard stop-loss as fallback if PNR/anomaly never fires (e.g. dead market).
++    // 0.08 = 8% below entry price triggers forced SELL. 0 = disabled.
++    stop_loss_pct?: number;
++  };
+   // Custom system prompt for the Ollama Strategy Assistant
+   // If set, overrides the auto-generated prompt for this strategy
+   system_prompt?: string;
+@@ -132,3 +153,16 @@ export interface StrategySignal {
+   peakPrice: number;      // trailing peak for SELL calculation
+   indicatorValues?: Record<string, number>;  // latest single values for each indicator
+ }
++
++// Market context used by strategy forks to adapt parameters programmatically
++export interface MarketContext {
++  hourOfDay: number;              // 0-23, UTC
++  dayOfWeek: number;              // 0-6 (0 = Sunday)
++  session: 'asia' | 'london' | 'ny' | 'overlap' | 'other';
++  lookbackTicks: number;          // number of ticks in the lookback window
++  lookbackMinutes: number;        // approx. minutes covered by the lookback window
++  volatility: number;             // std-dev of returns over lookback, in percent
++  avgRange: number;               // average absolute return per tick, in percent
++  trendBias: 'up' | 'down' | 'neutral';
++  higherTimeframeSignal?: 'bullish' | 'bearish' | 'neutral';
++}
+diff --git a/src/trader.ts b/src/trader.ts
+index b59fecb..086931f 100644
+--- a/src/trader.ts
++++ b/src/trader.ts
+@@ -9,7 +9,7 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction
+ import { createJupiterApiClient } from '@jup-ag/api';
+ import { loadOrCreateKeypair, getWalletLock } from './wallet.js';
+ import { CONFIG } from './config.js';
+-import { insertPendingTrade, confirmTrade, failTrade } from './db.js';
++import { insertPendingTrade, confirmTrade, failTrade, updateTradeSignature } from './db.js';
+ 
+ export interface Position {
+   entryPrice: number;
+@@ -239,7 +239,16 @@ export class Trader {
+     }
+   }
+ 
+-  private async executeLiveSwap(inputMint: string, outputMint: string, amountLamports: number): Promise<{ success: boolean; error?: string; txid?: string; meta?: unknown }> {
++  private async executeLiveSwap(inputMint: string, outputMint: string, amountLamports: number): Promise<{
++    success: boolean;
++    error?: string;
++    txid?: string;
++    meta?: unknown;
++    fee?: number;
++    expectedOutAmount?: number;
++    actualOutAmount?: number;
++    slippagePct?: number;
++  }> {
+     if (!this.connection || !this.keypair || !this.jupiterApi) {
+       return { success: false, error: 'No connection or keypair' };
+     }
+@@ -252,7 +261,10 @@ export class Trader {
+         slippageBps: 200,
+       });
+       if (!quoteResponse) return { success: false, error: 'Kein Quote erhalten' };
+-      
++
++      // ADR-015: Erwartete Output-Menge für Slippage-Berechnung festhalten
++      const expectedOutAmount = parseInt(String((quoteResponse as { outAmount?: string | number }).outAmount ?? '0'), 10);
++
+       console.log(`[Jupiter] Generiere Swap-Tx...`);
+       const swapResult = await this.jupiterApi.swapPost({
+         swapRequest: {
+@@ -277,7 +289,7 @@ export class Trader {
+       });
+ 
+       console.log(`[Jupiter] Tx gesendet: ${txid}. Warte auf Bestätigung...`);
+-      
++
+       let confirmed = false;
+       let confirmError: string | undefined;
+       try {
+@@ -305,13 +317,34 @@ export class Trader {
+           const txInfo = await this.connection.getTransaction(txid, { maxSupportedTransactionVersion: 0 });
+           if (txInfo) {
+             meta = txInfo.meta;
++            const fee = typeof txInfo.meta?.fee === 'number' ? txInfo.meta.fee / LAMPORTS_PER_SOL : 0;
++            // ADR-015: Tatsächliche Output-Menge aus postTokenBalances ableiten
++            let actualOutAmount = 0;
++            try {
++              const metaObj = txInfo.meta as { preTokenBalances?: unknown; postTokenBalances?: unknown } | null;
++              if (metaObj?.preTokenBalances && metaObj?.postTokenBalances) {
++                const pre = (metaObj.preTokenBalances as Array<{ mint: string; uiTokenAmount: { uiAmount: number | null } }>);
++                const post = (metaObj.postTokenBalances as Array<{ mint: string; uiTokenAmount: { uiAmount: number | null } }>);
++                const findDelta = (mint: string): number => {
++                  const p = pre.find(b => b.mint === mint)?.uiTokenAmount.uiAmount ?? 0;
++                  const q = post.find(b => b.mint === mint)?.uiTokenAmount.uiAmount ?? 0;
++                  return (q ?? 0) - (p ?? 0);
++                };
++                const delta = findDelta(outputMint);
++                actualOutAmount = delta > 0 ? delta : 0;
++              }
++            } catch { /* ignore parse errors */ }
++            const slippagePct = expectedOutAmount > 0 && actualOutAmount > 0
++              ? ((expectedOutAmount - actualOutAmount) / expectedOutAmount) * 100
++              : undefined;
++
+             if (txInfo.meta?.err === null) {
+               console.log(`[Jupiter] Tx verifiziert via getTransaction! ✅`);
+-              return { success: true, txid, meta };
++              return { success: true, txid, meta, fee, expectedOutAmount, actualOutAmount, slippagePct };
+             } else {
+               const errMsg = txInfo.meta?.err ? JSON.stringify(txInfo.meta.err) : 'Unknown error';
+               console.error(`[Jupiter] Tx fehlgeschlagen on-chain: ${errMsg}`);
+-              return { success: false, error: `On-chain error: ${errMsg}`, txid, meta };
++              return { success: false, error: `On-chain error: ${errMsg}`, txid, meta, fee };
+             }
+           }
+         } catch (e: any) {
+@@ -388,6 +421,17 @@ export class Trader {
+             failTrade(tradeId);
+             throw new Error('SWAP_FAILED');
+           }
++          // ADR-015: Solscan-Signatur, Fee & SOL-Delta in DB persistieren
++          if (swapResult.txid) {
++            updateTradeSignature(
++              tradeId,
++              swapResult.txid,
++              effectiveTradeSize,
++              swapResult.fee ?? null,
++              swapResult.slippagePct ?? null,
++              'auto',
++            );
++          }
+           confirmTrade(tradeId);
+         });
+       }
+@@ -459,6 +503,18 @@ export class Trader {
+             failTrade(tradeId);
+             throw new Error('SWAP_FAILED');
+           }
++          // ADR-015: Solscan-Signatur, Fee & SOL-Delta in DB persistieren
++          if (swapResult.txid) {
++            const solDelta = (swapResult.actualOutAmount ?? sellAmount * result.currentPrice);
++            updateTradeSignature(
++              tradeId,
++              swapResult.txid,
++              solDelta,
++              swapResult.fee ?? null,
++              swapResult.slippagePct ?? null,
++              'auto',
++            );
++          }
+           confirmTrade(tradeId);
+         });
+       }
+diff --git a/src/wallet.ts b/src/wallet.ts
+index 16a5059..56cef9c 100644
+--- a/src/wallet.ts
++++ b/src/wallet.ts
+@@ -70,6 +70,14 @@ function updateEnvKey(key: string, value: string): void {
+   fs.writeFileSync(ENV_PATH, content, 'utf-8');
+ }
+ 
++/**
++ * Exportiert updateEnvKey für andere Module (z. B. Wallet-Setup via API).
++ * NIEMALS verwenden, um Private-Keys ohne Validierung zu schreiben.
++ */
++export function setEnvValue(key: string, value: string): void {
++  updateEnvKey(key, value);
++}
++
+ export function loadOrCreateKeypair(mode: 'live' | 'dev' = 'dev'): Keypair {
+   if (!CONFIG.WALLET_PRIVATE_KEY) {
+     if (mode === 'live') {

@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { CONFIG } from './config.js';
 import { getTokenInfo } from './db.js';
+import type { PriceRecorder } from './priceRecorder.js';
 
 export interface PricePoint {
   timestamp: number;
@@ -103,12 +104,17 @@ async function fetchTokenPrice(mintAddress: string): Promise<number | null> {
 export class PriceFeed extends EventEmitter {
   private static instance: PriceFeed;
   private historyMap: Map<string, PricePoint[]> = new Map();
-  private subscriberCounts: Map<string, number> = new Map();
+  // Token-zentrisches Refcounting: tokenRef (vom TokenService) + botRef (von BotInstance).
+  // Polling + History bleiben aktiv, solange tokenRef + botRef > 0.
+  // "Solange Token existiert" = tokenRef > 0 → Polling läuft auch ohne laufende Bots.
+  private subscriptions: Map<string, { tokenRef: number; botRef: number }> = new Map();
   private lastPollMap: Map<string, number> = new Map();
   // Stale-Tracking (ADR-010)
   private lastFreshAtMap: Map<string, number> = new Map();
   private consecutiveStaleMap: Map<string, number> = new Map();
   private getBotNamesForToken: ((mintAddress: string) => string[]) | null = null;
+  // Optionaler PriceRecorder für Persistenz (live_feed + JSONL). Wird von index.ts gesetzt.
+  private priceRecorder: PriceRecorder | null = null;
 
   // Globaler Stagger-Scheduler (ersetzt per-Mint setInterval)
   private schedulerTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -122,6 +128,11 @@ export class PriceFeed extends EventEmitter {
     this.getBotNamesForToken = callback;
   }
 
+  /** Setzt den PriceRecorder für DB-/JSONL-Persistenz. Optional; ohne Recorder läuft der Feed rein in-memory. */
+  public setPriceRecorder(recorder: PriceRecorder): void {
+    this.priceRecorder = recorder;
+  }
+
   public static getInstance(): PriceFeed {
     if (!PriceFeed.instance) {
       PriceFeed.instance = new PriceFeed();
@@ -131,42 +142,118 @@ export class PriceFeed extends EventEmitter {
 
   /** Effektiver Poll-Abstand pro Mint in ms bei aktueller Mint-Anzahl. */
   public getEffectiveIntervalMs(): number {
-    const N = this.subscriberCounts.size;
+    const N = this.subscriptions.size;
     return N === 0 ? SLOT_MS : N * SLOT_MS;
   }
 
-  /** Anzahl unique Mints mit aktiver Subscription. */
+  /** Anzahl unique Mints mit aktiver Subscription (= aktive Token im System). */
   public getActiveMintCount(): number {
-    return this.subscriberCounts.size;
+    return this.subscriptions.size;
   }
 
-  public subscribe(mintAddress: string): void {
-    const currentCount = this.subscriberCounts.get(mintAddress) || 0;
-    this.subscriberCounts.set(mintAddress, currentCount + 1);
+  /**
+   * Aktiviert den Feed für ein Token (Token-Lifecycle).
+   * Aufgerufen von TokenService.addToken und beim Server-Startup für alle Token.
+   * Idempotent: mehrfacher Aufruf für dasselbe Mint ist ein No-Op (Refcount++).
+   * Lädt History aus live_feed, falls in-memory leer.
+   */
+  public activate(mintAddress: string): void {
+    const sub = this.subscriptions.get(mintAddress) ?? { tokenRef: 0, botRef: 0 };
+    sub.tokenRef++;
+    this.subscriptions.set(mintAddress, sub);
 
-    if (currentCount === 0) {
-      if (!this.historyMap.has(mintAddress)) {
-        this.historyMap.set(mintAddress, []);
-      }
-      // Sofortiger erster Tick, danach übernimmt der Scheduler
+    if (this.totalRef(sub) === 1) {
+      // Erster Subscriber überhaupt für dieses Token
+      this.historyMap.set(mintAddress, this.historyMap.get(mintAddress) ?? []);
+      this.seedFromDatabaseIfEmpty(mintAddress);
       this.poll(mintAddress);
       this.restartScheduler();
     }
   }
 
-  public unsubscribe(mintAddress: string): void {
-    const currentCount = this.subscriberCounts.get(mintAddress) || 0;
-    if (currentCount <= 1) {
-      this.subscriberCounts.delete(mintAddress);
-      this.historyMap.delete(mintAddress);
-      backoffUntil.delete(mintAddress);
-      this.lastPollMap.delete(mintAddress);
-      this.lastFreshAtMap.delete(mintAddress);
-      this.consecutiveStaleMap.delete(mintAddress);
-    } else {
-      this.subscriberCounts.set(mintAddress, currentCount - 1);
+  /**
+   * Deaktiviert den Token-Lifecycle-Refcount. Polling + History bleiben nur bestehen,
+   * solange noch Bots lauschen (botRef > 0). Sobald tokenRef + botRef == 0, wird
+   * der Feed gestoppt und der In-Memory-Puffer verworfen.
+   */
+  public deactivate(mintAddress: string): void {
+    const sub = this.subscriptions.get(mintAddress);
+    if (!sub || sub.tokenRef === 0) return;
+    sub.tokenRef--;
+    if (this.totalRef(sub) === 0) {
+      this.teardownMint(mintAddress);
+      this.restartScheduler();
     }
+  }
+
+  /**
+   * Erzwingt das vollständige Entfernen eines Mints aus dem Feed (History, Polling, Refs).
+   * Wird von TokenService.removeToken aufgerufen — der Aufrufer MUSS sicherstellen, dass
+   * keine Bots mehr für das Token laufen.
+   */
+  public remove(mintAddress: string): void {
+    this.subscriptions.delete(mintAddress);
+    this.historyMap.delete(mintAddress);
+    backoffUntil.delete(mintAddress);
+    this.lastPollMap.delete(mintAddress);
+    this.lastFreshAtMap.delete(mintAddress);
+    this.consecutiveStaleMap.delete(mintAddress);
     this.restartScheduler();
+  }
+
+  /**
+   * Bot-Subscribe (rückwärtskompatibel). Erhöht botRef und startet Polling,
+   * falls das Token nicht bereits via activate() aktiv ist.
+   */
+  public subscribe(mintAddress: string): void {
+    const sub = this.subscriptions.get(mintAddress) ?? { tokenRef: 0, botRef: 0 };
+    sub.botRef++;
+    this.subscriptions.set(mintAddress, sub);
+
+    if (this.totalRef(sub) === 1) {
+      this.historyMap.set(mintAddress, this.historyMap.get(mintAddress) ?? []);
+      this.seedFromDatabaseIfEmpty(mintAddress);
+      this.poll(mintAddress);
+      this.restartScheduler();
+    }
+  }
+
+  /**
+   * Bot-Unsubscribe. Verringert botRef. History + Polling bleiben aktiv, solange
+   * tokenRef > 0 (Token lebt noch im System). Erst wenn tokenRef + botRef == 0
+   * wird der In-Memory-Puffer verworfen.
+   */
+  public unsubscribe(mintAddress: string): void {
+    const sub = this.subscriptions.get(mintAddress);
+    if (!sub || sub.botRef === 0) return;
+    sub.botRef--;
+    if (this.totalRef(sub) === 0) {
+      this.teardownMint(mintAddress);
+      this.restartScheduler();
+    }
+  }
+
+  private totalRef(sub: { tokenRef: number; botRef: number }): number {
+    return sub.tokenRef + sub.botRef;
+  }
+
+  private teardownMint(mintAddress: string): void {
+    this.subscriptions.delete(mintAddress);
+    this.historyMap.delete(mintAddress);
+    backoffUntil.delete(mintAddress);
+    this.lastPollMap.delete(mintAddress);
+    this.lastFreshAtMap.delete(mintAddress);
+    this.consecutiveStaleMap.delete(mintAddress);
+  }
+
+  private seedFromDatabaseIfEmpty(mintAddress: string): void {
+    if (!this.priceRecorder) return;
+    const history = this.historyMap.get(mintAddress);
+    if (!history || history.length > 0) return;
+    const persisted = this.priceRecorder.loadFromDatabase(mintAddress, 1000);
+    if (persisted.length > 0) {
+      this.seedHistory(mintAddress, persisted);
+    }
   }
 
   /**
@@ -182,7 +269,7 @@ export class PriceFeed extends EventEmitter {
       this.schedulerTimeout = null;
     }
 
-    const mints = Array.from(this.subscriberCounts.keys());
+    const mints = Array.from(this.subscriptions.keys());
     const N = mints.length;
     if (N === 0) return;
 
@@ -197,13 +284,13 @@ export class PriceFeed extends EventEmitter {
     }
 
     // Erster Zyklus startet nach vollständiger Zyklusdauer, da jeder Mint
-    // bereits sofort bei subscribe() gepollt wurde.
+    // bereits sofort bei subscribe()/activate() gepollt wurde.
     this.schedulerTimeout = setTimeout(() => this.runCycle(), N * SLOT_MS);
   }
 
   /** Führt einen Zyklus aus: pollt alle Mints gestaffelt, plant nächsten Zyklus. */
   private runCycle(): void {
-    const mints = Array.from(this.subscriberCounts.keys());
+    const mints = Array.from(this.subscriptions.keys());
     const N = mints.length;
     if (N === 0) { this.schedulerTimeout = null; return; }
 
@@ -308,6 +395,10 @@ export class PriceFeed extends EventEmitter {
 
       if (history.length > 1000) history.shift();
       this.historyMap.set(mintAddress, history);
+
+      // Persistenz zentral im Feed (einmal pro Tick) statt in jedem BotListener.
+      // Vermeidet N-fach Schreiboperationen bei mehreren Strategien pro Token.
+      this.priceRecorder?.record(point, mintAddress);
 
       this.emit(`price:${mintAddress}`, point);
       this.emit('price_update', { mintAddress, ...point });

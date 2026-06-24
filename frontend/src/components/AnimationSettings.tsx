@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Sliders, Zap, Clock, Eye, Move, Sparkles, Circle, Hexagon, TrendingUp, type LucideIcon } from "lucide-react";
+import { Sliders, Zap, Clock, Eye, Move, Sparkles, Circle, Hexagon, TrendingUp } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ColorPicker } from "@/components/ui/color-picker";
+import { SubTabs, type SubTabItem } from "@/components/ui/sub-tabs";
 import {
   loadAnimationConfig,
   saveAnimationConfig,
@@ -25,30 +26,11 @@ type Props = {
 
 type SectionId = "trade" | "background" | "botchip";
 
-interface SectionToggleProps {
-  id: SectionId;
-  icon: LucideIcon;
-  label: string;
-  isActive: boolean;
-  onClick: () => void;
-}
-
-function SectionToggle({ icon: Icon, label, isActive, onClick }: SectionToggleProps) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex items-center gap-2 px-3 py-2 rounded text-xs font-semibold transition-colors ${
-        isActive
-          ? "bg-primary text-black"
-          : "text-zinc-400 hover:text-white hover:bg-zinc-800"
-      }`}
-    >
-      <Icon className="w-3.5 h-3.5" />
-      {label}
-    </button>
-  );
-}
+const SECTION_TABS: SubTabItem<SectionId>[] = [
+  { id: "trade",      label: "Trade Flash",       icon: Zap    },
+  { id: "background", label: "Background Pulse",  icon: Circle },
+  { id: "botchip",    label: "Bot Chip",          icon: Hexagon },
+];
 
 export default function AnimationSettings({ onConfigChange }: Props) {
   // Lazy initializer: read fresh from localStorage on every mount.
@@ -96,28 +78,8 @@ export default function AnimationSettings({ onConfigChange }: Props) {
         </div>
         
         {/* Section Toggles */}
-        <div className="flex gap-1 mt-3 bg-zinc-900/60 border border-white/10 rounded-lg p-1 w-fit">
-          <SectionToggle
-            id="trade"
-            icon={Zap}
-            label="Trade Flash"
-            isActive={expandedSection === "trade"}
-            onClick={() => setExpandedSection("trade")}
-          />
-          <SectionToggle
-            id="background"
-            icon={Circle}
-            label="Background Pulse"
-            isActive={expandedSection === "background"}
-            onClick={() => setExpandedSection("background")}
-          />
-          <SectionToggle
-            id="botchip"
-            icon={Hexagon}
-            label="Bot Chip"
-            isActive={expandedSection === "botchip"}
-            onClick={() => setExpandedSection("botchip")}
-          />
+        <div className="mt-3">
+          <SubTabs tabs={SECTION_TABS} active={expandedSection} onChange={setExpandedSection} />
         </div>
       </CardHeader>
 

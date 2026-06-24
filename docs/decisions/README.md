@@ -20,12 +20,15 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 | [008](adr-008-global-wallet-lock.md) | Globales Wallet-Lock über Live-Trader | Akzeptiert | Wallet |
 | [009](adr-009-preflight-and-tx-verification.md) | Preflight & Tx-Verifikation vor State-Mutation | Akzeptiert | Trade-Code |
 | [010](adr-010-stale-price-isolation.md) | Stale-Price-Isolation & Outage-Circuit-Breaker | Akzeptiert | Price Feed |
-| [011](adr-011-self-correction-workflow.md) | Self-Correction & Adaptives Lernen im AI Agent | Vorgeschlagen | AI Agent |
+| [011](adr-011-self-correction-workflow.md) | Self-Correction & Adaptives Lernen im AI Agent | Akzeptiert & Implementiert | AI Agent |
 | [012](adr-012-scalping-fork-adaptive-cycles.md) | Scalping Strategy Forks — Programmatic Time-Aware Adaptation | Akzeptiert & Implementiert | Strategie |
 | [013](adr-013-multi-asset-support.md) | Multi-Asset Support via Token-Presets & Per-Bot-Mint-Konfiguration | Vorgeschlagen | Architektur |
 | [014](adr-014-advisor-settings-pipeline.md) | Konsistente Strategie- & Pattern-Settings für Smart-Advisor-Bots | Akzeptiert & Implementiert | Strategie / Frontend |
 | [015](adr-015-wallet-page.md) | Dedizierte Wallet-Seite mit Transaktionshistorie & Wallet-Setup | Akzeptiert & Implementiert | Wallet / Backend / Frontend |
 | [016](adr-016-scalping-units-and-persistence.md) | Einheiten-Konsistenz & Persistenz für Scalping-Parameter | Akzeptiert & Implementiert | Strategie / Trade-Code / AI Agent |
+| [017](adr-017-ollamaagent-timer-management.md) | OllamaAgent Timer-Management & Analyse-Zyklus-Schutz | Akzeptiert & Implementiert | AI Agent |
+| [018](adr-018-ai-programmatic-adaptation-cooperation.md) | KI- & Programmatische-Adaptation Kooperationsmodell | Akzeptiert & Implementiert | AI Agent / Strategie |
+| [019](adr-019-fee-aware-scalping-safety-bounds.md) | Fee-Aware Scalping Safety Bounds & AI-Gate (nach Agent-ORUGA Vorfall) | Vorgeschlagen | Strategie / AI Agent / Risk |
 
 > **Status-Werte:** `Vorgeschlagen` → `Akzeptiert` → `Veraltet` / `Ersetzt durch ADR-0XXX`
 > Ein `Vorgeschlagen`-ADR beschreibt einen geplanten, noch **nicht** implementierten Change.
@@ -46,12 +49,15 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 - Fee-aware PnL: `pnlPercent -= ESTIMATED_ROUNDTRIP_COST_PCT * 100`
 - Paper: `solReturn` reduziert um geschätzte Roundtrip-Kosten
 
-### ADR-011 — Self-Correction & Adaptives Lernen
-- Time-Window-Performance (Hour-of-Day + Weekday) mit `minSampleSize`-Guard
-- Strategie-Switching als Eskalationsstufe (User-Gate, Default aus)
-- Chain-of-Thought-Reflexion im System-Prompt (mandatory)
-- Lessons-Learned-Memory mit Severity-Decay (7d gleitend)
-- Bonus-Confidence bei explizitem Lessons-Reference im Reason
+### ADR-011 — Self-Correction & Adaptives Lernen ✅
+- `trade_time_windows` + `lessons_learned` DB-Tabellen; Hook in `updateAgentOutcome`
+- `getTimeWindowPerformance`, `detectTimeWindowDrift` in `src/db.ts`
+- `generateLessons(botId)` in `src/lessonsGenerator.ts` (4 Heuristiken, Levenshtein-Dedup)
+- SSE-Event `agent_lesson` bei neuen Lessons; Bonus-Confidence bei Lesson-Referenz
+- Strategie-Switching: `applyStrategySwitch` in `botInstance.ts`; Safety-Gate (`AI_ALLOW_STRATEGY_SWITCH`, Default 0)
+- REFLECTION STEP + TIME-WINDOW + DRIFT ALERTS + LESSONS LEARNED Blöcke in `buildPrompt`
+- Frontend: `SelfCorrectionInsightsTab.tsx` (Heatmap, Lessons-Cards, Drift-List, Switch-Confirm)
+- API: `GET /api/agent/insights`, `POST /api/agent/confirm-switch`
 
 ### ADR-012 — Scalping Strategy Forks
 - Code-basierte Strategie-Forks für schnelle, deterministische Iteration
@@ -82,6 +88,34 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
   `analyze()`-Tick die User-Werte
 - VOLATILE-Semantik kanonisch „tighten" (passend zum getesteten Fork `×0.85`);
   KI-Validierung sellDrop `[0.5, 10.0]`, floorWindow `[10, 50]`
+
+### ADR-018 — KI- & Programmatische-Adaptation Kooperationsmodell
+- **Nova Pulse:** `applyNovaPulseAdaptation()` las `current` aus `activeStrategyConfig.scalping_settings`,
+  nicht aus `detector.settings` — KI-Updates (via `updateSettings`) waren für die Programmatik unsichtbar.
+  Fix: liest jetzt `this.detector.settings` als Single Source of Truth.
+- **Kanonisches Kooperationsmodell:** Exklusive KI-Lever (Nova Pulse: `cooldownTicks`; PAET:
+  `safety_coefficient_k`, `volatility_sigma_multiplier`) vs. Baseline-Hints (programmatische Keys)
+- **System-Prompts:** Beide (`scalping-adaptive`, `paet`) dokumentieren jetzt klar welche Parameter
+  dauerhaft vs. als Blend-Startpunkt beeinflusst werden können
+
+### ADR-019 — Fee-Aware Scalping Safety Bounds & AI-Gate (Vorgeschlagen)
+- Hard-Floor-Clamps auf `spikeThreshold ≥ 1 %`, `sellDropThreshold ≥ 2 %`,
+  `takeProfitThreshold ≥ 2 % Fee + 3 % Puffer`, `cooldownTicks ≥ 10`
+- PatternDetector: `minHoldTicks` + Breakeven-Trail ab +3 %
+- OllamaAgent: Outcome-Gated Auto-Apply (WR < 35 % bei ≥ 20 Trades → blockiert) +
+  Confidence-Decay-Faktor
+- Migration-Script setzt gedriftete Bots (ORUGA-Vorfall) auf Template-Defaults zurück
+- Anlass: Analyse `docs/analysis-agent-oruga-2026-06-23.md`
+
+### ADR-017 — OllamaAgent Timer-Management
+- Ghost-Timer Race-Condition: `start()` + `updateConfig()` konnten in der 5s-Startup-Phase
+  einen zweiten `setInterval` erzeugen, der nach `clearInterval` des referenzierten Timers
+  als unsichtbarer Ghost weiterliefe
+- Fix 1: `start()`-Startup-Callback clearet `this.timer` vor dem Neuanlegen
+- Fix 2: `updateConfig()` cancelt `this.startupTimer` bei `cycleMinutesChanged`
+- Fix 3: Minimum `cycleMinutes = 5` in `updateConfig()` erzwungen (AI braucht mindestens
+  5 Minuten neue Daten für sinnvolle Empfehlungen)
+- Symptom war: unerwartete AI-Optimierungen alle 2 Minuten für Bot „Agent-ROL69"
 
 ---
 

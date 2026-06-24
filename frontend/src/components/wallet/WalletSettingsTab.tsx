@@ -95,13 +95,13 @@ export function WalletSettingsTab({ apiBase, onNavigateToWallet }: Props) {
   };
 
   const handleGenerate = async () => {
-    const ok = await confirm({
+    const { confirmed } = await confirm({
       title: "Neue Wallet generieren?",
       message: "Es wird ein neues Solana-Keypair erzeugt und der Private-Key in .env geschrieben. Eine bestehende Wallet wird unwiderruflich ersetzt!",
       confirmLabel: "Generieren",
       variant: "danger",
     });
-    if (!ok) return;
+    if (!confirmed) return;
     setActionStatus("working");
     try {
       const res = await fetch(`${apiBase}/api/wallet/setup/generate`, { method: "POST" });
@@ -122,13 +122,13 @@ export function WalletSettingsTab({ apiBase, onNavigateToWallet }: Props) {
       setError("Bitte zuerst einen Private-Key eingeben");
       return;
     }
-    const ok = await confirm({
+    const { confirmed } = await confirm({
       title: "Private-Key importieren?",
       message: "Der eingegebene Key wird in .env gespeichert. Bestehende Wallet wird ersetzt!",
       confirmLabel: "Importieren",
       variant: "warning",
     });
-    if (!ok) return;
+    if (!confirmed) return;
     setActionStatus("working");
     try {
       const res = await fetch(`${apiBase}/api/wallet/setup/import`, {
@@ -149,13 +149,13 @@ export function WalletSettingsTab({ apiBase, onNavigateToWallet }: Props) {
   };
 
   const handleClear = async () => {
-    const ok = await confirm({
+    const { confirmed } = await confirm({
       title: "Private-Key löschen?",
       message: "Der Private-Key wird aus .env entfernt. Live-Trading ist dann nicht mehr möglich bis ein neuer Key importiert wird.",
       confirmLabel: "Löschen",
       variant: "danger",
     });
-    if (!ok) return;
+    if (!confirmed) return;
     setActionStatus("working");
     try {
       const res = await fetch(`${apiBase}/api/wallet/setup`, { method: "DELETE" });

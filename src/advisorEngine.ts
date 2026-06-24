@@ -354,6 +354,53 @@ function buildStrategyTemplates(): StrategyTemplate[] {
         reasoning: `Low-volatility (h24 ${p.h24.toFixed(1)}%) with $${(p.liquidity / 1000).toFixed(0)}k liquidity — DCA accumulation fits.`,
       };
     }),
+
+    t('paet', 'PAET — Anomaly Trigger', 'paet', (p, r) => {
+      // STL decomposition needs a meaningful price history — thin books produce
+      // noisy residuals that cause false anomaly triggers.
+      if (p.liquidity < 15_000) return null;
+      // DEAD: velocity ≈ 0 → PNR never fires, bot idles indefinitely.
+      // TRENDING_UP: auto-entry mode + rising prices cause immediate PNR false alarms.
+      if (r.regime === 'DEAD' || r.regime === 'TRENDING_UP') return null;
+
+      const liqFactor = clamp(Math.log10(p.liquidity / 10_000) / 2, 0, 1);
+      const volFactor = clamp(Math.log10(p.vol1h + 1) / 4, 0, 1);
+
+      if (r.regime === 'RANGING') {
+        // Best fit: predictable cycles → STL separates T/S/I cleanly.
+        // FFT detects the dominant period; Rules 1–3 auto-converge parameters.
+        const absH1 = Math.abs(p.h1);
+        const stabilityScore = Math.max(0, 1 - absH1 / 4);
+        return {
+          score: clamp(stabilityScore * 0.45 + liqFactor * 0.35 + volFactor * 0.20, 0, 1),
+          reasoning: `PAET: Cyclical ranging ±${absH1.toFixed(1)}%/h — STL detects dominant cycle, self-calibrating PNR exits before collapse.`,
+        };
+      }
+      if (r.regime === 'VOLATILE') {
+        // Protective fit: residual anomaly detection catches sudden drops before
+        // they accelerate past the collapse threshold.
+        const pumpScore = clamp(p.h1 / 15, 0, 1);
+        return {
+          score: clamp((pumpScore * 0.35 + liqFactor * 0.40 + volFactor * 0.25) * 0.80, 0, 1),
+          reasoning: `PAET: Volatile +${p.h1.toFixed(1)}%/h — residual anomaly detection guards against sudden reversal. PNR exits before collapse.`,
+        };
+      }
+      if (r.regime === 'TRENDING_DOWN') {
+        // Moderate fit: PNR catches early acceleration of a downtrend.
+        const depth = clamp(Math.abs(p.h24) / 20, 0, 1);
+        return {
+          score: clamp((depth * 0.40 + liqFactor * 0.35 + volFactor * 0.25) * 0.65, 0, 1),
+          reasoning: `PAET: Downtrend ${p.h24.toFixed(1)}%/24h — PNR exits early before decline accelerates beyond collapse threshold.`,
+        };
+      }
+      // OVERSOLD — low confidence: auto-entry rides potential bounce, PNR exits if decline resumes
+      const depth = clamp(Math.abs(p.h24) / 25, 0, 1);
+      const recoveryBonus = p.h1 > 0 ? 0.10 : 0;
+      return {
+        score: clamp((depth * 0.35 + liqFactor * 0.35 + volFactor * 0.20 + recoveryBonus) * 0.55, 0, 1),
+        reasoning: `PAET: Oversold ${p.h24.toFixed(1)}%/24h — auto-entry with anomaly protection. Exits immediately if decline resumes.`,
+      };
+    }),
   ];
 }
 
@@ -534,6 +581,9 @@ function composeBotConfig(match: StrategyMatch, pool: NormalizedPool): Suggested
     mean_reversion: { positionSizePct: 6,  aggressivenessPct: 8,  slippageTolerancePct: 1.0, maxPositions: 1, stopLossPct: 3, takeProfitPct: 7 },
     dca:            { positionSizePct: 5,  aggressivenessPct: 5,  slippageTolerancePct: 1.0, maxPositions: 4, stopLossPct: 8 },
     grid:           { positionSizePct: 8,  aggressivenessPct: 10, slippageTolerancePct: 0.5, maxPositions: 3, stopLossPct: 5 },
+    // PAET has its own internal exit logic (PNR + anomaly); no TP needed.
+    // stopLossPct=6 acts as an external safety net — PAET normally exits well before 6%.
+    paet:           { positionSizePct: 10, aggressivenessPct: 12, slippageTolerancePct: 0.5, maxPositions: 1, stopLossPct: 6 },
   };
 
   const cfg: SuggestedBotConfig = { ...(baseByType[match.strategyType] ?? baseByType.scalping), advisoryOnly: true };

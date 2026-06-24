@@ -3,7 +3,7 @@
   "strategy_type": "paet",
   "description": "Decomposes price history via STL (Trend + Seasonal + Residual) and FFT cycle detection. Triggers a SELL exactly before a projected collapse using 1st/2nd-order derivatives and Point-of-No-Return logic. Self-calibrating false-alarm penalty ω adapts over time.",
   "market": {
-    "symbol": "UGOR/SOL",
+    "symbol": "ANY/SOL",
     "timeframe": "1m",
     "exchange": "solana"
   },

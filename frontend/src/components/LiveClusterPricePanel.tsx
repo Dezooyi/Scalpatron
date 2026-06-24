@@ -105,7 +105,7 @@ export function LiveClusterPricePanel({ selectedBot, selectedTokenInfo, indicato
   }, [livePrice]);
 
   return (
-    <div className="bg-primary/5 rounded-lg border-0 shadow-lg relative overflow-hidden trade-flash-target-${selectedBot?.id} ai-flash-target-${selectedBot?.id}">
+    <div className={`bg-primary/5 rounded-lg border-0 shadow-lg relative overflow-x-clip trade-flash-target-${selectedBot?.id} ai-flash-target-${selectedBot?.id}`}>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
         
         {/* LEFT PANEL: Price Header, Manual Trading, BUY/SELL Buttons */}
@@ -342,7 +342,7 @@ export function LiveClusterPricePanel({ selectedBot, selectedTokenInfo, indicato
         </div>
 
         {/* RIGHT PANEL: Scanner Pulse & Statistics */}
-        <div className="flex flex-col h-full min-h-[450px]">
+        <div className="flex flex-col min-h-[450px]">
           {/* Scanner Pulse - fills available room */}
           <div className="flex-1 min-h-0 relative">
             <ScannerPulse bot={{ ...selectedBot, priceHistory: priceHistory.map(p => p.price) }} tickDuration={2000} className="h-full w-full" indicatorValues={indicatorValues} />

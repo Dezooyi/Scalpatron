@@ -239,4 +239,23 @@ export class BotManager {
     }
     console.log(`[BotManager] Alle ${this.bots.size} Bots mit neuen Settings aktualisiert`);
   }
+
+  /**
+   * Lädt das Keypair aller laufenden Live-Trader neu aus .env.
+   * Wird vom WalletService nach Import/Generate/Clear getriggert, damit
+   * kein Trade mehr mit dem veralteten Keypair signiert wird.
+   */
+  public async reloadAllLiveTraders(): Promise<void> {
+    let count = 0;
+    for (const bot of this.bots.values()) {
+      const trader = bot.getTrader();
+      if (!trader.paperMode) {
+        trader.reloadKeypair();
+        count++;
+      }
+    }
+    if (count > 0) {
+      console.log(`[BotManager] ${count} Live-Trader Keypair neu geladen`);
+    }
+  }
 }

@@ -75,6 +75,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { SubTabs } from "@/components/ui/sub-tabs";
 import { CreateBotDialog } from "@/components/CreateBotDialog";
 import { OracleAnalysisDialog } from "@/components/OracleAnalysisDialog";
 import { BotChipGrid } from "@/components/BotChipGrid";
@@ -408,7 +409,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [assistantSubTab, setAssistantSubTab] = useState<"advisor" | "assistant" | "selfcorrection">("advisor");
   const [chartTab, setChartTab] = useState<"equity" | "price">("equity");
-  const [settingsInitialTab, setSettingsInitialTab] = useState<"appearance" | "api" | "trading" | "wallet" | "design" | "animation" | "danger" | undefined>(undefined);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<"appearance" | "trading" | "wallet" | "animation" | "danger" | undefined>(undefined);
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
   const [serverStatus, setServerStatus] = useState<
@@ -475,6 +476,9 @@ export default function App() {
   const [isLookingUp, setIsLookingUp] = useState(false);
   const [lookupError, setLookupError] = useState<string | null>(null);
   const [selectedTokenInfo, setSelectedTokenInfo] = useState<Partial<TokenInfo> | null>(null);
+  const [tokenSearchText, setTokenSearchText] = useState("");
+  const [tokenSort, setTokenSort] = useState<{ col: "symbol" | "name" | "price" | "volume" | "change"; dir: "asc" | "desc" }>({ col: "symbol", dir: "asc" });
+  const [isRefreshingTokens, setIsRefreshingTokens] = useState(false);
 
   // Create Bot Dialog State
   const [newBotName, setNewBotName] = useState("");
@@ -1057,13 +1061,15 @@ export default function App() {
   };
 
   const deleteBot = async (id: string) => {
-    const ok = await confirm({
+    const target = bots.find(b => b.id === id);
+    const result = await confirm({
       title: "Delete Bot",
       message: "Are you sure? All trades for this bot will also be removed.",
       confirmLabel: "Delete",
       variant: "danger",
+      toggle: { label: "Delete Token", defaultChecked: false },
     });
-    if (!ok) return;
+    if (!result.confirmed) return;
 
     // Start fade-out animation
     setDeletingBotId(id);
@@ -1085,6 +1091,23 @@ export default function App() {
         if (selectedBotId === id) {
           setSelectedBotId(remaining[0]?.id || null);
         }
+
+        // Optionally also remove the underlying token from the whitelist
+        if (result.toggleValue && target?.mintAddress) {
+          try {
+            const tokRes = await fetch(`${getApiBase()}/api/tokens/${target.mintAddress}`, {
+              method: "DELETE",
+            });
+            if (tokRes.ok) {
+              await fetchTokens();
+              console.log("[Bot] Token also removed from whitelist:", target.mintAddress);
+            } else {
+              console.warn("[Bot] Bot deleted but token removal failed:", tokRes.status);
+            }
+          } catch (tokErr) {
+            console.warn("[Bot] Token removal error (bot was still deleted):", tokErr);
+          }
+        }
       }
     } catch (err) {
       console.error("Delete Bot Error:", err);
@@ -1095,13 +1118,13 @@ export default function App() {
 
   const deleteAllBots = async () => {
     if (bots.length === 0) return;
-    const ok = await confirm({
+    const { confirmed } = await confirm({
       title: "Delete All Bots",
       message: `Permanently delete all ${bots.length} bot${bots.length !== 1 ? "s" : ""} and their trade history?`,
       confirmLabel: "Delete All",
       variant: "danger",
     });
-    if (!ok) return;
+    if (!confirmed) return;
     await fetch(`${getApiBase()}/api/bots`, { method: "DELETE" });
     setBots([]);
     setSelectedBotId(null);
@@ -1432,7 +1455,7 @@ export default function App() {
   };
 
   // Load Agent History with debounce to prevent rapid fetches
-  const loadAgentHistory = async (botId?: string) => {
+  const loadAgentHistory = useCallback(async (botId?: string) => {
     // Cancel pending fetch if user quickly switches bots
     if (agentHistoryDebounceRef.current) {
       clearTimeout(agentHistoryDebounceRef.current);
@@ -1470,7 +1493,15 @@ export default function App() {
         agentHistoryDebounceRef.current = null;
       }
     }, 300);
-  };
+  }, []);
+
+  // Load agent history for the selected bot so the Bot Details "Oracle Analysis"
+  // section stays populated even when the agent tab is not open. Without this,
+  // the section only renders data captured via live SSE events since page load.
+  useEffect(() => {
+    if (!selectedBotId) return;
+    loadAgentHistory(selectedBotId);
+  }, [selectedBotId]);
 
   // Update Agent Config
   const updateAgentConfig = async (config: Partial<AgentConfigType>) => {
@@ -1626,6 +1657,12 @@ export default function App() {
     }
   };
 
+  const handleRefreshTokens = async () => {
+    setIsRefreshingTokens(true);
+    await fetchTokens();
+    setIsRefreshingTokens(false);
+  };
+
   const handleLookupToken = async () => {
     if (!newTokenMintAddress.trim()) {
       setLookupError("Please enter a mint address");
@@ -1699,13 +1736,13 @@ export default function App() {
   };
 
   const handleRemoveToken = async (mintAddress: string) => {
-    const ok = await confirm({
+    const { confirmed } = await confirm({
       title: "Token entfernen",
       message: `Token aus der Whitelist entfernen?\n${mintAddress}`,
       confirmLabel: "Entfernen",
       variant: "warning",
     });
-    if (!ok) return;
+    if (!confirmed) return;
 
     try {
       const res = await fetch(`${getApiBase()}/api/tokens/${mintAddress}`, {
@@ -1832,6 +1869,28 @@ export default function App() {
       if (isAiUpdate) setBackgroundPulseTrigger("ai");
     }
   }, [terminalLogs, selectedBot]);
+
+  const filteredSortedTokens = (() => {
+    const q = tokenSearchText.trim().toLowerCase();
+    return tokens
+      .filter(t => !q || t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q))
+      .sort((a, b) => {
+        const d = tokenSort.dir === "asc" ? 1 : -1;
+        switch (tokenSort.col) {
+          case "price":  return d * ((a.priceUsd ?? 0) - (b.priceUsd ?? 0));
+          case "volume": return d * ((a.volume24h ?? 0) - (b.volume24h ?? 0));
+          case "change": return d * ((a.priceChange24h ?? 0) - (b.priceChange24h ?? 0));
+          case "name":   return d * a.name.localeCompare(b.name);
+          default:       return d * a.symbol.localeCompare(b.symbol);
+        }
+      });
+  })();
+
+  const handleTokenSort = (col: typeof tokenSort.col) =>
+    setTokenSort(prev => ({ col, dir: prev.col === col && prev.dir === "asc" ? "desc" : "asc" }));
+
+  const sortIndicator = (col: typeof tokenSort.col) =>
+    tokenSort.col === col ? (tokenSort.dir === "asc" ? " ↑" : " ↓") : "";
 
   return (
     <>
@@ -2065,39 +2124,11 @@ export default function App() {
             Event-Badges) bzw. Trade-/AI-Flash-Animationen am Inhaltsrand
             ausgelöst wird. Vertikales Scrollen bleibt via overflow-y-auto. */}
         <main className="flex-1 overflow-y-auto overflow-x-hidden p-8">
-          <div className="max-w-[1400px] mx-auto space-y-8">
+          <div className="w-full space-y-8">
             {activeTab === "dashboard" ? (
               // COMBINED DASHBOARD VIEW
               <div className="relative">
                 <div className="relative z-10 space-y-4 animate-in fade-in duration-300">
-                  <CreateBotDialog
-                    open={isCreateBotDialogOpen}
-                    onOpenChange={setIsCreateBotDialogOpen}
-                    hiddenTrigger
-                    tokens={tokens}
-                    strategyTemplates={strategyTemplates}
-                    savedStrategies={savedStrategies}
-                    newBotName={newBotName}
-                    setNewBotName={setNewBotName}
-                    newBotMintAddress={newBotMintAddress}
-                    setNewBotMintAddress={setNewBotMintAddress}
-                    newBotWalletAddress={newBotWalletAddress}
-                    setNewBotWalletAddress={setNewBotWalletAddress}
-                    newBotTradingMode={newBotTradingMode}
-                    setNewBotTradingMode={setNewBotTradingMode}
-                    newBotTradeSize={newBotTradeSize}
-                    setNewBotTradeSize={setNewBotTradeSize}
-                    newBotAggressiveness={newBotAggressiveness}
-                    setNewBotAggressiveness={setNewBotAggressiveness}
-                    newBotStrategyId={newBotStrategyId}
-                    setNewBotStrategyId={setNewBotStrategyId}
-                    showTokenWhitelist={showTokenWhitelist}
-                    setShowTokenWhitelist={setShowTokenWhitelist}
-                    startAfterCreate={newBotAutoStart}
-                    setStartAfterCreate={setNewBotAutoStart}
-                    advisorSettings={pendingAdvisorSettings}
-                    onCreateBot={createDemoBot}
-                  />
                 </div>
 
                 {/* ── Disconnected Empty State ── */}
@@ -2213,7 +2244,7 @@ export default function App() {
                     <div key={selectedBotId} className="animate-in fade-in slide-in-from-bottom-16 duration-600 space-y-3 mt-3">
                       {/* DETACHED PREMIUM BOT HEADER */}
                       <Card
-                        className="relative rounded-l bg-card/40 backdrop-blur-md border-none">
+                        className="relative rounded-l bg-card/40 backdrop-blur-md border-none overflow-hidden">
                         <div className="flex items-center justify-between px-4 py-4 shrink-0">
                           <div className="flex items-center gap-8 flex-1 min-w-0">
                             <div className="flex items-center gap-5 flex-1 min-w-0">
@@ -2373,6 +2404,15 @@ export default function App() {
                             </Button>
                           </div>
                         </div>
+                        {/* Warmup strip — subtle 2px bottom edge, vanishes at 100% */}
+                        {(bot.warmupProgress ?? 0) < 1 && (
+                          <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-zinc-800/40">
+                            <div
+                              className="h-full bg-primary/50 transition-all duration-700 ease-out animate-pulse"
+                              style={{ width: `${(bot.warmupProgress || 0) * 100}%` }}
+                            />
+                          </div>
+                        )}
                       </Card>
 
                       {/* MAIN CONTENT AREA - Detached from Header */}
@@ -2485,7 +2525,7 @@ export default function App() {
                                   return { ...base, strategyConfigDraft: { ...sc, entry_conditions: sc.entry_conditions.map(e => e.left === 'RSI_14' ? { ...e, right: lerp(55, 80) } : e), exit_conditions: sc.exit_conditions.map(e => e.type === 'take_profit' ? { ...e, value: lerpF(0.025, 0.09) } : e.type === 'stop_loss' ? { ...e, value: lerpF(0.01, 0.05) } : e), risk_management: { ...sc.risk_management, position_size: lerpF(0.05, 0.30) }, execution: { ...sc.execution, slippage_tolerance: lerpF(0.001, 0.005) } }};
                                 }
                                 if (stratType === 'mean_reversion') {
-                                  return { ...base, strategyConfigDraft: { ...sc, entry_conditions: sc.entry_conditions.map(e => e.left === 'RSI_14' ? { ...e, right: lerp(25, 42) } : e), exit_conditions: sc.exit_conditions.map(e => e.type === 'take_profit' ? { ...e, value: lerpF(0.02, 0.09) } : e.type === 'stop_loss' ? { ...e, value: lerpF(0.01, 0.05) } : (e.type === 'indicator' && (e.condition as {left?:string})?.left === 'RSI_14') ? { ...e, condition: { ...(e.condition as object), right: lerp(58, 80) } } : e), risk_management: { ...sc.risk_management, position_size: lerpF(0.05, 0.28) } }};
+                                  return { ...base, strategyConfigDraft: { ...sc, entry_conditions: sc.entry_conditions.map(e => e.left === 'RSI_14' ? { ...e, right: lerp(25, 42) } : e), exit_conditions: sc.exit_conditions.map(e => e.type === 'take_profit' ? { ...e, value: lerpF(0.02, 0.09) } : e.type === 'stop_loss' ? { ...e, value: lerpF(0.01, 0.05) } : (e.type === 'indicator' && (e.condition as {left?:string})?.left === 'RSI_14') ? { ...e, condition: { ...(e.condition as { left: string; operator: string; right: string | number }), right: lerp(58, 80) } } : e), risk_management: { ...sc.risk_management, position_size: lerpF(0.05, 0.28) } }};
                                 }
                                 if (stratType === 'breakout') {
                                   return { ...base, strategyConfigDraft: { ...sc, indicators: sc.indicators.map(i => (i.type === 'BB' || i.type === 'BB_20') ? { ...i, std_dev: lerpF(2.8, 1.4) } : i), entry_conditions: sc.entry_conditions.map(e => e.left === 'RSI_14' ? { ...e, right: lerp(58, 40) } : e), exit_conditions: sc.exit_conditions.map(e => e.type === 'take_profit' ? { ...e, value: lerpF(0.03, 0.12) } : e.type === 'stop_loss' ? { ...e, value: lerpF(0.015, 0.05) } : e.type === 'trailing_stop' ? { ...e, trailing_pct: lerpF(0.008, 0.07) } : e), risk_management: { ...sc.risk_management, position_size: lerpF(0.05, 0.25) } }};
@@ -2648,7 +2688,7 @@ export default function App() {
                                     {SR('RSI Oversold', 10, 50, 1, typeof getEntry('RSI_14')?.right === 'number' ? getEntry('RSI_14')!.right as number : 32, tick,
                                       (n) => updateEntryCondition('RSI_14', n), 'Entry wenn RSI <')}
                                     {SR('RSI Overbought', 50, 90, 1, (() => { const ec = scd.exit_conditions.find((e) => e.type === 'indicator' && e.condition?.left === 'RSI_14'); return (ec?.condition?.right ?? 55) as number; })(), tick,
-                                      (n) => { setBotSettingsDraft((p) => { if (!p.strategyConfigDraft) return p; const exit_conditions = p.strategyConfigDraft.exit_conditions.map((ec) => ec.type === 'indicator' && (ec.condition as { left: string })?.left === 'RSI_14' ? { ...ec, condition: { ...(ec.condition as object), right: n } } : ec); return { ...p, strategyConfigDraft: { ...p.strategyConfigDraft!, exit_conditions } }; }); }, 'Exit wenn RSI ≥')}
+                                      (n) => { setBotSettingsDraft((p) => { if (!p.strategyConfigDraft) return p; const exit_conditions = p.strategyConfigDraft.exit_conditions.map((ec) => ec.type === 'indicator' && (ec.condition as { left: string })?.left === 'RSI_14' ? { ...ec, condition: { ...(ec.condition as { left: string; operator: string; right: string | number }), right: n } } : ec); return { ...p, strategyConfigDraft: { ...p.strategyConfigDraft!, exit_conditions } }; }); }, 'Exit wenn RSI ≥')}
                                     {SR('Take Profit', 0.5, 20, 0.5, (getExit('take_profit')?.value ?? 0.035) * 100, pct1,
                                       (n) => updateExitCondition('take_profit', 'value', n / 100), '% Ziel')}
                                     {SR('Stop Loss', 0.5, 15, 0.5, (getExit('stop_loss')?.value ?? 0.02) * 100, pct1,
@@ -3059,31 +3099,6 @@ export default function App() {
                                           />
                                         </div>
 
-                                        {/* Warmup Status under key facts cards */}
-                                        <div className="mt-4">
-                                          <div className="flex justify-between items-center mb-1">
-                                            <span className="text-tiny font-bold uppercase text-muted-foreground flex items-center gap-1">
-                                              Warmup Status
-                                              {(selectedBot.warmupProgress ?? 0) >= 1 && <Check className="h-2 w-2 text-green-400" />}
-                                            </span>
-                                            <span className={`text-tiny font-mono font-bold ${(selectedBot.warmupProgress ?? 0) >= 1 ? 'text-green-400' : 'text-primary'}`}>
-                                              {((selectedBot.warmupProgress || 0) * 100).toFixed(0)}%
-                                            </span>
-                                          </div>
-                                          <div className="h-1 w-full bg-zinc-800 rounded-full overflow-hidden">
-                                            <div
-                                              className={`h-full transition-all duration-700 ease-out ${(selectedBot.warmupProgress ?? 0) >= 1 ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]' : 'bg-primary animate-pulse'}`}
-                                              style={{ width: `${(selectedBot.warmupProgress || 0) * 100}%` }}
-                                            />
-                                          </div>
-                                          {(selectedBot.warmupProgress ?? 0) < 1 && (
-                                            <span className="text-2xs text-zinc-600 mt-1 uppercase tracking-tighter italic">
-                                              {selectedBot.strategyType === 'scalping-adaptive'
-                                                ? 'Progressive adaptive warmup — spike threshold easing in...'
-                                                : 'Waiting for indicator data stability...'}
-                                            </span>
-                                          )}
-                                        </div>
                                       </>
                                     );
                                   })()}
@@ -3353,9 +3368,232 @@ export default function App() {
 
                           {/* Bot Info Panel Content */}
                           <CardContent className="p-0 relative bg-transparent">
-                            <div className="flex h-[950px] gap-2">
+                            <div className="relative flex min-h-[950px]">
                               {/* Left Panel (60%) — Scanner + Performance Cards */}
-                              <div className="w-[60%] border-r border-border/30 p-2.5 flex flex-col gap-4 overflow-auto custom-scrollbar h-full">
+                              <div className="w-[60%] border-r border-border/30 p-2.5 flex flex-col gap-4 h-full">
+                                {/* Nova Pulse Self-Optimization — only for scalping-adaptive */}
+                                {selectedBot.strategyType === 'scalping-adaptive' && (() => {
+                                  const indVals = botIndicators[selectedBot?.id]?.latestValues ?? {};
+                                  const vol   = indVals['adaptive_volatility'];
+                                  const range = indVals['adaptive_avgRange'];
+                                  const sessionCode = indVals['adaptive_session'];
+
+                                  const baseSettings = selectedBot.strategyConfig?.scalping_settings;
+                                  const cFW = baseSettings?.floorWindow         ?? selectedBot.settings?.floorWindow         ?? 20;
+                                  const cST = baseSettings?.spikeThreshold      ?? selectedBot.settings?.spikeThreshold      ?? 1.0;
+                                  const cSD = baseSettings?.sellDropThreshold   ?? selectedBot.settings?.sellDropThreshold   ?? 5.0;
+                                  const cTP = baseSettings?.takeProfitThreshold ?? selectedBot.settings?.takeProfitThreshold ?? 0.10;
+
+                                  const hasData = vol > 0 && range > 0;
+
+                                  const tFW = hasData ? Math.max(10, Math.min(50, Math.round(15 / Math.max(0.1, vol)))) : null;
+                                  const tST = hasData ? Math.max(0.05, Math.min(5.0,  parseFloat((2.5 * range).toFixed(2)))) : null;
+                                  const tSD = hasData ? Math.max(0.5,  Math.min(10.0, parseFloat((2.0 * range).toFixed(2)))) : null;
+                                  const tTP = hasData ? Math.max(0.01, Math.min(0.5,  parseFloat((range * 2.0 / 100).toFixed(3)))) : null;
+
+                                  const activeRules = [
+                                    tFW !== null && Math.abs(tFW - cFW) > 2,
+                                    tST !== null && Math.abs(tST - cST) > 0.05,
+                                    tSD !== null && Math.abs(tSD - cSD) > 0.10,
+                                    tTP !== null && Math.abs(tTP - cTP) > 0.005,
+                                  ].filter(Boolean).length;
+
+                                  const sessionName = ({ 1: 'Asia', 2: 'London', 3: 'NY', 4: 'Overlap', 5: 'Other' } as Record<number, string>)[sessionCode] ?? '—';
+
+                                  const reason = !hasData
+                                    ? 'Warming up — awaiting market signal data'
+                                    : vol > 1.5
+                                      ? 'High volatility — floor window compressed, thresholds raised to filter noise'
+                                      : vol < 0.3
+                                        ? 'Dead market — widening floor window, lowering entry bar'
+                                        : range > 3.0
+                                          ? 'Wide tick range — spike & sell-drop thresholds elevated'
+                                          : range < 0.2
+                                            ? 'Tick range very tight — all thresholds approaching floor'
+                                            : activeRules === 0
+                                              ? 'Converged — all parameters at optimal market-calibrated targets'
+                                              : `${activeRules} rule${activeRules > 1 ? 's' : ''} converging toward market-calibrated targets`;
+
+                                  const pressure = !hasData ? 0 : Math.min(100, Math.round(
+                                    ((tFW ? Math.abs(tFW - cFW) / 20 : 0)
+                                    + (tST ? Math.abs(tST - cST) / 2 : 0)
+                                    + (tSD ? Math.abs(tSD - cSD) / 5 : 0)
+                                    + (tTP ? Math.abs(tTP - cTP) / 0.2 : 0)) / 4 * 100
+                                  ));
+
+                                  const pressureColor = pressure === 0 ? 'text-zinc-500'
+                                    : pressure < 25 ? 'text-emerald-400'
+                                    : pressure < 60 ? 'text-amber-400'
+                                    : 'text-rose-400';
+                                  const pressureLabel = pressure === 0 ? 'Converged'
+                                    : pressure < 25 ? 'Fine-tuning'
+                                    : pressure < 60 ? 'Adapting'
+                                    : 'Calibrating';
+                                  const pressureBadge = pressure === 0
+                                    ? 'text-zinc-400 bg-zinc-800 border-zinc-700'
+                                    : pressure < 25
+                                      ? 'text-emerald-400 bg-emerald-500/15 border-emerald-500/30'
+                                      : pressure < 60
+                                        ? 'text-amber-400 bg-amber-500/15 border-amber-500/30'
+                                        : 'text-rose-400 bg-rose-500/15 border-rose-500/30';
+
+                                  return (
+                                    <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/15 p-3 space-y-2.5">
+                                      {/* Header */}
+                                      <div className="flex items-center justify-between">
+                                        <div className="flex items-center gap-1.5">
+                                          <Wand2 className="h-3.5 w-3.5 text-emerald-400/70" />
+                                          <span className="text-sm font-bold uppercase text-muted-foreground tracking-wider">Self-Optimization</span>
+                                          <span className="text-[10px] font-black uppercase px-1.5 py-0.5 rounded border bg-emerald-500/20 text-emerald-300 border-emerald-500/30">Nova Pulse</span>
+                                        </div>
+                                        <div className="flex items-center gap-1.5">
+                                          {hasData && (
+                                            <span className={`text-[10px] font-black uppercase px-1.5 py-0.5 rounded border ${pressureBadge}`}>
+                                              {pressureLabel}
+                                            </span>
+                                          )}
+                                          <span
+                                            className="text-[10px] font-mono text-muted-foreground cursor-help"
+                                            onMouseEnter={(e) => tooltip.show('Anzahl Regeln mit aktiver Konvergenz. Regeln A–D laufen alle 30 Ticks und passen Floor Window, Spike-Schwelle, Sell-Drop und Take-Profit automatisch an.', e)}
+                                            onMouseMove={(e) => tooltip.move(e)}
+                                            onMouseLeave={() => tooltip.hide()}
+                                          >{activeRules}/4 rules active</span>
+                                        </div>
+                                      </div>
+
+                                      {/* Reason line */}
+                                      <div className="text-xs text-muted-foreground/70 italic leading-tight pl-0.5">{reason}</div>
+
+                                      {/* 8-col card grid — single row: market inputs + meta */}
+                                      <div className="grid grid-cols-8 gap-1.5">
+                                        {/* Vol σ — Rule A + C driver */}
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show('Tick-zu-Tick-Volatilität (σ). Treibt Regel A (Floor Window) und C (Sell Drop). Hohe Volatilität → kürzeres Fenster, erhöhter Drop-Schwellwert.', e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Vol σ</div>
+                                          <div className={`text-base font-black font-mono ${!hasData ? 'text-zinc-600' : vol > 1.5 ? 'text-rose-400' : vol < 0.3 ? 'text-zinc-400' : 'text-amber-400'}`}>
+                                            {hasData ? `${vol.toFixed(2)}%` : '—'}
+                                          </div>
+                                          <div className="text-[10px] text-muted-foreground/50">A + C input</div>
+                                        </div>
+
+                                        {/* Avg Range — Rule B + D driver */}
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show('Durchschnittliche abs. Tick-Amplitude. Treibt Regel B (Spike-Schwelle) und D (Take-Profit). Breite Range → höhere Einstiegshürde.', e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Avg Range</div>
+                                          <div className={`text-base font-black font-mono ${!hasData ? 'text-zinc-600' : range > 3 ? 'text-rose-400' : range < 0.2 ? 'text-zinc-400' : 'text-cyan-400'}`}>
+                                            {hasData ? `${range.toFixed(2)}%` : '—'}
+                                          </div>
+                                          <div className="text-[10px] text-muted-foreground/50">B + D input</div>
+                                        </div>
+
+                                        {/* Session */}
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show('Aktuelles Handelsfenster. Der adaptive Fork multipliziert die Schwellwerte kontextabhängig — Overlap ist am liquidesten, Asia am ruhigsten.', e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Session</div>
+                                          <div className={`text-base font-black font-mono ${sessionName === 'Overlap' ? 'text-emerald-400' : sessionName === 'NY' || sessionName === 'London' ? 'text-primary' : 'text-zinc-400'}`}>
+                                            {sessionName}
+                                          </div>
+                                          <div className="text-[10px] text-muted-foreground/50">Fork multiplier</div>
+                                        </div>
+
+                                        {/* Adapt Pressure */}
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show('Aggregierter Optimierungsdruck: 0% = alle Parameter konvergiert, 100% = starke Divergenz von Soll-Werten. Blend-Raten verhindern abrupte Sprünge.', e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Pressure</div>
+                                          <div className={`text-base font-black font-mono ${pressureColor}`}>
+                                            {hasData ? `${pressure}%` : '—'}
+                                          </div>
+                                          <div className="text-[10px] text-muted-foreground/50">Adapt intensity</div>
+                                        </div>
+
+                                        {/* Floor Window — Rule A */}
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show(`Regel A — Floor Window. Ziel = round(15 / max(0.1, σ)). Kürzeres Fenster in volatilen Märkten damit der Boden schneller folgt.`, e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Floor Win</div>
+                                          <div className={`text-base font-black font-mono ${tFW !== null && Math.abs(tFW - cFW) > 2 ? 'text-cyan-400' : 'text-foreground'}`}>
+                                            {cFW}
+                                          </div>
+                                          {tFW !== null && Math.abs(tFW - cFW) > 2
+                                            ? <div className="text-[10px] text-cyan-300/60">→ {tFW} ticks</div>
+                                            : <div className="text-[10px] text-muted-foreground/50">A · optimal</div>
+                                          }
+                                        </div>
+
+                                        {/* Spike Threshold — Rule B */}
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show(`Regel B — Spike-Schwelle. Ziel = 2.5 × AvgRange. Asymmetrischer Blend: steigt schnell (20%) wenn Markt lauter wird, fällt langsam (10%) bei Beruhigung.`, e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Spike Thr.</div>
+                                          <div className={`text-base font-black font-mono ${tST !== null && Math.abs(tST - cST) > 0.05 ? 'text-amber-400' : 'text-foreground'}`}>
+                                            {cST.toFixed(2)}%
+                                          </div>
+                                          {tST !== null && Math.abs(tST - cST) > 0.05
+                                            ? <div className="text-[10px] text-amber-300/60">→ {tST.toFixed(2)}%</div>
+                                            : <div className="text-[10px] text-muted-foreground/50">B · optimal</div>
+                                          }
+                                        </div>
+
+                                        {/* Sell Drop — Rule C */}
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show(`Regel C — Sell-Drop. Ziel = 2.0 × AvgRange. Größere Range → mehr Raum bevor Exit, um echte Umkehrungen von Rauschen zu trennen.`, e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Sell Drop</div>
+                                          <div className={`text-base font-black font-mono ${tSD !== null && Math.abs(tSD - cSD) > 0.1 ? 'text-rose-400' : 'text-foreground'}`}>
+                                            {cSD.toFixed(2)}%
+                                          </div>
+                                          {tSD !== null && Math.abs(tSD - cSD) > 0.1
+                                            ? <div className="text-[10px] text-rose-300/60">→ {tSD.toFixed(2)}%</div>
+                                            : <div className="text-[10px] text-muted-foreground/50">C · optimal</div>
+                                          }
+                                        </div>
+
+                                        {/* Take Profit — Rule D */}
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show(`Regel D — Take-Profit. Ziel = AvgRange × 2 / 100. Sehr langsamer Blend (10%) verhindert TP-Whipsawing in schnell wechselnden Märkten.`, e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Take Profit</div>
+                                          <div className={`text-base font-black font-mono ${tTP !== null && Math.abs(tTP - cTP) > 0.005 ? 'text-emerald-400' : 'text-foreground'}`}>
+                                            {(cTP * 100).toFixed(1)}%
+                                          </div>
+                                          {tTP !== null && Math.abs(tTP - cTP) > 0.005
+                                            ? <div className="text-[10px] text-emerald-300/60">→ {(tTP * 100).toFixed(1)}%</div>
+                                            : <div className="text-[10px] text-muted-foreground/50">D · optimal</div>
+                                          }
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
+
                                 <LiveClusterPricePanel selectedBot={selectedBot} selectedTokenInfo={selectedTokenInfo} indicatorValues={botIndicators[selectedBot?.id]?.latestValues} />
 
                                 <div className="grid grid-cols-2 gap-3">
@@ -3457,8 +3695,8 @@ export default function App() {
                                         const cfg = selectedBot.strategyConfig;
                                         const floor = cfg?.indicators?.find((i) => i.type === 'FLOOR')?.window ?? selectedBot.settings?.floorWindow;
                                         const spike = cfg?.entry_conditions?.find((e) => e.type === 'spike')?.threshold ?? selectedBot.settings?.spikeThreshold;
-                                        const drop = cfg?.exit_conditions?.find((e) => e.type === 'drop')?.threshold ?? selectedBot.settings?.sellDropThreshold;
-                                        const cooldown = cfg?.execution?.cooldown_ticks ?? selectedBot.settings?.cooldownTicks;
+                                        const drop = cfg?.exit_conditions?.find((e) => e.type === 'drop')?.value ?? selectedBot.settings?.sellDropThreshold;
+                                        const cooldown = selectedBot.settings?.cooldownTicks;
 
                                         return (
                                           <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 mt-1">
@@ -4145,37 +4383,13 @@ export default function App() {
                                           )}
                                         </button>
                                       </div>
-                                      <div className="flex flex-col col-span-2 mt-1 opacity-90">
-                                        <div className="flex justify-between items-center mb-1">
-                                          <span className="text-tiny font-bold uppercase text-muted-foreground flex items-center gap-1">
-                                            Warmup Status
-                                            {(selectedBot.warmupProgress ?? 0) >= 1 && <Check className="h-2 w-2 text-green-400" />}
-                                          </span>
-                                          <span className={`text-tiny font-mono font-bold ${(selectedBot.warmupProgress ?? 0) >= 1 ? 'text-green-400' : 'text-primary'}`}>
-                                            {((selectedBot.warmupProgress || 0) * 100).toFixed(0)}%
-                                          </span>
-                                        </div>
-                                        <div className="h-1 w-full bg-zinc-800 rounded-full overflow-hidden">
-                                          <div
-                                            className={`h-full transition-all duration-700 ease-out ${(selectedBot.warmupProgress ?? 0) >= 1 ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]' : 'bg-primary animate-pulse'}`}
-                                            style={{ width: `${(selectedBot.warmupProgress || 0) * 100}%` }}
-                                          />
-                                        </div>
-                                        {(selectedBot.warmupProgress ?? 0) < 1 && (
-                                          <span className="text-2xs text-zinc-600 mt-1 uppercase tracking-tighter italic">
-                                            {selectedBot.strategyType === 'scalping-adaptive'
-                                              ? 'Progressive adaptive warmup — spike threshold easing in...'
-                                              : 'Waiting for indicator data stability...'}
-                                          </span>
-                                        )}
-                                      </div>
                                     </div>
                                   </div>
                                 </div>
                               </div>
 
                               {/* Right Panel (40%) — Real-time Activity & Logs */}
-                              <div className="flex-1 flex flex-col gap-3 overflow-auto pr-2 custom-scrollbar p-2.5 h-full">
+                              <div className="absolute left-[60%] right-0 top-0 bottom-0 ml-2 flex flex-col gap-3 overflow-auto pr-2 custom-scrollbar p-2.5">
                                 <LastActivityCard bot={selectedBot} />
                                 <div className="flex-1 min-h-0">
                                   <LiveFeedListCard
@@ -4321,7 +4535,7 @@ export default function App() {
               </div>
             ) : activeTab === "tokens" ? (
               // TOKEN MANAGEMENT VIEW
-              <div className="space-y-6 max-w-7xl mx-auto">
+              <div className="space-y-6 w-full">
                 {/* Einheitlicher Header */}
                 <div className="flex items-center gap-3 mb-6">
                   <Database className="h-8 w-8 text-primary" />
@@ -4334,10 +4548,29 @@ export default function App() {
                 </div>
 
                 {/* Header Actions */}
-                <div className="flex justify-end">
-                  <Button onClick={() => setIsAddTokenDialogOpen(true)}>
-                    <Plus className="mr-2 h-4 w-4" /> Add Token
-                  </Button>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <Input
+                    placeholder="Filter by symbol or name…"
+                    value={tokenSearchText}
+                    onChange={e => setTokenSearchText(e.target.value)}
+                    className="w-56 h-9 text-sm bg-zinc-800/60 border-white/10 text-zinc-100 placeholder:text-zinc-500"
+                  />
+                  <span className="text-xs text-zinc-500">{filteredSortedTokens.length} / {tokens.length} tokens</span>
+                  <div className="ml-auto flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleRefreshTokens}
+                      disabled={isRefreshingTokens}
+                      className="bg-zinc-800/60 border-white/10 text-zinc-400 hover:text-white"
+                    >
+                      <RefreshCw className={`h-4 w-4 mr-1.5 ${isRefreshingTokens ? "animate-spin" : ""}`} />
+                      Refresh
+                    </Button>
+                    <Button onClick={() => setIsAddTokenDialogOpen(true)}>
+                      <Plus className="mr-2 h-4 w-4" /> Add Token
+                    </Button>
+                  </div>
                 </div>
 
                 {/* Token List Table */}
@@ -4345,12 +4578,37 @@ export default function App() {
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead>Symbol</TableHead>
-                        <TableHead>Name</TableHead>
+                        <TableHead
+                          className="cursor-pointer select-none hover:text-primary transition-colors"
+                          onClick={() => handleTokenSort("symbol")}
+                        >
+                          Symbol{sortIndicator("symbol")}
+                        </TableHead>
+                        <TableHead
+                          className="cursor-pointer select-none hover:text-primary transition-colors"
+                          onClick={() => handleTokenSort("name")}
+                        >
+                          Name{sortIndicator("name")}
+                        </TableHead>
                         <TableHead>Mint Address</TableHead>
-                        <TableHead className="text-right">Price</TableHead>
-                        <TableHead className="text-right">24h Volume</TableHead>
-                        <TableHead className="text-right">24h Change</TableHead>
+                        <TableHead
+                          className="text-right cursor-pointer select-none hover:text-primary transition-colors"
+                          onClick={() => handleTokenSort("price")}
+                        >
+                          Price{sortIndicator("price")}
+                        </TableHead>
+                        <TableHead
+                          className="text-right cursor-pointer select-none hover:text-primary transition-colors"
+                          onClick={() => handleTokenSort("volume")}
+                        >
+                          24h Volume{sortIndicator("volume")}
+                        </TableHead>
+                        <TableHead
+                          className="text-right cursor-pointer select-none hover:text-primary transition-colors"
+                          onClick={() => handleTokenSort("change")}
+                        >
+                          24h Change{sortIndicator("change")}
+                        </TableHead>
                         <TableHead className="text-right">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -4362,8 +4620,14 @@ export default function App() {
                             <p>No tokens in whitelist. Click "Add Token" to get started.</p>
                           </TableCell>
                         </TableRow>
+                      ) : filteredSortedTokens.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={7} className="text-center text-muted-foreground py-6">
+                            No tokens match your filter.
+                          </TableCell>
+                        </TableRow>
                       ) : (
-                        tokens.map((token) => (
+                        filteredSortedTokens.map((token) => (
                           <TableRow key={token.mintAddress}>
                             <TableCell className="font-bold text-primary">{token.symbol}</TableCell>
                             <TableCell className="text-muted-foreground">{token.name}</TableCell>
@@ -4388,14 +4652,28 @@ export default function App() {
                               )}
                             </TableCell>
                             <TableCell className="text-right">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="text-red-400 hover:text-red-300 hover:bg-red-500/10"
-                                onClick={() => handleRemoveToken(token.mintAddress)}
-                              >
-                                Remove
-                              </Button>
+                              <div className="flex items-center justify-end gap-1">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="text-primary hover:text-primary/80 hover:bg-primary/10"
+                                  onClick={() => {
+                                    setNewBotMintAddress(token.mintAddress);
+                                    setIsCreateBotDialogOpen(true);
+                                  }}
+                                >
+                                  <Bot className="h-3.5 w-3.5 mr-1" />
+                                  Add Bot
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                                  onClick={() => handleRemoveToken(token.mintAddress)}
+                                >
+                                  Remove
+                                </Button>
+                              </div>
                             </TableCell>
                           </TableRow>
                         ))
@@ -4508,7 +4786,7 @@ export default function App() {
               </div>
             ) : activeTab === "strategies" ? (
               // STRATEGIEN MANAGEMENT VIEW
-              <div className="space-y-6 animate-in fade-in duration-300 max-w-7xl mx-auto">
+              <div className="space-y-6 animate-in fade-in duration-300 w-full">
                 {/* Einheitlicher Header */}
                 <div className="flex items-center gap-3 mb-6">
                   <Puzzle className="h-8 w-8 text-primary" />
@@ -4519,14 +4797,15 @@ export default function App() {
                 </div>
 
                 {/* Sub-Tab Bar */}
-                <div className="flex gap-1 bg-zinc-900/60 border border-white/10 rounded-lg p-1 w-fit">
-                  {(["templates", "saved", "editor"] as const).map(tab => (
-                    <button key={tab} onClick={() => setStrategySubTab(tab)}
-                      className={`px-4 py-1.5 rounded text-xs font-semibold transition-colors ${strategySubTab === tab ? "bg-primary text-black" : "text-zinc-400 hover:text-white"}`}>
-                      {tab === "templates" ? "Templates" : tab === "saved" ? "Gespeichert" : "Neu erstellen"}
-                    </button>
-                  ))}
-                </div>
+                <SubTabs
+                  tabs={[
+                    { id: "templates", label: "Templates" },
+                    { id: "saved", label: "Gespeichert" },
+                    { id: "editor", label: "Neu erstellen" },
+                  ]}
+                  active={strategySubTab}
+                  onChange={setStrategySubTab}
+                />
 
                 {strategySubTab === "templates" && (
                   <div className="space-y-4">
@@ -4715,26 +4994,17 @@ export default function App() {
 
             ) : activeTab === "agent" ? (
               // STRATEGY ASSISTANT (3 SUBTABS: Advisor · Assistant · Self-Correction)
-              <div className="space-y-6 max-w-7xl mx-auto">
+              <div className="space-y-6 w-full">
                 {/* Subtab bar: Smart Advisor | Assistant | Self-Correction */}
-                <div className="inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground">
-                  {([
-                    { key: "advisor",       label: "Smart Advisor",    Icon: Wand2       },
-                    { key: "assistant",     label: "Assistant",        Icon: BrainCircuit },
-                    { key: "selfcorrection", label: "Self-Correction",  Icon: Puzzle      },
-                  ] as const).map(({ key, label, Icon }) => (
-                    <button
-                      key={key}
-                      className={`inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-all ${
-                        assistantSubTab === key ? "bg-background text-foreground shadow" : "hover:text-foreground"
-                      }`}
-                      onClick={() => setAssistantSubTab(key)}
-                    >
-                      <Icon className="mr-2 h-4 w-4" />
-                      {label}
-                    </button>
-                  ))}
-                </div>
+                <SubTabs
+                  tabs={[
+                    { id: "advisor",        label: "Smart Advisor",   icon: Wand2       },
+                    { id: "assistant",      label: "Assistant",       icon: BrainCircuit },
+                    { id: "selfcorrection", label: "Self-Correction", icon: Puzzle      },
+                  ]}
+                  active={assistantSubTab}
+                  onChange={setAssistantSubTab}
+                />
 
                 {/* Smart Advisor subtab */}
                 {assistantSubTab === "advisor" && (
@@ -5254,6 +5524,37 @@ export default function App() {
             ) : null}
           </div>
         </main>
+
+        {/* Create Bot Dialog — rendered globally so it works from any tab */}
+        <CreateBotDialog
+          open={isCreateBotDialogOpen}
+          onOpenChange={setIsCreateBotDialogOpen}
+          hiddenTrigger
+          tokens={tokens}
+          strategyTemplates={strategyTemplates}
+          savedStrategies={savedStrategies}
+          newBotName={newBotName}
+          setNewBotName={setNewBotName}
+          newBotMintAddress={newBotMintAddress}
+          setNewBotMintAddress={setNewBotMintAddress}
+          newBotWalletAddress={newBotWalletAddress}
+          setNewBotWalletAddress={setNewBotWalletAddress}
+          newBotTradingMode={newBotTradingMode}
+          setNewBotTradingMode={setNewBotTradingMode}
+          newBotTradeSize={newBotTradeSize}
+          setNewBotTradeSize={setNewBotTradeSize}
+          newBotAggressiveness={newBotAggressiveness}
+          setNewBotAggressiveness={setNewBotAggressiveness}
+          newBotStrategyId={newBotStrategyId}
+          setNewBotStrategyId={setNewBotStrategyId}
+          showTokenWhitelist={showTokenWhitelist}
+          setShowTokenWhitelist={setShowTokenWhitelist}
+          startAfterCreate={newBotAutoStart}
+          setStartAfterCreate={setNewBotAutoStart}
+          advisorSettings={pendingAdvisorSettings}
+          apiBase={getApiBase()}
+          onCreateBot={createDemoBot}
+        />
 
         {/* Reset Bot Dialog */}
         <Dialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>

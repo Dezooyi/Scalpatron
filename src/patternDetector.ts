@@ -1,4 +1,5 @@
 import type { PricePoint } from './priceFeed.js';
+import { CONFIG } from './config.js';
 
 export type Signal = 'BUY' | 'SELL' | 'HOLD';
 
@@ -13,6 +14,7 @@ export interface PatternResult {
   confidence?: number;              // 0–1 ratio of conditions met
   reason?: string;                  // human-readable trigger description
   indicatorValues?: Record<string, number>;  // latest indicator snapshot
+  minHoldRejected?: boolean;        // ADR-019: SELL rejected because min hold time not reached
 }
 
 export interface PatternSettings {
@@ -22,15 +24,21 @@ export interface PatternSettings {
   cooldownTicks: number;     // Ticks warten nach Trade (default: 15)
   takeProfitThreshold: number; // % above entry price = take-profit sell (default: 0.10)
   startDelayTicks: number;   // Ticks nach Bot-Start vor erstem BUY (default: 30)
+  /** ADR-019: minimum ticks between BUY and a drop_stop SELL (TP-hit bypasses). */
+  minHoldTicks?: number;
+  /** ADR-019: fraction above entry that triggers breakeven-trail ratchet. */
+  breakevenTriggerPct?: number;
 }
 
 export const DEFAULT_SETTINGS: PatternSettings = {
-  floorWindow: 20,
-  spikeThreshold: 3.0,      // 3% spike to enter — covers 2% roundtrip fee with margin
-  sellDropThreshold: 5.0,   // 5% trailing stop — lets moves develop before exiting
-  cooldownTicks: 15,
-  takeProfitThreshold: 0.10, // 10% take-profit — 8% net after 2% fee
+  floorWindow: 30,
+  spikeThreshold: 2.0,      // 2% spike to enter — covers 2% roundtrip fee with margin
+  sellDropThreshold: 4.0,   // 4% trailing stop — lets moves develop before exiting
+  cooldownTicks: 20,
+  takeProfitThreshold: 0.08, // 8% take-profit — 6% net after 2% fee
   startDelayTicks: 30,      // ~60s at 2s/tick — prevents immediate first buy on bot start
+  minHoldTicks: 0,          // ADR-019: 0 = disabled by default; strategy templates set their own value
+  breakevenTriggerPct: 0.03, // ADR-019: ratchet entry to breakeven+fee after +3% move (one-time per trade)
 };
 
 export class PatternDetector {
@@ -40,6 +48,12 @@ export class PatternDetector {
   private entryPrice = 0;
   private cooldown = 0;
   private startDelayTicksRemaining = 0;
+  // ADR-019: track position lifecycle for min-hold-time + breakeven-trail.
+  private entryTick = -1;
+  private tickCounter = 0;
+  // ADR-019: one-time ratchet flag — prevents TP from compounding upward on
+  // consecutive ticks where price stays above the breakeven trigger.
+  private breakevenRatcheted = false;
 
   constructor(settings?: Partial<PatternSettings>) {
     this.settings = { ...DEFAULT_SETTINGS, ...settings };
@@ -54,7 +68,18 @@ export class PatternDetector {
     this.startDelayTicksRemaining = this.settings.startDelayTicks;
   }
 
+  /** Accessor for the current entry tick (for diagnostics and tests). */
+  getEntryTick(): number {
+    return this.entryTick;
+  }
+
+  /** Accessor for the current tick counter (for diagnostics and tests). */
+  getTickCounter(): number {
+    return this.tickCounter;
+  }
+
   analyze(history: PricePoint[]): PatternResult {
+    this.tickCounter++;
     if (history.length === 0) {
       return {
         signal: 'HOLD',
@@ -109,6 +134,8 @@ export class PatternDetector {
         this.inSpike = true;
         this.entryPrice = current.price;
         this.peakPrice = current.price;
+        this.entryTick = this.tickCounter;
+        this.breakevenRatcheted = false;
         result.peakPrice = this.peakPrice;
         result.signal = 'BUY';
       }
@@ -120,17 +147,49 @@ export class PatternDetector {
       result.peakPrice = this.peakPrice;
       result.dropFromPeak = dropFromPeak;
 
-      if (current.price >= this.entryPrice * (1 + this.settings.takeProfitThreshold)) {
+      // ADR-019: Breakeven-trail — once the trade is meaningfully in profit
+      // (default +3%), ratchet entryPrice up by the roundtrip cost so that a
+      // trailing stop exits at breakeven rather than at a small loss.
+      // One-time per trade: the flag prevents the ratchet from compounding on
+      // every subsequent tick where price stays above the trigger, which would
+      // otherwise push the TP target far out of reach.
+      const breakevenTrigger = this.settings.breakevenTriggerPct ?? 0.03;
+      if (!this.breakevenRatcheted && breakevenTrigger > 0 && current.price >= this.entryPrice * (1 + breakevenTrigger)) {
+        const newEntry = this.entryPrice * (1 + CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT);
+        if (newEntry > this.entryPrice) {
+          this.entryPrice = newEntry;
+          this.breakevenRatcheted = true;
+        }
+      }
+
+      // ADR-019: Min-Hold-Time gate. drop_stop exits before minHoldTicks
+      // are blocked to protect against fee-fraying micro-roundtrips. The
+      // take_profit exit is intentionally exempt so real breakouts can still
+      // lock in gains early.
+      const minHold = this.settings.minHoldTicks ?? 0;
+      const heldTicks = this.tickCounter - this.entryTick;
+      const minHoldReached = minHold <= 0 || heldTicks >= minHold;
+
+      const tpHit = current.price >= this.entryPrice * (1 + this.settings.takeProfitThreshold);
+      const dropHit = dropFromPeak >= this.settings.sellDropThreshold;
+
+      if (tpHit) {
         result.signal = 'SELL';
         result.reason = 'take_profit';
         this.inSpike = false;
         this.peakPrice = 0;
         this.cooldown = this.settings.cooldownTicks;
-      } else if (dropFromPeak >= this.settings.sellDropThreshold) {
-        result.signal = 'SELL';
-        this.inSpike = false;
-        this.peakPrice = 0;
-        this.cooldown = this.settings.cooldownTicks;
+      } else if (dropHit) {
+        if (minHoldReached) {
+          result.signal = 'SELL';
+          this.inSpike = false;
+          this.peakPrice = 0;
+          this.cooldown = this.settings.cooldownTicks;
+        } else {
+          // Block the drop_stop — too early. Hold and wait.
+          result.minHoldRejected = true;
+          result.reason = `min hold time not reached (${heldTicks}/${minHold} ticks)`;
+        }
       }
     }
 
@@ -142,6 +201,9 @@ export class PatternDetector {
     this.peakPrice = 0;
     this.entryPrice = 0;
     this.cooldown = 0;
+    this.entryTick = -1;
+    this.tickCounter = 0;
+    this.breakevenRatcheted = false;
   }
 
   private calcFloor(history: PricePoint[]): number {

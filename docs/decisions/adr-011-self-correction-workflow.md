@@ -1,7 +1,7 @@
 # ADR-011: Self-Correction & Adaptives Lernen im AI Agent
 
 **Datum:** 18. Juni 2026
-**Status:** Vorgeschlagen
+**Status:** Akzeptiert & Implementiert
 **Bereich:** AI Agent / Strategie / LLM-Prompts
 
 ---
@@ -360,6 +360,73 @@ Diese Felder werden über `PUT /api/agent/config` gespeichert und beim Start
     (kein Stale-Re-Entry als „Trade" zählen).
   - ADR-009 (Preflight & Tx-Verification) – Strategie-Switch triggert
     *keine* offenen Positionen, nur zukünftige Entries.
+
+## Implementierungsnachweis
+
+Alle 5 Phasen sind vollständig implementiert. Nachfolgend die maßgeblichen Dateipositionen:
+
+### Phase A — DB + Time-Window Aggregation
+| Komponente | Datei | Zeilen |
+|---|---|---|
+| `trade_time_windows`-Tabelle (CREATE + Indexes) | `src/db.ts` | 107–118 |
+| `lessons_learned`-Tabelle (CREATE + Indexes) | `src/db.ts` | 123–135 |
+| `upsertTimeWindow()` — Hour+Weekday-Buckets aus Trade-Timestamp | `src/db.ts` | 632–649 |
+| Hook in `updateAgentOutcome` → ruft `upsertTimeWindow()` | `src/db.ts` | 605–626 |
+| `getTimeWindowPerformance(botId, windowType, minSampleSize)` | `src/db.ts` | 664–686 |
+| `detectTimeWindowDrift(botId, windowType, threshold, minN)` | `src/db.ts` | 701–743 |
+
+### Phase B — Strategie-Switching
+| Komponente | Datei | Zeilen |
+|---|---|---|
+| `strategySwitch`-Feld im JSON-Schema | `src/ollamaAgent.ts` | 104–108 |
+| Prompt-Dokumentation des Felds | `src/ollamaAgent.ts` | 309–314 |
+| `applyStrategySwitch(newType)` in BotInstance | `src/botInstance.ts` | 448–490 |
+| Safety-Gate (Confidence, `AI_ALLOW_STRATEGY_SWITCH`, force-Mix) | `src/ollamaAgent.ts` | 960–983 |
+
+### Phase C — Self-Reflection im Prompt
+| Komponente | Datei | Zeilen |
+|---|---|---|
+| REFLECTION STEP Block im System-Prompt | `src/ollamaAgent.ts` | 284–289 |
+| TIME-WINDOW PERFORMANCE Block in `buildPrompt` | `src/ollamaAgent.ts` | 1086–1103, 1287–1288 |
+| DRIFT ALERTS Block | `src/ollamaAgent.ts` | 1105–1112, 1290–1291 |
+| LESSONS LEARNED Block | `src/ollamaAgent.ts` | 1114–1119, 1293–1294 |
+| PREVIOUS RECOMMENDATION CONTEXT (via RECENT ANALYSES) | `src/ollamaAgent.ts` | 1296–1297 |
+| `strategySwitch`-Parsing in `parseResponse` | `src/ollamaAgent.ts` | 1568–1576 |
+
+### Phase D — Lessons-Learned Auto-Generation
+| Komponente | Datei | Zeilen |
+|---|---|---|
+| `generateLessons(botId)` — Haupt-Funktion + Cold-Start-Guard | `src/lessonsGenerator.ts` | 62–246 |
+| Heuristik: Time-Window (Hour + Weekday, WR < 40 %, n ≥ 10) | `src/lessonsGenerator.ts` | 87–112 |
+| Heuristik: Streak (3+ konsekutive Verlust-Empfehlungen) | `src/lessonsGenerator.ts` | 138–168 |
+| Heuristik: Param-Drift (Agressiveness-Delta > 50 % ohne WR-Gewinn) | `src/lessonsGenerator.ts` | 171–200 |
+| Heuristik: Strategy-Regime-Mismatch (WR < 35 % in Regime) | `src/lessonsGenerator.ts` | 202–227 |
+| Deduplizierung via Levenshtein (`isNearDuplicate`, Schwelle 0.85) | `src/lessonsGenerator.ts` | 53–60 |
+| `isNearDuplicate` — Levenshtein-Implementierung | `src/utils/textUtils.ts` | — |
+| Aufruf von `generateLessons` vor jedem `runCycle` | `src/ollamaAgent.ts` | 768 |
+| SSE-Broadcast `agent_lesson` bei neuen Lessons | `src/ollamaAgent.ts` | 772 |
+| Bonus-Confidence (+0.1) bei Lesson-Referenz in `reason`/`analysis` | `src/ollamaAgent.ts` | 1578–1591 |
+| `insertLesson()`, `getLessonsForBot()` in DB-Layer | `src/db.ts` | 755–780 |
+
+### Phase E — Frontend + API
+| Komponente | Datei | Zeilen |
+|---|---|---|
+| `SelfCorrectionInsightsTab` (Heatmap + Lessons-Cards + Drift + Switch-Confirm) | `frontend/src/components/tabs/SelfCorrectionInsightsTab.tsx` | 1–370 |
+| `GET /api/agent/insights?botId=…` | `src/server.ts` | 1235–1267 |
+| `POST /api/agent/confirm-switch` | `src/server.ts` | 1270–1301 |
+
+### Neue `.env`-Variablen
+| Variable | Default | Zweck |
+|---|---|---|
+| `AI_ALLOW_STRATEGY_SWITCH` | `0` | Auto-Apply von Strategy-Switches (Default: aus) |
+| `AI_MIN_SWITCH_CONFIDENCE` | `0.7` | Mindest-Confidence für Switch-Freigabe |
+| `AI_TIMEWINDOW_MIN_SAMPLES` | `5` | Min. Trades/Bucket bevor Time-Window reportet |
+| `AI_DRIFT_THRESHOLD_PCT` | `20` | % Abweichung für Drift-Alert |
+| `AI_LESSONS_MAX_PER_BOT` | `5` | Max. aktive Lessons je Bot |
+| `AI_LESSONS_LOOKBACK_DAYS` | `7` | Lookback-Fenster für Lessons |
+| `AI_REFLECTION_BONUS_CONFIDENCE` | `0.1` | Bonus-Confidence bei explizitem Lessons-Bezug |
+
+---
 
 ## Beziehungen
 

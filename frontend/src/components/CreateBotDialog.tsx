@@ -24,6 +24,7 @@ import {
   Activity,
   ShieldCheck,
   Sparkles,
+  AlertTriangle,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -75,6 +76,8 @@ interface CreateBotDialogProps {
     sellDropThreshold?: number;
     floorWindow?: number;
   } | null;
+  /** API-Basis für Wallet-Balance-Fetch (für Reserve-Floor-Anzeige). */
+  apiBase: string;
   onCreateBot: () => void;
 }
 
@@ -99,6 +102,9 @@ const STRATEGY_AI_HINTS: Record<string, { recommended: number; reason: string }>
   solana_runner:      { recommended: 45, reason: "Runner-Strategie: höhere Aggressivität um Trends vollständig zu reiten." },
   solana_sniper:      { recommended: 20, reason: "Sniper: sehr selektiv, daher niedrige Aggressivität pro Trade." },
 };
+
+const SOL_RESERVE_FLOOR = 0.05; // Mindest-Reserve für SELL-Tx-Fees
+const SOL_MAX_RATIO = 0.9;       // Max 90% der Balance pro Trade
 
 export function CreateBotDialog({
   open,
@@ -127,6 +133,7 @@ export function CreateBotDialog({
   startAfterCreate,
   setStartAfterCreate,
   advisorSettings,
+  apiBase,
   onCreateBot,
 }: CreateBotDialogProps) {
   const [activeTab, setActiveTab] = useState<"setup" | "ai">("setup");
@@ -154,6 +161,39 @@ export function CreateBotDialog({
     const randomId = Math.random().toString(36).substring(2, 7).toUpperCase();
     setNewBotName(`Agent-${randomId}`);
   };
+
+  // Wallet-Balance für Reserve-Floor-Anzeige (alle 15s im Hintergrund)
+  const [walletInfo, setWalletInfo] = useState<{ address: string; solBalance: number } | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const fetchWallet = async () => {
+      try {
+        const res = await fetch(`${apiBase}/api/wallet/info`);
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setWalletInfo({ address: data.address, solBalance: data.solBalance ?? 0 });
+      } catch { /* ignore */ }
+    };
+    void fetchWallet();
+    const interval = setInterval(fetchWallet, 15_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [open, apiBase]);
+
+  // Trade-Größe gegen Reserve-Floor + 90%-Ratio prüfen (nur wenn Wallet-Balance bekannt).
+  const walletBalance = walletInfo?.solBalance ?? null;
+  const reserveCeiling = walletBalance != null
+    ? Math.max(0, Math.min(walletBalance - SOL_RESERVE_FLOOR, walletBalance * SOL_MAX_RATIO))
+    : null;
+  const fixedModeOverReserve = newBotTradingMode === "fixed"
+    && walletBalance != null
+    && newBotTradeSize > (reserveCeiling ?? Infinity);
+  const aggrOverReserve = newBotTradingMode === "aggressive"
+    && walletBalance != null
+    && (walletBalance * (newBotAggressiveness / 100)) > (reserveCeiling ?? Infinity);
+  const balanceMismatch = walletInfo && newBotWalletAddress
+    && newBotWalletAddress.trim() !== ""
+    && newBotWalletAddress.trim() !== walletInfo.address;
 
   const applyRecommended = () => {
     setNewBotAggressiveness(aiHint.recommended);
@@ -389,6 +429,20 @@ export function CreateBotDialog({
                       />
                       <span className="text-sm text-zinc-400">SOL per trade</span>
                     </div>
+                    {walletBalance != null && (
+                      <p className="text-[10px] text-zinc-500">
+                        Verfügbar: <span className="font-mono text-cyan-300">{walletBalance.toFixed(4)} SOL</span>
+                        {reserveCeiling != null && (
+                          <> · Reserve-Ceiling: <span className="font-mono text-amber-300">{reserveCeiling.toFixed(4)} SOL</span> (90% bzw. −{SOL_RESERVE_FLOOR} SOL Reserve für SELL-Tx)</>
+                        )}
+                      </p>
+                    )}
+                    {fixedModeOverReserve && (
+                      <p className="text-[10px] text-rose-400 flex items-center gap-1">
+                        <AlertTriangle className="h-3 w-3" />
+                        Trade-Größe überschreitet das Reserve-Ceiling — BUY wird vom Trader abgelehnt.
+                      </p>
+                    )}
                     <p className="text-[10px] text-zinc-600">
                       Fixed SOL amount used per signal.{" "}
                       <button
@@ -402,6 +456,20 @@ export function CreateBotDialog({
                   </div>
                 ) : (
                   <div className="space-y-1.5">
+                    {walletBalance != null && (
+                      <p className="text-[10px] text-zinc-500">
+                        Verfügbar: <span className="font-mono text-cyan-300">{walletBalance.toFixed(4)} SOL</span>
+                        {reserveCeiling != null && (
+                          <> · {newBotAggressiveness}% = <span className="font-mono text-amber-300">{(walletBalance * newBotAggressiveness / 100).toFixed(4)} SOL</span></>
+                        )}
+                      </p>
+                    )}
+                    {aggrOverReserve && (
+                      <p className="text-[10px] text-rose-400 flex items-center gap-1">
+                        <AlertTriangle className="h-3 w-3" />
+                        Effektive Trade-Größe überschreitet das Reserve-Ceiling — BUY wird vom Trader abgelehnt.
+                      </p>
+                    )}
                     <p className="text-[10px] text-zinc-500">
                       AI-gesteuerte Positionsgröße aktiv.{" "}
                       <button
@@ -412,6 +480,17 @@ export function CreateBotDialog({
                         AI Optimization konfigurieren →
                       </button>
                     </p>
+                  </div>
+                )}
+
+                {balanceMismatch && (
+                  <div className="mt-1 p-2 rounded border border-amber-500/30 bg-amber-500/5 text-[10px] text-amber-300 flex items-start gap-1.5">
+                    <AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" />
+                    <span>
+                      Die eingegebene Wallet-Adresse weicht von der primären Live-Wallet ab
+                      (<code className="font-mono">{walletInfo?.address.slice(0, 6)}…{walletInfo?.address.slice(-4)}</code>).
+                      Live-Trades signieren weiterhin mit dem globalen Keypair aus <code>.env</code>.
+                    </span>
                   </div>
                 )}
               </div>

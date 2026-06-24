@@ -95,6 +95,26 @@ export class WalletService {
   private primaryAddress: string | null = null;
   private balanceCache = new Map<string, CacheEntry<unknown>>();
   private snapshotTimer: NodeJS.Timeout | null = null;
+  private reloadListeners: Array<() => Promise<void> | void> = [];
+
+  /**
+   * Registriert einen Listener, der nach jedem Wallet-Wechsel (import/generate/clear)
+   * aufgerufen wird. BotManager nutzt dies, um das in-memory Keypair aller laufenden
+   * Live-Trader zu refreshen — sonst signieren sie weiterhin mit dem alten Keypair.
+   */
+  public onWalletReload(listener: () => Promise<void> | void): void {
+    this.reloadListeners.push(listener);
+  }
+
+  private async notifyReload(): Promise<void> {
+    for (const listener of this.reloadListeners) {
+      try {
+        await listener();
+      } catch (e: any) {
+        console.warn(`[WalletService] Reload-Listener Fehler: ${e.message}`);
+      }
+    }
+  }
 
   private constructor() {
     this.connection = new Connection(CONFIG.RPC_URL, 'confirmed');
@@ -398,6 +418,7 @@ export class WalletService {
     this.primaryAddress = keypair.publicKey.toBase58();
     this.balanceCache.clear();
     console.log(`[WalletService] Neues Keypair generiert → .env aktualisiert: ${this.primaryAddress}`);
+    void this.notifyReload();
     return { address: this.primaryAddress, privateKeyBase58: base58Key };
   }
 
@@ -428,6 +449,7 @@ export class WalletService {
     this.primaryAddress = keypair.publicKey.toBase58();
     this.balanceCache.clear();
     console.log(`[WalletService] Private-Key importiert → .env aktualisiert: ${this.primaryAddress}`);
+    void this.notifyReload();
     return { address: this.primaryAddress };
   }
 
@@ -439,6 +461,7 @@ export class WalletService {
     this.primaryAddress = null;
     this.balanceCache.clear();
     console.warn('[WalletService] Private-Key aus .env entfernt');
+    void this.notifyReload();
   }
 
   /**

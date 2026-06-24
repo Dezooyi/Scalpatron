@@ -3,15 +3,26 @@ import { createPortal } from "react-dom";
 import { AlertTriangle, Info, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
+export interface ConfirmToggle {
+  label: string;
+  defaultChecked?: boolean;
+}
+
 interface ConfirmOptions {
   title?: string;
   message: string;
   confirmLabel?: string;
   cancelLabel?: string;
   variant?: "danger" | "warning" | "info";
+  toggle?: ConfirmToggle;
 }
 
-type ConfirmFn = (options: ConfirmOptions) => Promise<boolean>;
+export interface ConfirmResult {
+  confirmed: boolean;
+  toggleValue?: boolean;
+}
+
+type ConfirmFn = (options: ConfirmOptions) => Promise<ConfirmResult>;
 
 const ConfirmContext = createContext<ConfirmFn | null>(null);
 
@@ -22,20 +33,23 @@ export function useConfirm(): ConfirmFn {
 }
 
 interface PendingConfirm extends ConfirmOptions {
-  resolve: (value: boolean) => void;
+  resolve: (value: ConfirmResult) => void;
 }
 
 export function ConfirmProvider({ children }: { children: React.ReactNode }) {
   const [pending, setPending] = useState<PendingConfirm | null>(null);
+  const [toggleOn, setToggleOn] = useState<boolean>(false);
 
-  const confirm = useCallback((options: ConfirmOptions): Promise<boolean> => {
+  const confirm = useCallback((options: ConfirmOptions): Promise<ConfirmResult> => {
     return new Promise((resolve) => {
+      setToggleOn(options.toggle?.defaultChecked ?? false);
       setPending({ ...options, resolve });
     });
   }, []);
 
   function handleResolve(value: boolean) {
-    pending?.resolve(value);
+    if (!pending) return;
+    pending.resolve({ confirmed: value, toggleValue: pending.toggle ? toggleOn : undefined });
     setPending(null);
   }
 
@@ -82,6 +96,26 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
                 <p className="text-sm text-zinc-400 leading-relaxed">{pending.message}</p>
               </div>
             </div>
+
+            {/* Optional inline toggle */}
+            {pending.toggle && (
+              <label className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 cursor-pointer select-none hover:bg-white/[0.05] transition-colors">
+                <span className="text-sm text-zinc-200">{pending.toggle.label}</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={toggleOn}
+                  onClick={(e) => { e.preventDefault(); setToggleOn(v => !v); }}
+                  className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border transition-colors duration-150
+                    ${toggleOn ? "bg-primary/80 border-primary" : "bg-zinc-700 border-zinc-600"}`}
+                >
+                  <span
+                    className={`pointer-events-none absolute top-0.5 left-0.5 h-3.5 w-3.5 rounded-full bg-white shadow transition-transform duration-150
+                      ${toggleOn ? "translate-x-4" : "translate-x-0"}`}
+                  />
+                </button>
+              </label>
+            )}
 
             {/* Footer */}
             <div className="flex gap-2 justify-end pt-1 border-t border-white/5">

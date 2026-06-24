@@ -246,9 +246,9 @@ export function LiveFeedListCard({ bot, agentAdvice, agentHistory, terminalLogs 
       if (item.type === 'advice') {
         const adviceTs = item.advice?.timestamp;
         if (adviceTs) return adviceTs;
-        return 'timestamp' in item ? item.timestamp ?? 0 : 0;
+        return 'timestamp' in item ? (item as { timestamp: number }).timestamp : 0;
       }
-      return 'timestamp' in item ? item.timestamp ?? 0 : 0;
+      return 'timestamp' in item ? (item as { timestamp: number }).timestamp : 0;
     };
     return items.sort((a, b) => itemTimestamp(b) - itemTimestamp(a));
   }, [aggregatedTicks, bot.recentTrades, agentAdvice, agentHistory, localHistory, terminalLogs]);

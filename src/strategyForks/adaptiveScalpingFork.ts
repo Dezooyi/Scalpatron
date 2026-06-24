@@ -1,5 +1,6 @@
 import type { StrategyConfig, MarketContext } from '../strategyTypes.js';
 import type { StrategyFork } from './types.js';
+import { clampScalpingSettings } from '../strategy/scalpingSafetyBounds.js';
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -81,7 +82,7 @@ export const adaptiveScalpingFork: StrategyFork = {
 
     return {
       ...config,
-      scalping_settings: settings,
+      scalping_settings: clampScalpingSettings(settings),
     };
   },
 };

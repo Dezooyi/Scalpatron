@@ -1,6 +1,7 @@
 import { Puzzle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
+import { SubTabs } from "@/components/ui/sub-tabs";
 import { getStrategyIcon, getStrategyColor } from "@/lib/botUtils";
 
 type IndicatorDef = {
@@ -70,7 +71,7 @@ export function StrategiesTab({
   getApiBase,
 }: StrategiesTabProps) {
   return (
-    <div className="space-y-6 animate-in fade-in duration-300 max-w-7xl mx-auto">
+    <div className="space-y-6 animate-in fade-in duration-300 max-w-[1400px] mx-auto">
       {/* Header */}
       <div className="flex items-center gap-3 mb-6">
         <Puzzle className="h-8 w-8 text-primary" />
@@ -81,14 +82,15 @@ export function StrategiesTab({
       </div>
 
       {/* Sub-Tab Bar */}
-      <div className="flex gap-1 bg-zinc-900/60 border border-white/10 rounded-lg p-1 w-fit">
-        {(["templates", "saved", "editor"] as const).map(tab => (
-          <button key={tab} onClick={() => setStrategySubTab(tab)}
-            className={`px-4 py-1.5 rounded text-xs font-semibold transition-colors ${strategySubTab === tab ? "bg-primary text-black" : "text-zinc-400 hover:text-white"}`}>
-            {tab === "templates" ? "Templates" : tab === "saved" ? "Gespeichert" : "Neu erstellen"}
-          </button>
-        ))}
-      </div>
+      <SubTabs
+        tabs={[
+          { id: "templates", label: "Templates" },
+          { id: "saved", label: "Gespeichert" },
+          { id: "editor", label: "Neu erstellen" },
+        ]}
+        active={strategySubTab}
+        onChange={setStrategySubTab}
+      />
 
       {strategySubTab === "templates" && (
         <div className="space-y-4">

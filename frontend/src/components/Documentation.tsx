@@ -6,7 +6,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 
 export default function Documentation() {
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="space-y-6 max-w-[1400px] mx-auto">
       {/* Einheitlicher Header */}
       <PageHeader
         icon={BookOpen}

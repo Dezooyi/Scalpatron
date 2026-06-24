@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
-Solana SPL Token trading bot (Node.js + TypeScript). Runs in paper-trading mode by default. Web dashboard on port 3000 + React frontend on Vite dev server (port 5173). Targets UGOR token on Devnet. AI decision layer via local Ollama.
+Solana SPL Token trading bot (Node.js + TypeScript). Multi-token: any SPL token or native SOL can be traded — each bot instance targets an arbitrary mint address configured at creation. Runs in paper-trading mode by default. Web dashboard on port 3000 + React frontend on Vite dev server (port 5173). AI decision layer via local Ollama.
 
 ## Commands
 
@@ -69,7 +69,6 @@ Each strategy is a JSON object (see `src/strategyTypes.ts` for schema). Six buil
 React 19 + Vite 8 + TailwindCSS v4 + Radix UI + Recharts + GSAP. No Redux. State is local React state + SSE stream from `/api/events`.
 
 ## Key Constants
-- UGOR Mint: `UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW`
 - SOL Mint: `So11111111111111111111111111111111111111112`
 - Bot Wallet (Devnet): `5AiQFtjk2U6EzvqzUxX1MQghTQZTWU1rkZ6oxx2eCBPg`
 - Roundtrip cost constant: `CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT = 0.02` (2%) — used in PnL calculations
@@ -90,6 +89,10 @@ import { Trader } from '../trader';     // will fail at runtime
 
 **Stale price guard (ADR-010)** — trading is blocked when `feedStaleMs > CONFIG.PRICE_FEED_MAX_STALE_AGE_MS`. After a long outage (`> PRICE_FEED_LONG_OUTAGE_MS`), history is flushed and re-warmup is triggered on first recovered tick.
 
+**OllamaAgent ghost-timer (ADR-017)** — `start()` + `updateConfig()` have a race window of 5 seconds where a second ghost `setInterval` can be created silently. Fixed in both methods. Minimum `cycleMinutes = 5` enforced in `updateConfig`. Do not refactor the startup timer without reading ADR-017.
+
+**`spikePercent` not in SQLite `trades` table** — The `trades` table (`src/db.ts:47`) has no `spikePercent` column. The field exists in `TradeLogEntry` and the JSONL log file only. Any code reading `spikePercent` from the DB will always get `undefined`. If this column is ever needed (e.g. for AI prompt context), a schema migration is required. See CHANGELOG entry "23. Juni 2026 — AI Agent Bugfixes" for details.
+
 ## Configuration (`.env`)
 | Variable | Default | Description |
 |---|---|---|
@@ -109,4 +112,4 @@ import { Trader } from '../trader';     // will fail at runtime
 - `POST /api/agent/trigger` — force immediate AI analysis cycle
 
 ## ADR Index
-Architecture Decision Records are in `docs/decisions/`. ADR-010 (stale price handling) is the most operationally significant one.
+Architecture Decision Records are in `docs/decisions/`. ADR-010 (stale price handling) and ADR-017 (OllamaAgent timer management) are the most operationally significant ones.

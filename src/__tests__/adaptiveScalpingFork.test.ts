@@ -27,10 +27,10 @@ const baseConfig: StrategyConfig = {
   risk_management: { position_size: 0.1, max_positions: 1, leverage: 1 },
   execution: { order_type: 'market', slippage_tolerance: 0.02 },
   scalping_settings: {
-    floorWindow: 20,
-    spikeThreshold: 1.0,
+    floorWindow: 30,
+    spikeThreshold: 2.0,
     sellDropThreshold: 5.0,
-    cooldownTicks: 5,
+    cooldownTicks: 20,
     takeProfitThreshold: 10.0,
   },
 };
@@ -83,9 +83,12 @@ assert(
   (adaptedVolatile.scalping_settings?.sellDropThreshold ?? 999) < (baseConfig.scalping_settings?.sellDropThreshold ?? 999),
   'high volatility tightens sell drop threshold'
 );
+// ADR-019: spike threshold cannot go below MIN_SPIKE_THRESHOLD_PCT (1.0).
+// The base is now 2.0 so overlap+bullish can legitimately lower it without hitting the floor.
 assert(
-  (adaptedVolatile.scalping_settings?.spikeThreshold ?? 999) < (baseConfig.scalping_settings?.spikeThreshold ?? 999),
-  'overlap + bullish HTF lowers spike threshold'
+  (adaptedVolatile.scalping_settings?.spikeThreshold ?? 999) < (baseConfig.scalping_settings?.spikeThreshold ?? 999)
+    && (adaptedVolatile.scalping_settings?.spikeThreshold ?? 0) >= 1.0,
+  'overlap + bullish HTF lowers spike threshold (clamped to safety floor)'
 );
 
 const ticks = flat(50).concat(withVolatility(20, 0.0005));

@@ -3,14 +3,15 @@ import { PatternDetector, PatternSettings, DEFAULT_SETTINGS } from './patternDet
 import { Trader, TraderStats, type TradeLogEntry } from './trader.js';
 import { logger } from './appLogger.js';
 import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, listStrategies, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt, getBotKillSwitch, setBotKillSwitch, getSetting, setSetting, insertLesson } from './db.js';
-import { PriceRecorder } from './priceRecorder.js';
 import { StrategyEngine, isScalpingType } from './strategyEngine.js';
 import type { StrategyConfig, IndicatorConfig } from './strategyTypes.js';
 import { TIMEFRAME_MS } from './candleAggregator.js';
 import { CONFIG } from './config.js';
+import { clampScalpingSettings } from './strategy/scalpingSafetyBounds.js';
 import { KillSwitchEngine } from './killSwitch.js';
 import type { KillSwitchConfig, KillSwitchRuntime } from './killSwitch.js';
 import { adaptPAETSettings, PAET_DEFAULTS } from './strategyForks/paetAdaptiveFork.js';
+import { adaptNovaPulseSettingsBounded, NOVAPULSE_PROGRAMMATIC_KEYS } from './strategyForks/novaPulseAdaptiveFork.js';
 
 const PRICE_FEED_TICKRATE_MS = process.env.PRICE_FEED_TICKRATE_MS
   ? parseInt(process.env.PRICE_FEED_TICKRATE_MS, 10)
@@ -57,7 +58,6 @@ export class BotInstance {
   private strategyEngine?: StrategyEngine;
   private activeStrategyConfig?: StrategyConfig;
   private trader: Trader;
-  private recorder: PriceRecorder;
   public status: 'running' | 'paused' | 'stopped' = 'stopped';
   public customSystemPrompt: string | null = null;
   private cumulativeTicks = 0;
@@ -88,7 +88,6 @@ export class BotInstance {
     this.walletAddress = walletAddress;
     this.initialSOL = initialSOL;
     this.detector = new PatternDetector();
-    this.recorder = new PriceRecorder();
 
     // Token-Info laden
     const tokenInfo = getTokenInfo(mintAddress);
@@ -225,21 +224,9 @@ export class BotInstance {
 
     const feed = PriceFeed.getInstance();
 
-    // Load historical price data from SQLite database (persistent storage)
-    // This ensures the bot always has access to price data, even after restart
-    const historicalPrices = this.recorder.loadFromDatabase(this.mintAddress, 1000);
-    if (historicalPrices.length > 0) {
-      console.log(`[BotInstance] ${this.name} lud ${historicalPrices.length} persistente Preisdaten aus SQLite`);
-      feed.seedHistory(this.mintAddress, historicalPrices);
-    } else {
-      // Fallback to JSONL file if no database entries exist
-      const fallbackPrices = this.recorder.loadAll();
-      if (fallbackPrices.length > 0) {
-        console.log(`[BotInstance] ${this.name} lud ${fallbackPrices.length} Preisdaten aus JSONL-Datei (Fallback)`);
-        feed.seedHistory(this.mintAddress, fallbackPrices);
-      }
-    }
-
+    // PriceFeed verwaltet History + Persistenz zentral pro Token.
+    // subscribe() erhöht nur den Bot-Refcount; ein vorheriges activate() (TokenService)
+    // hält den Feed bereits warm. DB-Seeding läuft automatisch beim ersten Subscriber.
     feed.subscribe(this.mintAddress);
     feed.on(`price:${this.mintAddress}`, this.onPriceTick);
 
@@ -270,13 +257,18 @@ export class BotInstance {
     }
   }
 
-  /** Update PatternDetector settings (scalping / legacy path) */
+  /** Update PatternDetector settings (scalping / legacy path).
+   *  ADR-019: settings are always passed through `clampScalpingSettings`
+   *  so no caller (AI, fork, REST endpoint) can drive parameters into a
+   *  fee-loss region.
+   */
   public updateSettings(newSettings: Partial<PatternSettings>) {
-    this.detector.updateSettings(newSettings);
+    const clamped = clampScalpingSettings(newSettings);
+    this.detector.updateSettings(clamped);
     this.detector.reset();
     // Also update strategy engine if it's a scalping type
     if (this.strategyEngine && this.activeStrategyConfig && isScalpingType(this.activeStrategyConfig.strategy_type)) {
-      this.strategyEngine.updateScalpingSettings(newSettings);
+      this.strategyEngine.updateScalpingSettings(clamped);
     }
   }
 
@@ -336,7 +328,7 @@ export class BotInstance {
       this.detector.updateSettings(config.scalping_settings);
       this.detector.reset();
     }
-    // PAET: restore persisted ω from DB so calibration survives bot restarts
+    // PAET: restore persisted ω and programmatic adaptations from DB
     if (config.strategy_type === 'paet') {
       const savedOmega = getSetting(`paet_omega_${this.id}`, '');
       if (savedOmega !== '') {
@@ -344,6 +336,34 @@ export class BotInstance {
         if (!isNaN(omega)) {
           this.strategyEngine.getPaetEngine()?.setOmega(omega);
         }
+      }
+      // Restore programmatic adaptations (Rule 1–3) so the bot resumes
+      // already-converged settings instead of re-converging from scratch.
+      const savedPaetSettings = getSetting(`paet_adapted_${this.id}`, '');
+      if (savedPaetSettings !== '') {
+        try {
+          const adapted = JSON.parse(savedPaetSettings);
+          this.activeStrategyConfig!.paet_settings = {
+            ...(this.activeStrategyConfig!.paet_settings ?? {}),
+            ...adapted,
+          };
+          this.strategyEngine.updateConfig(this.activeStrategyConfig!);
+        } catch { /* best effort */ }
+      }
+    }
+    // Nova Pulse: restore persisted programmatic adaptations so the bot resumes
+    // already-converged settings instead of re-converging from scratch.
+    if (config.strategy_type === 'scalping-adaptive') {
+      const savedNovaPulse = getSetting(`novapulse_adapted_${this.id}`, '');
+      if (savedNovaPulse !== '') {
+        try {
+          const adapted = JSON.parse(savedNovaPulse);
+          this.activeStrategyConfig!.scalping_settings = {
+            ...(this.activeStrategyConfig!.scalping_settings ?? {}),
+            ...adapted,
+          };
+          this.strategyEngine.updateConfig(this.activeStrategyConfig!);
+        } catch { /* best effort */ }
       }
     }
     logger.info(this.id, 'SYSTEM', `Strategie aktualisiert: ${config.strategy_name} (${config.strategy_type})`);
@@ -375,6 +395,69 @@ export class BotInstance {
       ...adapted,
     };
     this.strategyEngine?.updateConfig(this.activeStrategyConfig);
+
+    // Persist ONLY the 4 programmatic keys (Rules 1–3 + ω guard), never the
+    // permanent Preset params (sigma_mult, safety_k, etc.). Saving the full
+    // settings would override user Preset changes to permanent params on restart.
+    const PROGRAMMATIC_KEYS = [
+      'stl_trend_window', 'collapse_threshold_pct',
+      'evacuation_ticks', 'false_alarm_penalty_omega',
+    ] as const;
+    const toPersist: Record<string, number> = {};
+    const live = this.activeStrategyConfig.paet_settings as Record<string, number>;
+    for (const k of PROGRAMMATIC_KEYS) {
+      if (live[k] !== undefined) toPersist[k] = live[k];
+    }
+    try {
+      setSetting(`paet_adapted_${this.id}`, JSON.stringify(toPersist));
+    } catch (e) {
+      console.warn(`[BotInstance] PAET adapt persist failed: ${(e as Error).message}`);
+    }
+  }
+
+  /** Programmatic Nova Pulse adaptation — derives optimal scalping base settings from live market context. */
+  private applyNovaPulseAdaptation(
+    indicatorValues: Record<string, number> | undefined,
+  ): void {
+    if (!this.activeStrategyConfig || !indicatorValues) return;
+
+    const volatility = indicatorValues['adaptive_volatility'];
+    const avgRange   = indicatorValues['adaptive_avgRange'];
+
+    if (isNaN(volatility) || isNaN(avgRange) || volatility <= 0 || avgRange <= 0) return;
+
+    const ss = this.activeStrategyConfig.scalping_settings ?? {};
+    // Use live detector settings as the blend starting point so that AI-adjusted
+    // values (applied via updateSettings/botManager) are visible here as the
+    // baseline — activeStrategyConfig.scalping_settings is only updated by
+    // applyStrategyAdjustments and this method itself, not by updateSettings.
+    const ds = this.detector.settings;
+    const current = {
+      floorWindow:          ds.floorWindow,
+      spikeThreshold:       ds.spikeThreshold,
+      sellDropThreshold:    ds.sellDropThreshold,
+      takeProfitThreshold:  ds.takeProfitThreshold,
+    };
+
+    const adapted = adaptNovaPulseSettingsBounded(current, { volatility, avgRange });
+    if (Object.keys(adapted).length === 0) return;
+
+    this.activeStrategyConfig.scalping_settings = { ...ss, ...adapted };
+    this.strategyEngine?.updateConfig(this.activeStrategyConfig);
+    // Keep PatternDetector in sync for the legacy/SSE settings path.
+    this.detector.updateSettings(adapted);
+
+    // Persist only the programmatic keys so user preset params are never overwritten.
+    const toPersist: Record<string, number> = {};
+    const live = this.activeStrategyConfig.scalping_settings as Record<string, number>;
+    for (const k of NOVAPULSE_PROGRAMMATIC_KEYS) {
+      if (live[k] !== undefined) toPersist[k] = live[k];
+    }
+    try {
+      setSetting(`novapulse_adapted_${this.id}`, JSON.stringify(toPersist));
+    } catch (e) {
+      console.warn(`[BotInstance] Nova Pulse adapt persist failed: ${(e as Error).message}`);
+    }
   }
 
   /** Apply strategy parameter adjustments from AI agent */
@@ -710,8 +793,7 @@ export class BotInstance {
 
     const history = feed.getHistory(this.mintAddress);
 
-    // Record price to persistent storage (SQLite + JSONL)
-    this.recorder.record(point, this.mintAddress);
+    // Persistenz (live_feed + JSONL) wird zentral im PriceFeed.poll() erledigt.
 
     // PAET: resolve deferred outcome check (10 ticks after a SELL)
     if (this.paetPendingOutcome && this.cumulativeTicks >= this.paetPendingOutcome.checkAtTick) {
@@ -790,6 +872,16 @@ export class BotInstance {
       this.cumulativeTicks % 30 === 0
     ) {
       this.applyPAETAdaptation(result.floor, result.indicatorValues);
+    }
+
+    // Nova Pulse programmatic adaptation — every 30 ticks, calibrate base
+    // scalping_settings from live volatility/range metrics. The adaptive fork
+    // then applies per-tick session/trend multipliers on top of this baseline.
+    if (
+      this.activeStrategyConfig?.strategy_type === 'scalping-adaptive' &&
+      this.cumulativeTicks % 30 === 0
+    ) {
+      this.applyNovaPulseAdaptation(result.indicatorValues);
     }
 
     if (result.signal === 'BUY') {

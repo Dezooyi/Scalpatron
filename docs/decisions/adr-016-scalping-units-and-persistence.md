@@ -164,6 +164,16 @@ Die `PatternDetector`-Vergleiche sind die physikalische Wahrheit (`spikePercent`
 
 ---
 
+## Follow-up: Frontend-Layer Problem 2 (22. Juni 2026)
+
+ADR-016 Problem 2 fixte den Backend-Layer (`updateScalpingSettings` propagiert in `this.config.scalping_settings`). Es verblieb jedoch ein separater Frontend-Bug: `openBotSettingsPanel` initialisierte das Settings-Draft aus `bot.settings` — das `getEffectiveScalpingSettings()` zurückgibt, also die **live-adaptierten** `scalpingDetector.settings`. Diese weichen für laufende `scalping-adaptive` Bots von den gespeicherten Base-Werten ab (Fork multipliziert u. a. `spikeThreshold` jede Session neu).
+
+**Fix:** `openBotSettingsPanel` (`frontend/src/App.tsx`) liest die Parameter-Initialwerte für `scalping-adaptive` aus `bot.strategyConfig.scalping_settings` (authoritative Base — vom Fork nie mutiert). Fallback bleibt `bot.settings` für gestoppte Bots / plain scalping.
+
+Dokumentiert in `CHANGELOG_JUNI_2026.md` Abschnitt 4.
+
+---
+
 ## Beziehungen
 
 - Vorgänger / baut auf: **ADR-012** (Scalping Forks), **ADR-014** (Advisor-Settings-Pipeline), **ADR-015** (Wallet-Page / `solAmount`).

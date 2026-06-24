@@ -102,6 +102,23 @@ export class Trader {
     }
   }
 
+  /**
+   * Lädt das in-memory Keypair neu aus .env (WalletService.onWalletReload-Trigger).
+   * Verhindert, dass Live-Trader nach einem Wallet-Import weiter mit dem alten
+   * Keypair signieren. No-op im Paper-Mode.
+   */
+  public reloadKeypair(): void {
+    if (this.paperMode) return;
+    try {
+      const fresh = loadOrCreateKeypair('live');
+      this.keypair = fresh;
+      console.log(`[Trader] Keypair neu geladen: ${fresh.publicKey.toBase58()}`);
+      this.syncBalances().catch(() => {});
+    } catch (e: any) {
+      console.error(`[Trader] Keypair-Reload fehlgeschlagen: ${e.message}`);
+    }
+  }
+
   /** Update trading config (user-controlled) */
   updateTradeConfig(tradeSize: number, aggressiveness: number, tradingMode: 'fixed' | 'aggressive') {
     this.tradeSize = tradeSize;
@@ -367,7 +384,7 @@ export class Trader {
     let tradeId: number | null = null;
     try {
       let effectiveTradeSize = this.tradeSize;
-      
+
       if (positionSizePct !== null) {
         let normalizedPct = positionSizePct;
         if (positionSizePct > 1) {
@@ -390,6 +407,17 @@ export class Trader {
         effectiveTradeSize = Math.min(effectiveTradeSize, this.balanceSOL * (this.maxAggressiveness / 100));
       }
 
+      // Reserve-Floor: max 90% der Balance nutzen + 0.05 SOL Mindest-Reserve
+      // für nachfolgende SELL-Tx-Fees und Rent. Verhindert komplettes Wallet-Drain
+      // und stellt sicher, dass die Position überhaupt wieder geschlossen werden kann.
+      const maxByReserve = Math.max(0, this.balanceSOL - 0.05);
+      const maxByRatio = this.balanceSOL * 0.9;
+      const tradeCeiling = Math.min(maxByReserve, maxByRatio);
+      if (effectiveTradeSize > tradeCeiling) {
+        console.warn(`[Trader] BUY abgelehnt: Trade-Größe (${effectiveTradeSize.toFixed(4)} SOL) über Reserve-Ceiling (${tradeCeiling.toFixed(4)} SOL, 90% bzw. −0.05 SOL Reserve)`);
+        return null;
+      }
+
       if (effectiveTradeSize <= 0) {
         console.warn(`[Trader] BUY abgelehnt: Unzureichendes SOL (effectiveTradeSize: ${effectiveTradeSize.toFixed(4)} SOL, balance: ${this.balanceSOL.toFixed(4)} SOL)`);
         return null;
@@ -410,6 +438,13 @@ export class Trader {
           }
 
           if (effectiveTradeSize > this.balanceSOL - 0.01) {
+            throw new Error('BUY_SKIPPED');
+          }
+
+          const liveMaxByReserve = Math.max(0, this.balanceSOL - 0.05);
+          const liveMaxByRatio = this.balanceSOL * 0.9;
+          const liveCeiling = Math.min(liveMaxByReserve, liveMaxByRatio);
+          if (effectiveTradeSize > liveCeiling) {
             throw new Error('BUY_SKIPPED');
           }
 

@@ -348,6 +348,27 @@ export class BotServer {
     if (url === '/api/bots' && req.method === 'POST') {
       parseBody(req).then((config) => {
         try {
+          // Pre-Flight für Live-Mode: ohne Private-Key + erreichbarer RPC
+          // würde der erste Trade erst zur Laufzeit fehlschlagen.
+          if (config.paperMode === false) {
+            if (!CONFIG.WALLET_PRIVATE_KEY) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Live-Mode aktiviert, aber WALLET_PRIVATE_KEY fehlt in .env — Importiere zuerst einen Key unter Wallet → Settings.' }));
+              return;
+            }
+            const tradeSize = Number(config.tradeSize);
+            const aggressiveness = Number(config.aggressiveness);
+            if (Number.isFinite(tradeSize) && tradeSize > 0 && tradeSize < 0.05) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: `tradeSize ${tradeSize} SOL ist kleiner als die Tx-Fee-Reserve (0.05 SOL). Erhöhe den Wert oder wechsle in den Aggressive-Modus.` }));
+              return;
+            }
+            if (Number.isFinite(aggressiveness) && aggressiveness >= 100) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Aggressiveness 100% würde die komplette Wallet drainen. Max 90% empfohlen (Reserve für SELL-Tx-Fees).' }));
+              return;
+            }
+          }
           const bot = this.botManager.createBot(config);
           // Auto-add token to whitelist so name resolves in the dashboard grid.
           const mint: string = config.mintAddress ?? '';
@@ -624,6 +645,13 @@ export class BotServer {
         req.on('end', () => {
           try {
             const { paperMode } = JSON.parse(body);
+            // Live-Mode-Wechsel ablehnen, wenn kein Private-Key in .env existiert.
+            // Verhindert, dass der Bot ohne gültiges Signing-Setup auf Live schaltet.
+            if (paperMode === false && !CONFIG.WALLET_PRIVATE_KEY) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Live-Mode benötigt WALLET_PRIVATE_KEY in .env — Importiere zuerst einen Key.' }));
+              return;
+            }
             this.botManager.updateBotPaperMode(id, paperMode);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true, paperMode }));
@@ -687,6 +715,21 @@ export class BotServer {
               aggressiveness?: number;
               tradingMode?: 'fixed' | 'aggressive'
             };
+
+            // Sanity-Check für Live-Bots: Trade-Größe muss Tx-Fee-Reserve übersteigen,
+            // und 100% Aggressiveness würde die Wallet vollständig drainen.
+            if (!bot.getTrader().paperMode) {
+              if (typeof tradeSize === 'number' && tradeSize > 0 && tradeSize < 0.05) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: `tradeSize ${tradeSize} SOL unter Reserve-Floor (0.05 SOL für SELL-Tx-Fees).` }));
+                return;
+              }
+              if (typeof aggressiveness === 'number' && aggressiveness >= 100) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Aggressiveness 100% würde die Wallet vollständig drainen — max 90% empfohlen.' }));
+                return;
+              }
+            }
             
             if (tradingMode === undefined && tradeSize === undefined && aggressiveness === undefined) {
               res.writeHead(400, { 'Content-Type': 'application/json' });

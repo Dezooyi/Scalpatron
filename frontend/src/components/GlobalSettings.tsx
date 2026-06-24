@@ -17,6 +17,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SubTabs, type SubTabItem } from "@/components/ui/sub-tabs";
 
 type GlobalSettingsData = {
   floorWindow: number;
@@ -45,7 +46,7 @@ const DEFAULTS: GlobalSettingsData = {
 const LS_API_URL_KEY = "scalpatron_api_url";
 const LS_GLOBAL_SETTINGS_KEY = "scalpatron_global_settings";
 
-type SettingsTab = "appearance" | "api" | "trading" | "wallet" | "design" | "animation" | "danger";
+type SettingsTab = "appearance" | "trading" | "wallet" | "animation" | "danger";
 
 type Props = {
   theme: "dark" | "light";
@@ -143,13 +144,13 @@ export default function GlobalSettings({
   }
 
   async function handleDeleteAllBots() {
-    const ok = await confirm({
+    const { confirmed } = await confirm({
       title: "Delete All Bots",
       message: "This will permanently delete ALL bots and their entire trade history. This cannot be undone.",
       confirmLabel: "Delete All",
       variant: "danger",
     });
-    if (!ok) return;
+    if (!confirmed) return;
     setDeleteAllStatus("loading");
     try {
       await fetch(`${apiUrl}/api/bots`, { method: "DELETE" });
@@ -160,18 +161,16 @@ export default function GlobalSettings({
     }
   }
 
-  const tabs: { id: SettingsTab; label: string; icon: typeof Settings }[] = [
+  const tabs: SubTabItem<SettingsTab>[] = [
     { id: "appearance", label: "Appearance", icon: Sun },
-    { id: "api", label: "API", icon: Settings },
     { id: "trading", label: "Trading", icon: Sliders },
     { id: "wallet", label: "Wallet", icon: WalletIcon },
-    { id: "design", label: "Design System", icon: Sparkles },
     { id: "animation", label: "Animation", icon: Sparkles },
     { id: "danger", label: "Danger Zone", icon: ShieldAlert },
   ];
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="space-y-6 max-w-[1400px] mx-auto">
       <PageHeader
         icon={Settings}
         title="Global Settings"
@@ -179,131 +178,111 @@ export default function GlobalSettings({
       />
 
       {/* Sub-Tab Navigation */}
-      <div className="flex gap-1 border-b border-white/5 overflow-x-auto">
-        {tabs.map(t => {
-          const Icon = t.icon;
-          const isActive = activeTab === t.id;
-          return (
-            <button
-              key={t.id}
-              onClick={() => setActiveTab(t.id)}
-              className={`px-4 py-2 text-sm font-bold transition-colors border-b-2 -mb-px whitespace-nowrap inline-flex items-center gap-2 ${
-                isActive
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Icon className="h-4 w-4" />
-              {t.label}
-            </button>
-          );
-        })}
-      </div>
+      <SubTabs tabs={tabs} active={activeTab} onChange={setActiveTab} />
 
-      {/* Appearance */}
+      {/* Appearance (Theme + Design System) */}
       {activeTab === "appearance" && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Sun className="w-5 h-5" /> Appearance
-            </CardTitle>
-            <CardDescription>Theme and visual preferences</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center justify-between">
-              <div>
-                <Label>Theme</Label>
-                <p className="text-sm text-muted-foreground">Toggle between light and dark mode</p>
-              </div>
-              <Button variant="outline" size="sm" onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}>
-                {theme === "dark" ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-                <span className="ml-2">{theme === "dark" ? "Light" : "Dark"}</span>
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* API */}
-      {activeTab === "api" && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Settings className="w-5 h-5" /> API Configuration
-            </CardTitle>
-            <CardDescription>Backend server connection settings</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="api-url">Backend API URL</Label>
-              <div className="flex gap-2">
-                <Input id="api-url" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="http://localhost:3000" />
-                <Button variant="outline" size="sm" onClick={() => { setSaveStatus("saved"); setTimeout(() => setSaveStatus("idle"), 2000); }}>
-                  Save
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Sun className="w-5 h-5" /> Appearance
+              </CardTitle>
+              <CardDescription>Theme and visual preferences</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label>Theme</Label>
+                  <p className="text-sm text-muted-foreground">Toggle between light and dark mode</p>
+                </div>
+                <Button variant="outline" size="sm" onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}>
+                  {theme === "dark" ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+                  <span className="ml-2">{theme === "dark" ? "Light" : "Dark"}</span>
                 </Button>
               </div>
-              <p className="text-sm text-muted-foreground">Current: {apiUrl || "(default: Vite proxy)"}</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={testConnection} disabled={connTesting}>
-                {connTesting ? <AlertTriangle className="w-4 h-4 animate-pulse" /> : <CheckCircle className="w-4 h-4" />}
-                <span className="ml-2">Test Connection</span>
-              </Button>
-              {connStatus === "ok" && <span className="text-sm text-green-500 flex items-center gap-1"><CheckCircle className="w-4 h-4" /> Connected</span>}
-              {connStatus === "error" && <span className="text-sm text-red-500 flex items-center gap-1"><XCircle className="w-4 h-4" /> Connection failed</span>}
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+          <DesignSystemSettings />
+        </div>
       )}
 
-      {/* Trading Defaults */}
+      {/* Trading (API Connection + Defaults) */}
       {activeTab === "trading" && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Sliders className="w-5 h-5" /> Trading Defaults
-            </CardTitle>
-            <CardDescription>Default settings for new bots (paperMode siehe Wallet-Tab)</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Settings className="w-5 h-5" /> API Configuration
+              </CardTitle>
+              <CardDescription>Backend server connection settings</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="initialSOL">Initial SOL</Label>
-                <Input id="initialSOL" type="number" value={settings.initialSOL} onChange={e => setField("initialSOL", parseFloat(e.target.value) || 0)} />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="tradeSize">Trade Size (SOL)</Label>
-                <Input id="tradeSize" type="number" value={settings.tradeSize} onChange={e => setField("tradeSize", parseFloat(e.target.value) || 0)} />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="aggressiveness">Aggressiveness (1-10)</Label>
-                <Input id="aggressiveness" type="number" min={1} max={10} value={settings.aggressiveness} onChange={e => setField("aggressiveness", Math.min(10, Math.max(1, parseFloat(e.target.value) || 1)))} />
-              </div>
-              <div className="space-y-2">
-                <Label>Trading Mode</Label>
+                <Label htmlFor="api-url">Backend API URL</Label>
                 <div className="flex gap-2">
-                  <Button variant={settings.tradingMode === "fixed" ? "default" : "outline"} size="sm" className="flex-1" onClick={() => setField("tradingMode", "fixed")}>Fixed</Button>
-                  <Button variant={settings.tradingMode === "aggressive" ? "default" : "outline"} size="sm" className="flex-1" onClick={() => setField("tradingMode", "aggressive")}>Aggressive</Button>
+                  <Input id="api-url" value={apiUrl} onChange={e => setApiUrl(e.target.value)} placeholder="http://localhost:3000" />
+                  <Button variant="outline" size="sm" onClick={() => { setSaveStatus("saved"); setTimeout(() => setSaveStatus("idle"), 2000); }}>
+                    Save
+                  </Button>
+                </div>
+                <p className="text-sm text-muted-foreground">Current: {apiUrl || "(default: Vite proxy)"}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={testConnection} disabled={connTesting}>
+                  {connTesting ? <AlertTriangle className="w-4 h-4 animate-pulse" /> : <CheckCircle className="w-4 h-4" />}
+                  <span className="ml-2">Test Connection</span>
+                </Button>
+                {connStatus === "ok" && <span className="text-sm text-green-500 flex items-center gap-1"><CheckCircle className="w-4 h-4" /> Connected</span>}
+                {connStatus === "error" && <span className="text-sm text-red-500 flex items-center gap-1"><XCircle className="w-4 h-4" /> Connection failed</span>}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Sliders className="w-5 h-5" /> Trading Defaults
+              </CardTitle>
+              <CardDescription>Default settings for new bots (paperMode siehe Wallet-Tab)</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="initialSOL">Initial SOL</Label>
+                  <Input id="initialSOL" type="number" value={settings.initialSOL} onChange={e => setField("initialSOL", parseFloat(e.target.value) || 0)} />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="tradeSize">Trade Size (SOL)</Label>
+                  <Input id="tradeSize" type="number" value={settings.tradeSize} onChange={e => setField("tradeSize", parseFloat(e.target.value) || 0)} />
                 </div>
               </div>
-            </div>
-            <Button onClick={handleSave} className="w-full">
-              Save Settings
-              {saveStatus === "saved" && <CheckCircle className="w-4 h-4 ml-2" />}
-            </Button>
-          </CardContent>
-        </Card>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="aggressiveness">Aggressiveness (1-10)</Label>
+                  <Input id="aggressiveness" type="number" min={1} max={10} value={settings.aggressiveness} onChange={e => setField("aggressiveness", Math.min(10, Math.max(1, parseFloat(e.target.value) || 1)))} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Trading Mode</Label>
+                  <div className="flex gap-2">
+                    <Button variant={settings.tradingMode === "fixed" ? "default" : "outline"} size="sm" className="flex-1" onClick={() => setField("tradingMode", "fixed")}>Fixed</Button>
+                    <Button variant={settings.tradingMode === "aggressive" ? "default" : "outline"} size="sm" className="flex-1" onClick={() => setField("tradingMode", "aggressive")}>Aggressive</Button>
+                  </div>
+                </div>
+              </div>
+              <Button onClick={handleSave} className="w-full">
+                Save Settings
+                {saveStatus === "saved" && <CheckCircle className="w-4 h-4 ml-2" />}
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       {/* Wallet */}
       {activeTab === "wallet" && (
         <WalletSettingsTab apiBase={apiUrl} onNavigateToWallet={() => onNavigateToWalletTab?.()} />
       )}
-
-      {/* Design System */}
-      {activeTab === "design" && <DesignSystemSettings />}
 
       {/* Animation */}
       {activeTab === "animation" && <AnimationSettings onConfigChange={onAnimConfigChange} />}

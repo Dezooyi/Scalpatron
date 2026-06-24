@@ -35,6 +35,7 @@ import {
 import { generateLessons } from './lessonsGenerator.js';
 import { PriceFeed } from './priceFeed.js';
 import { isScalpingType } from './strategyEngine.js';
+import { clampScalpingSettings } from './strategy/scalpingSafetyBounds.js';
 
 // --- Types ---
 
@@ -57,7 +58,6 @@ interface OllamaModel {
 interface TradeSummary {
   action: 'BUY' | 'SELL';
   price: number;
-  spikePercent: number;
   pnlPercent?: number;
 }
 
@@ -108,6 +108,12 @@ export interface OllamaAdvice {
   };
 }
 
+export interface OutcomeGateConfig {
+  minOutcomeTrades: number;
+  minOutcomeWinRate: number;
+  confidenceDecayFloor: number;
+}
+
 export interface AgentConfig {
   provider: 'ollama' | 'opencode' | 'custom_api';
   model: string;
@@ -120,6 +126,7 @@ export interface AgentConfig {
   minConfidence: number;
   apiKey?: string;
   apiUrl?: string;
+  outcomeGate?: OutcomeGateConfig;
 }
 
 interface MarketStats {
@@ -155,15 +162,26 @@ Recommendations by regime:
 - VOLATILE: tighten sellDropThreshold to protect profits, reduce aggressiveness`,
 
   'scalping-adaptive': `STRATEGY TYPE: scalping-adaptive (Adaptive Range Spike Scalper)
-Same optimizable parameters as the base scalping strategy — return them in the "settings" field:
-- floorWindow: 10–50 Ticks (window for floor calculation)
+Optimizable parameters — return them in the "settings" field:
+- cooldownTicks: 2–20 (cooldown after trade) — YOUR MOST DURABLE LEVER: only you control this
 - spikeThreshold: 0.05–5.0% (minimum spike above floor)
 - sellDropThreshold: 0.5–10.0% (drop from peak → SELL)
-- cooldownTicks: 2–20 (cooldown after trade)
-The bot also runs an internal adaptive fork that may temporarily widen thresholds during
-warmup, high volatility, or unfavorable conditions. Your "settings" recommendations are
-treated as the BASELINE the adaptive fork will adapt around, so optimize for the typical
-regime rather than edge cases.
+- floorWindow: 10–50 Ticks (window for floor calculation)
+
+IMPORTANT — TWO ADAPTATION LAYERS:
+1. PROGRAMMATIC BASELINE ADAPTATION (every 30 ticks, market-driven): Automatically adjusts
+   spikeThreshold, sellDropThreshold, floorWindow, takeProfitThreshold toward market-derived
+   targets (spikeThreshold ≈ 2.5×avgRange, sellDropThreshold ≈ 2.0×avgRange, etc.).
+   Your "settings" values for these fields become the STARTING POINT for the next blend —
+   they shift the baseline but the programmatic system will gradually converge to its own
+   market-derived targets over several 30-tick cycles.
+2. PER-TICK MULTIPLIER FORK: Applies session/trend multipliers on top of the baseline at
+   each tick — you do not control this directly.
+
+PRACTICAL ADVICE: Set spikeThreshold/sellDropThreshold/floorWindow based on the regime to
+NUDGE the programmatic baseline in the right direction. Use cooldownTicks and aggressiveness
+for durable regime-based control. Do not chase the programmatic values tick-by-tick.
+
 Recommendations by regime:
 - RANGING: normal thresholds, optimize for win rate vs the bot's historical average
 - TRENDING: increase spikeThreshold (>1.5%) to avoid buying pullbacks, reduce aggressiveness
@@ -176,10 +194,17 @@ and triggers an evacuation SELL using 1st/2nd-order derivatives + Point-of-No-Re
 The bot's false-alarm penalty ω self-calibrates from observed outcomes.
 
 Optimizable parameters (in "paetAdjustments" field, NOT in "settings"):
+- safety_coefficient_k: 1–5    — YOUR MOST DURABLE LEVER: only you control this
+- volatility_sigma_multiplier: 1.0–4.0 — YOUR MOST DURABLE LEVER: only you control this
 - collapse_threshold_pct: 0.05–0.50 (fraction of peak price that defines a collapse)
 - evacuation_ticks: 1–10 (candles allocated for safe exit before projected collapse)
-- safety_coefficient_k: 1–5 (multiplier for ω in the PNR budget formula)
-- volatility_sigma_multiplier: 1.0–4.0 (residual-band width in σ units)
+
+IMPORTANT — PROGRAMMATIC FINE-TUNING (every 30 ticks):
+The bot automatically adapts collapse_threshold_pct (keeps it above the residual noise floor)
+and evacuation_ticks (scaled to the FFT-detected dominant cycle length). Your recommendations
+for these two fields set the STARTING POINT for the next programmatic blend — they influence
+the direction but the system converges to market-derived targets over multiple cycles.
+safety_coefficient_k and volatility_sigma_multiplier are EXCLUSIVELY AI-controlled.
 
 Static fields (informational, do not return as adjustments): stl_seasonal_period,
 stl_trend_window, min_history_candles, acceleration_ema_period, entry_mode,
@@ -187,9 +212,9 @@ entry_cooldown_ticks, stop_loss_pct, false_alarm_penalty_omega.
 
 Recommendations by regime:
 - RANGING: standard parameters — cycles are predictable, FFT filters them out
-- TRENDING: lower evacuation_ticks (2–3) — exits must be faster in fast-moving trends
-- VOLATILE: raise collapse_threshold_pct (0.30–0.40) — more room before treating as collapse
-- DEAD: lower collapse_threshold_pct (0.10–0.15) — any sustained decline is significant
+- TRENDING: lower evacuation_ticks (2–3), lower safety_coefficient_k (1–2) for faster exits
+- VOLATILE: raise collapse_threshold_pct (0.30–0.40), raise volatility_sigma_multiplier (3–4)
+- DEAD: lower collapse_threshold_pct (0.10–0.15), raise safety_coefficient_k (4–5)
 
 RULES:
 - Return your tuned numbers ONLY inside "paetAdjustments", omit the "settings" field.
@@ -368,6 +393,11 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   minConfidence: 0.4,
   apiKey: process.env.OLLAMA_API_KEY ?? '',
   apiUrl: process.env.OLLAMA_API_URL ?? 'http://localhost:11434',
+  outcomeGate: {
+    minOutcomeTrades: parseInt(process.env.AI_OUTCOME_GATE_MIN_TRADES ?? '20', 10),
+    minOutcomeWinRate: parseFloat(process.env.AI_OUTCOME_GATE_MIN_WR ?? '0.35'),
+    confidenceDecayFloor: parseFloat(process.env.AI_OUTCOME_GATE_DECAY_FLOOR ?? '0.5'),
+  },
 };
 
 // --- Market Stats ---
@@ -375,6 +405,9 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
 function calcMarketStats(prices: PricePoint[], settings: PatternSettings): MarketStats {
   const vals = prices.map(p => p.price);
   const n = vals.length;
+  if (n === 0) {
+    return { priceMin: 0, priceMax: 0, priceMean: 0, priceStdDev: 0, spreadPercent: 0, spikeCount: 0, avgSpikeHeight: 0, maxSpikeHeight: 0, trendDirection: 'FLAT', trendStrength: 0, volatilityRatio: 0 };
+  }
 
   const priceMin = Math.min(...vals);
   const priceMax = Math.max(...vals);
@@ -539,6 +572,49 @@ function tryLenientJsonParse(candidate: string): unknown | null {
 
 import type { BotManager } from './botManager.js';
 
+/**
+ * ADR-019: pure, testable outcome-gate decision. Extracted so unit tests
+ * can exercise the gate without spinning up the DB.
+ *
+ * @param adviceConfidence  the AI's reported confidence for the new advice (0..1)
+ * @param minConfidence     the configured minConfidence threshold (0..1)
+ * @param autoApply         whether auto-apply is enabled
+ * @param observeOnly       whether the user set the force multiplier to 0
+ * @param lastAppliedOutcome latest previously-applied advice, or null
+ * @param gateConfig        outcome-gate configuration
+ *
+ * @returns effective confidence and gate status (block reason or null)
+ */
+export function decideOutcomeGate(params: {
+  adviceConfidence: number;
+  minConfidence: number;
+  autoApply: boolean;
+  observeOnly: boolean;
+  lastAppliedOutcome: { outcomeTradeCount: number; outcomeWins: number } | null;
+  gateConfig: OutcomeGateConfig;
+}): { applied: boolean; effectiveConfidence: number; blockedReason: string | null } {
+  const { adviceConfidence, minConfidence, autoApply, observeOnly, lastAppliedOutcome, gateConfig } = params;
+  const baseApplied = autoApply && adviceConfidence >= minConfidence;
+
+  let effectiveConfidence = adviceConfidence;
+  let gateBlockedReason: string | null = null;
+  if (lastAppliedOutcome && lastAppliedOutcome.outcomeTradeCount >= gateConfig.minOutcomeTrades) {
+    const observedWR = lastAppliedOutcome.outcomeWins / Math.max(1, lastAppliedOutcome.outcomeTradeCount);
+    if (observedWR < gateConfig.minOutcomeWinRate) {
+      gateBlockedReason = `outcome_gate_blocked: WR=${(observedWR * 100).toFixed(0)}% < ${(gateConfig.minOutcomeWinRate * 100).toFixed(0)}% over ${lastAppliedOutcome.outcomeTradeCount} trades`;
+    }
+    const decay = Math.min(1, observedWR / 0.5);
+    effectiveConfidence =
+      adviceConfidence *
+      (gateConfig.confidenceDecayFloor +
+        (1 - gateConfig.confidenceDecayFloor) * decay);
+  }
+
+  const gatePasses = gateBlockedReason === null;
+  const applied = baseApplied && !observeOnly && gatePasses;
+  return { applied, effectiveConfidence, blockedReason: gateBlockedReason };
+}
+
 export class OllamaAgent {
   config: AgentConfig;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -606,6 +682,8 @@ export class OllamaAgent {
       // Set next analysis time after first run
       this.lastAnalysisTime = Date.now();
       this.nextAnalysisTime = Date.now() + this.config.cycleMinutes * 60_000;
+      // Clear any ghost timer that may have been created by updateConfig during the 5s startup window
+      if (this.timer) { clearInterval(this.timer); this.timer = null; }
       this.timer = setInterval(() => {
         this.runCycle();
         // Update times after each cycle
@@ -627,6 +705,11 @@ export class OllamaAgent {
   }
 
   updateConfig(updates: Partial<AgentConfig>): void {
+    // Enforce a minimum cycle time of 5 minutes to prevent runaway analysis loops.
+    if (typeof updates.cycleMinutes === 'number') {
+      updates = { ...updates, cycleMinutes: Math.max(5, updates.cycleMinutes) };
+    }
+
     const cycleMinutesChanged =
       updates.cycleMinutes !== undefined && updates.cycleMinutes !== this.config.cycleMinutes;
 
@@ -636,6 +719,9 @@ export class OllamaAgent {
 
     // Wenn cycleMinutes geändert wurde und der Agent läuft, Timer sofort aktualisieren
     if (cycleMinutesChanged && this.running) {
+      // Cancel the startup timer too — if it fires after we create the new interval,
+      // it would silently spawn a second ghost timer (the race-condition root cause).
+      if (this.startupTimer) { clearTimeout(this.startupTimer); this.startupTimer = null; }
       if (this.timer) {
         clearInterval(this.timer);
         this.timer = null;
@@ -812,7 +898,6 @@ export class OllamaAgent {
       recentTrades = rows.map(r => ({
         action: r.action,
         price: typeof r.price === 'number' ? r.price : 0,
-        spikePercent: typeof r.spikePercent === 'number' ? r.spikePercent : 0,
         pnlPercent: typeof r.pnlPercent === 'number' ? r.pnlPercent : undefined,
       }));
     } catch (err) {
@@ -911,9 +996,30 @@ export class OllamaAgent {
     const fm = typeof forceMultiplier === 'number' ? forceMultiplier : 100;
     const observeOnly = fm <= 0;
     const mix = Math.max(0, Math.min(100, fm)) / 100;
-    // When the user explicitly forces observe-only, we never apply
-    // regardless of autoApply / confidence.
-    const applied = baseApplied && !observeOnly;
+
+    // ADR-019: Outcome-Gate + Confidence-Decay. If the most recent applied
+    // advice for this bot produced a poor outcome (WR below gate threshold
+    // over at least minOutcomeTrades), auto-apply is blocked and the
+    // effective confidence is decayed toward confidenceDecayFloor.
+    const gateConfig: OutcomeGateConfig = this.config.outcomeGate ?? {
+      minOutcomeTrades: 20,
+      minOutcomeWinRate: 0.35,
+      confidenceDecayFloor: 0.5,
+    };
+    const lastApplied = getRecentAdvicesWithOutcomes(state.id, 1).find(
+      (a) => a.applied === 1,
+    );
+    const decision = decideOutcomeGate({
+      adviceConfidence: advice.confidence,
+      minConfidence: this.config.minConfidence,
+      autoApply: this.config.autoApply,
+      observeOnly,
+      lastAppliedOutcome: lastApplied
+        ? { outcomeTradeCount: lastApplied.outcomeTradeCount, outcomeWins: lastApplied.outcomeWins }
+        : null,
+      gateConfig,
+    });
+    const { applied, effectiveConfidence, blockedReason: gateBlockedReason } = decision;
 
     saveAgentHistory(
       state.id,
@@ -932,7 +1038,9 @@ export class OllamaAgent {
     if (this.adviceHistory.length > this.maxHistoryLength) this.adviceHistory.pop();
 
     if (applied) {
-      const mixedSettings = mixPatternSettings(settings, advice.adjustedSettings, mix);
+      const mixedSettings = clampScalpingSettings(
+        mixPatternSettings(settings, advice.adjustedSettings, mix),
+      );
       if (Object.keys(mixedSettings).length > 0) {
         // Persist AI-adjusted scalping settings via BotManager so they survive restarts.
         if (this.botManager) {
@@ -984,11 +1092,24 @@ export class OllamaAgent {
       console.log(`[OllamaAgent] Bot ${state.name} aktualisiert. Regime=${advice.regime}, Conf=${(advice.confidence * 100).toFixed(0)}%, Aggr=${advice.aggressiveness ?? '-'}%, Force=${fm}%`);
       logger.action(state.id, 'AI_AGENT', `AI Updated! Regime: ${advice.regime}, Grund: ${advice.reason}, Force=${fm}%`);
     } else {
-      const why = observeOnly
-        ? 'observe-only (force=0)'
-        : `Conf=${(advice.confidence * 100).toFixed(0)}% < minConfidence`;
+      const why = gateBlockedReason
+        ? gateBlockedReason
+        : observeOnly
+          ? 'observe-only (force=0)'
+          : `Conf=${(advice.confidence * 100).toFixed(0)}% < minConfidence`;
       console.log(`[OllamaAgent] Bot ${state.name} Analyse gespeichert (nicht angewendet: ${why}, Force=${fm}%)`);
       logger.info(state.id, 'AI_AGENT', `Analyse fertig (nicht angewendet). ${why}, Force=${fm}%`);
+      if (gateBlockedReason) {
+        // Also broadcast to UI so the block is visible alongside the advice.
+        this.broadcast?.('agent_advice', {
+          type: 'agent_advice',
+          botId: state.id,
+          advice,
+          applied: false,
+          blockedReason: gateBlockedReason,
+          effectiveConfidence,
+        });
+      }
     }
 
     this.onAdvice?.(state.id, advice, applied);
@@ -1055,7 +1176,7 @@ export class OllamaAgent {
     } else {
       tradesBlock = trades.map(t => {
         const pnlStr = t.pnlPercent !== undefined ? `  pnl:${t.pnlPercent > 0 ? '+' : ''}${t.pnlPercent.toFixed(3)}%` : '';
-        return `${t.action}  $${(t.price ?? 0).toFixed(6)}  spike:${(t.spikePercent ?? 0).toFixed(2)}%${pnlStr}`;
+        return `${t.action}  $${(t.price ?? 0).toFixed(6)}${pnlStr}`;
       }).join('\n');
     }
 
@@ -1170,7 +1291,9 @@ export class OllamaAgent {
     let tokenContextBlock = 'ON-CHAIN SENTIMENT: Not available';
     if (tokenMint) {
       try {
-        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`);
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
+          signal: AbortSignal.timeout(5000),
+        });
         const dexJson = await res.json();
         if (dexJson.pairs && dexJson.pairs.length > 0) {
           const pair = dexJson.pairs[0];
@@ -1250,17 +1373,17 @@ ${sparkline}
 
 PRE-CALCULATED INDICATORS:
 [5-Minute Data]
-- RSI (14): ${indicators5m.rsi}
-- MACD: ${indicators5m.macd}
-- BB (20,2): ${indicators5m.bb}
-- ATR (14): ${indicators5m.atr}
-- STOCH (14,3): ${indicators5m.stoch}
+- RSI (14): ${indicators5m.rsi === 'NaN' ? 'n/a (insufficient candles)' : indicators5m.rsi}
+- MACD: ${indicators5m.macd === 'NaN' ? 'n/a (insufficient candles)' : indicators5m.macd}
+- BB (20,2): ${indicators5m.bb === 'NaN' ? 'n/a (insufficient candles)' : indicators5m.bb}
+- ATR (14): ${indicators5m.atr === 'NaN' ? 'n/a (insufficient candles)' : indicators5m.atr}
+- STOCH (14,3): ${indicators5m.stoch === 'NaN' ? 'n/a (insufficient candles)' : indicators5m.stoch}
 
 [15-Minute Data]
-- RSI (14): ${indicators15m.rsi}
-- MACD: ${indicators15m.macd}
-- BB (20,2): ${indicators15m.bb}
-- STOCH (14,3): ${indicators15m.stoch}
+- RSI (14): ${indicators15m.rsi === 'NaN' ? 'n/a (insufficient candles)' : indicators15m.rsi}
+- MACD: ${indicators15m.macd === 'NaN' ? 'n/a (insufficient candles)' : indicators15m.macd}
+- BB (20,2): ${indicators15m.bb === 'NaN' ? 'n/a (insufficient candles)' : indicators15m.bb}
+- STOCH (14,3): ${indicators15m.stoch === 'NaN' ? 'n/a (insufficient candles)' : indicators15m.stoch}
 
 MARKET STATS (last ${this.config.cycleMinutes} min):
 - Price: Min=$${stats.priceMin.toFixed(8)}, Max=$${stats.priceMax.toFixed(8)}, Mean=$${stats.priceMean.toFixed(8)}
@@ -1532,17 +1655,25 @@ ${formatCandleRows(m15Candles, 5)}`;
       const newSettings: Partial<PatternSettings> = {};
       const s = parsed.settings;
       if (s) {
+        // ADR-019: defensive clamping at parse time — even if the rest of
+        // the apply path is bypassed (e.g. observe-only path that still
+        // stores the advice), the persisted settings can never breach the
+        // fee-aware floor.
+        const bounded = clampScalpingSettings(s);
         if (typeof s.spikeThreshold === 'number') {
-          newSettings.spikeThreshold = parseFloat(Math.max(0.05, Math.min(5.0, s.spikeThreshold)).toFixed(3));
+          newSettings.spikeThreshold = parseFloat((bounded.spikeThreshold ?? s.spikeThreshold).toFixed(3));
         }
         if (typeof s.sellDropThreshold === 'number') {
-          newSettings.sellDropThreshold = parseFloat(Math.max(0.5, Math.min(10.0, s.sellDropThreshold)).toFixed(3));
+          newSettings.sellDropThreshold = parseFloat((bounded.sellDropThreshold ?? s.sellDropThreshold).toFixed(3));
         }
         if (typeof s.floorWindow === 'number') {
-          newSettings.floorWindow = Math.max(10, Math.min(50, Math.round(s.floorWindow)));
+          newSettings.floorWindow = bounded.floorWindow ?? Math.round(s.floorWindow);
         }
         if (typeof s.cooldownTicks === 'number') {
-          newSettings.cooldownTicks = Math.max(2, Math.min(20, Math.round(s.cooldownTicks)));
+          newSettings.cooldownTicks = bounded.cooldownTicks ?? Math.round(s.cooldownTicks);
+        }
+        if (typeof s.takeProfitThreshold === 'number') {
+          newSettings.takeProfitThreshold = bounded.takeProfitThreshold ?? parseFloat(s.takeProfitThreshold.toFixed(4));
         }
       }
 

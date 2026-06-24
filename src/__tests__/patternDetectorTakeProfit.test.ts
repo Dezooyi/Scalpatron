@@ -41,7 +41,7 @@ h1 = append(h1, BASE * 1.02);
 const r1 = pd1.analyze(h1);
 assert(r1.signal === 'BUY', resultMsg(r1, 'spike 2% >= 1% threshold -> BUY'));
 
-const pd2 = new PatternDetector({ floorWindow: 20, spikeThreshold: 1.0, sellDropThreshold: 0.05, takeProfitThreshold: 0.10, cooldownTicks: 15 });
+const pd2 = new PatternDetector({ floorWindow: 20, spikeThreshold: 1.0, sellDropThreshold: 0.05, takeProfitThreshold: 0.10, cooldownTicks: 15, breakevenTriggerPct: 0 });
 pd2.reset();
 let h2 = flat(20);
 h2 = append(h2, BASE * 1.02);
@@ -55,7 +55,7 @@ h2 = append(h2, tpPrice);
 const r2 = pd2.analyze(h2);
 assert(r2.signal === 'SELL' && r2.reason === 'take_profit', resultMsg(r2, 'TP at entry*1.10 -> SELL'));
 
-const pd3 = new PatternDetector({ floorWindow: 20, spikeThreshold: 1.0, sellDropThreshold: 0.05, takeProfitThreshold: 0.10, cooldownTicks: 15 });
+const pd3 = new PatternDetector({ floorWindow: 20, spikeThreshold: 1.0, sellDropThreshold: 0.05, takeProfitThreshold: 0.10, cooldownTicks: 15, minHoldTicks: 0 });
 pd3.reset();
 let h3 = flat(20);
 h3 = append(h3, BASE * 1.02);

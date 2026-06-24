@@ -75,9 +75,11 @@ export function adaptPAETSettings(
   if (validSigma && validTrend) {
     const noiseFraction = current.volatility_sigma_multiplier * sigma / trendPrice;
     const target = clamp(2.0 * noiseFraction, 0.05, 0.50);
-    // Blend slowly; both upward (protect against noisy markets) and
-    // downward (tighten in calm markets, but more cautiously at 10%).
-    const blended = blend(current.collapse_threshold_pct, target, 0.10);
+    // Asymmetric blend: rise quickly when market gets noisy (20%) to protect
+    // against volatility-induced false collapses; tighten slowly in calm markets
+    // (10%) to avoid overshooting downward.
+    const blendRate = target > current.collapse_threshold_pct ? 0.20 : 0.10;
+    const blended = blend(current.collapse_threshold_pct, target, blendRate);
     const rounded = Math.round(blended * 1000) / 1000; // 3 decimal places
     if (Math.abs(rounded - current.collapse_threshold_pct) > 1e-4) {
       adapted.collapse_threshold_pct = clamp(rounded, 0.05, 0.50);

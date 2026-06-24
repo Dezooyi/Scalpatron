@@ -108,7 +108,7 @@ export function AgentTab({
   getApiBase,
 }: AgentTabProps) {
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="space-y-6 max-w-[1400px] mx-auto">
       {/* Header */}
       <div className="flex items-center gap-3 mb-6">
         <BrainCircuit className="h-8 w-8 text-primary" />

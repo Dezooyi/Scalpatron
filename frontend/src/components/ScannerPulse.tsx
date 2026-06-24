@@ -397,6 +397,7 @@ function ScalpingScannerPulse({ bot, tickDuration = 2000, className, indicatorVa
   // Adaptive context from indicatorValues (set by StrategyEngine for scalping-adaptive)
   const adaptiveSession = indicatorValues['adaptive_session'];
   const adaptiveVolatility = indicatorValues['adaptive_volatility'];
+  const adaptiveAvgRange = indicatorValues['adaptive_avgRange'];
   const adaptiveTrend = indicatorValues['adaptive_trendBias'];
   const adaptiveHtf = indicatorValues['adaptive_higherTimeframeSignal'];
   const adaptiveSpike = indicatorValues['adaptive_spikeThreshold'];
@@ -424,6 +425,23 @@ function ScalpingScannerPulse({ bot, tickDuration = 2000, className, indicatorVa
     if (adaptiveHtf === -1) return { label: 'BEARISH', color: 'text-red-400' };
     return { label: 'NEUTRAL', color: 'text-zinc-400' };
   }, [adaptiveHtf]);
+
+  // Programmatic adaptation status — mirrors the backend Rules A/B/C for live display.
+  // Targets are re-derived here from the same formulas as novaPulseAdaptiveFork.ts.
+  const novaPulseAdaptStatus = useMemo(() => {
+    if (!isAdaptive || adaptiveVolatility === undefined || adaptiveAvgRange === undefined) return null;
+    if (adaptiveVolatility <= 0 || adaptiveAvgRange <= 0) return null;
+
+    const baseSettings = bot.strategyConfig?.scalping_settings;
+    const aTarget = Math.max(10, Math.min(50, Math.round(15 / Math.max(0.1, adaptiveVolatility))));
+    const aCurrent = baseSettings?.floorWindow ?? floorWindow;
+    const bTarget = Math.max(0.05, Math.min(5.0, parseFloat((2.5 * adaptiveAvgRange).toFixed(2))));
+    const bCurrent = baseSettings?.spikeThreshold ?? spikeThreshold;
+    const cTarget = Math.max(0.5, Math.min(10.0, parseFloat((2.0 * adaptiveAvgRange).toFixed(2))));
+    const cCurrent = baseSettings?.sellDropThreshold ?? sellDropThreshold;
+
+    return { aTarget, aCurrent, bTarget, bCurrent, cTarget, cCurrent };
+  }, [isAdaptive, adaptiveVolatility, adaptiveAvgRange, bot.strategyConfig, floorWindow, spikeThreshold, sellDropThreshold]);
 
   const { floorLevel, thresholdLevel, sellDropLevel, minPrice, priceRange } = useMemo(() => {
     const recentPrices = priceHistory.slice(-floorWindow);
@@ -608,6 +626,43 @@ function ScalpingScannerPulse({ bot, tickDuration = 2000, className, indicatorVa
           style={{ width: "100%", transform: "scaleX(0)", transformOrigin: "left center", zIndex: 30 }}
         />
       </div>
+
+      {/* Programmatic adaptation status strip (Nova Pulse only) */}
+      {isAdaptive && novaPulseAdaptStatus && (
+        <div className="flex items-center gap-3 mt-1 px-0.5">
+          <span className="text-[9px] font-bold uppercase text-primary/20 tracking-wider shrink-0">Adapt</span>
+          {/* Rule A: Floor Window */}
+          <div className="flex items-center gap-1" title={`Rule A – Floor Window: current ${novaPulseAdaptStatus.aCurrent}, target ~${novaPulseAdaptStatus.aTarget}`}>
+            <span className="text-[9px] text-zinc-600 font-mono">FW:</span>
+            <span className={`text-[9px] font-mono font-bold ${Math.abs(novaPulseAdaptStatus.aTarget - novaPulseAdaptStatus.aCurrent) > 2 ? 'text-cyan-400' : 'text-zinc-500'}`}>
+              {novaPulseAdaptStatus.aCurrent}
+            </span>
+            {Math.abs(novaPulseAdaptStatus.aTarget - novaPulseAdaptStatus.aCurrent) > 2 && (
+              <span className="text-[8px] text-cyan-300/50">→{novaPulseAdaptStatus.aTarget}</span>
+            )}
+          </div>
+          {/* Rule B: Spike Threshold */}
+          <div className="flex items-center gap-1" title={`Rule B – Spike Threshold: current ${novaPulseAdaptStatus.bCurrent.toFixed(2)}%, target ~${novaPulseAdaptStatus.bTarget.toFixed(2)}%`}>
+            <span className="text-[9px] text-zinc-600 font-mono">ST:</span>
+            <span className={`text-[9px] font-mono font-bold ${Math.abs(novaPulseAdaptStatus.bTarget - novaPulseAdaptStatus.bCurrent) > 0.05 ? 'text-amber-400' : 'text-zinc-500'}`}>
+              {novaPulseAdaptStatus.bCurrent.toFixed(2)}%
+            </span>
+            {Math.abs(novaPulseAdaptStatus.bTarget - novaPulseAdaptStatus.bCurrent) > 0.05 && (
+              <span className="text-[8px] text-amber-300/50">→{novaPulseAdaptStatus.bTarget.toFixed(2)}%</span>
+            )}
+          </div>
+          {/* Rule C: Sell Drop */}
+          <div className="flex items-center gap-1" title={`Rule C – Sell Drop: current ${novaPulseAdaptStatus.cCurrent.toFixed(2)}%, target ~${novaPulseAdaptStatus.cTarget.toFixed(2)}%`}>
+            <span className="text-[9px] text-zinc-600 font-mono">SD:</span>
+            <span className={`text-[9px] font-mono font-bold ${Math.abs(novaPulseAdaptStatus.cTarget - novaPulseAdaptStatus.cCurrent) > 0.1 ? 'text-rose-400' : 'text-zinc-500'}`}>
+              {novaPulseAdaptStatus.cCurrent.toFixed(2)}%
+            </span>
+            {Math.abs(novaPulseAdaptStatus.cTarget - novaPulseAdaptStatus.cCurrent) > 0.1 && (
+              <span className="text-[8px] text-rose-300/50">→{novaPulseAdaptStatus.cTarget.toFixed(2)}%</span>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center justify-center gap-3 text-[9px] text-primary/40">
         <div className="flex items-center gap-1">
