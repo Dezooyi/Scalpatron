@@ -3,7 +3,7 @@
   "strategy_type": "scalping",
   "description": "Buys at the floor level when a spike is detected, sells at the peak when price drops from the high. Optimal for ranging/consolidating markets.",
   "market": {
-    "symbol": "UGOR/SOL",
+    "symbol": "SOL/USDC",
     "timeframe": "1m",
     "exchange": "solana"
   },

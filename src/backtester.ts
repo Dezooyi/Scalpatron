@@ -198,7 +198,7 @@ export class Backtester {
       : '0';
     const speedLabel = config.speed === 0 ? 'Instant' : `${config.speed}x`;
 
-    let md = `# Backtest Report — UGOR Range Spike Scalper\n\n`;
+    let md = `# Backtest Report — Range Spike Scalper\n\n`;
     md += `**Generiert:** ${genDate}\n\n`;
 
     // Konfiguration

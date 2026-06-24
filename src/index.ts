@@ -55,14 +55,15 @@ setInterval(() => {
 const priceFeed = PriceFeed.getInstance();
 priceFeed.setPriceRecorder(recorder);
 
-// Feed-Lifecycle an Token koppeln: alle persistierten Token sofort aktivieren,
-// damit der Price-Feed token-zentrisch läuft (nicht bot-zentrisch). Polling startet,
-// History wird aus live_feed rehydriert, unabhängig davon ob aktuell ein Bot läuft.
-const persistedTokens = db.prepare('SELECT mintAddress FROM tokens').all() as { mintAddress: string }[];
-for (const t of persistedTokens) priceFeed.activate(t.mintAddress);
-if (persistedTokens.length > 0) {
-  console.log(`[Init] ${persistedTokens.length} persistente Token im PriceFeed aktiviert.`);
-}
+// Bot-zentrisches Polling: die Whitelist (tokens-Tabelle) wird BEWUSST NICHT mehr
+// automatisch im PriceFeed aktiviert. Polling läuft nur für Mints, die ein laufender
+// Bot via subscribe() abonniert. Das hält N (= aktive Mints) klein und damit die
+// per-Mint-Poll-Kadenz (N*SLOT_MS) niedrig genug, dass Bots zügig aus dem Warmup
+// kommen und überhaupt traden. Andernfalls treibt eine große Whitelist N so hoch,
+// dass das per-Mint-Intervall die Outage-Schwelle überschreitet und Bots dauerhaft
+// im Re-Warmup hängen. Die Whitelist-Preisspalte wird separat von
+// tokenService.refreshAllTokenPrices() (60s) + manuellem Refresh versorgt.
+// History wird beim Bot-Start aus live_feed rehydriert (seedFromDatabaseIfEmpty).
 
 const botManager = new BotManager();
 const server = new BotServer(botManager, recorder, 3000);
@@ -78,17 +79,6 @@ priceFeed.setBotNamesCallback((mintAddress: string) => {
     .filter(bot => bot.mintAddress === mintAddress)
     .map(bot => bot.name);
 });
-
-// Create a default demo bot if none exist to avoid an empty dashboard
-if (botManager.getAllBots().length === 0) {
-  botManager.createBot({
-    name: 'UGOR Scraper V1',
-    mintAddress: 'UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW',
-    initialSOL: 10,
-    paperMode: true,
-  });
-  console.log('[Init] Default Demo-Bot erstellt (wird in SQLite gespeichert).');
-}
 
 // Global broadcast loop (SSE) - sends the state of all bots every second
 setInterval(() => {

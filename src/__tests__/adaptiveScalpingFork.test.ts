@@ -20,7 +20,7 @@ function withVolatility(n: number, amplitude: number): PricePoint[] {
 const baseConfig: StrategyConfig = {
   strategy_name: 'Nova Pulse Scalper',
   strategy_type: 'scalping-adaptive',
-  market: { symbol: 'UGOR/SOL', timeframe: '1m', exchange: 'solana' },
+  market: { symbol: 'SOL/USDC', timeframe: '1m', exchange: 'solana' },
   indicators: [],
   entry_conditions: [],
   exit_conditions: [],

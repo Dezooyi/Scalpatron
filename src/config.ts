@@ -16,7 +16,6 @@ export const CONFIG = {
   WALLET_PRIVATE_KEY: process.env.WALLET_PRIVATE_KEY ?? '',
   
   // Token Mints
-  UGOR_MINT: process.env.UGOR_MINT ?? 'UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW',
   SOL_MINT: process.env.SOL_MINT ?? 'So11111111111111111111111111111111111111112',
   
   // Jupiter APIs

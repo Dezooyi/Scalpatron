@@ -3,7 +3,7 @@
   "strategy_type": "momentum",
   "description": "Enters on MACD histogram crossing above zero (bullish momentum). Combines with RSI to avoid late entries in overbought conditions. Exits on histogram reversal or take profit.",
   "market": {
-    "symbol": "UGOR/SOL",
+    "symbol": "SOL/USDC",
     "timeframe": "1m",
     "exchange": "solana"
   },

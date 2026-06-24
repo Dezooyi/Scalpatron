@@ -2,7 +2,7 @@
   "strategy_name": "Solana Pulse Sniper",
   "strategy_type": "scalping",
   "description": "Tick-based micro-burst scalping. Ignores lagging candles completely. Buys instantly when a token spikes vertically (+5% within 15 ticks) and cuts losses fast. Built for hype token discovery.",
-  "market": { "symbol": "UGOR/SOL", "timeframe": "1m", "exchange": "solana" },
+  "market": { "symbol": "SOL/USDC", "timeframe": "1m", "exchange": "solana" },
   "indicators": [],
   "entry_conditions": [],
   "exit_conditions": [],

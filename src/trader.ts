@@ -73,7 +73,7 @@ export class Trader {
     this.maxAggressiveness = opts.maxAggressiveness ?? opts.aggressiveness ?? 10;
     this.tradingMode = opts.tradingMode ?? 'fixed';
     this.paperMode = opts.paperMode ?? true;
-    this.targetMint = opts.targetMint ?? CONFIG.UGOR_MINT;
+    this.targetMint = opts.targetMint ?? CONFIG.SOL_MINT;
     this.targetDecimals = opts.targetDecimals ?? 6;
     this.botId = opts.botId ?? 'default';
     this.logger = new Logger(opts.logFile ?? (this.paperMode ? 'paper-trades.jsonl' : 'live-trades.jsonl'));
@@ -214,7 +214,7 @@ export class Trader {
   }
 
   /** Statistiken aus DB-Daten wiederherstellen (nach Server-Neustart) */
-  restoreStats(totalTrades: number, wins: number, losses: number, totalPnlPercent: number, restoredBalanceSOL?: number, restoredBalanceUGOR?: number): void {
+  restoreStats(totalTrades: number, wins: number, losses: number, totalPnlPercent: number, restoredBalanceSOL?: number, restoredBalanceToken?: number): void {
     this.totalTrades = totalTrades;
     this.wins = wins;
     this.losses = losses;
@@ -223,8 +223,8 @@ export class Trader {
     if (restoredBalanceSOL !== undefined) {
       this.balanceSOL = restoredBalanceSOL;
     }
-    if (restoredBalanceUGOR !== undefined) {
-      this.balanceToken = restoredBalanceUGOR;
+    if (restoredBalanceToken !== undefined) {
+      this.balanceToken = restoredBalanceToken;
     }
   }
 
@@ -471,14 +471,14 @@ export class Trader {
         });
       }
 
-      const ugorAmount = effectiveTradeSize / result.currentPrice;
+      const tokenAmount = effectiveTradeSize / result.currentPrice;
 
       this.balanceSOL -= effectiveTradeSize;
-      this.balanceToken += ugorAmount;
+      this.balanceToken += tokenAmount;
       this.positions.push({
         entryPrice: result.currentPrice,
         entryTime: Date.now(),
-        amount: ugorAmount,
+        amount: tokenAmount,
       });
 
       const entry: TradeLogEntry = {
@@ -488,7 +488,7 @@ export class Trader {
         floor: result.floor,
         spikePercent: result.spikePercent,
         peakPrice: result.peakPrice,
-        amount: ugorAmount,
+        amount: tokenAmount,
         settings,
       };
       this.logger.log(entry);

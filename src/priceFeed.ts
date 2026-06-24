@@ -40,6 +40,16 @@ type JupiterPriceResponse = {
 const SAFE_RPM = 55;
 export const SLOT_MS = Math.ceil(60_000 / SAFE_RPM); // 1091 ms pro Request-Slot
 
+// Ein „langer Ausfall" (ADR-010) muss relativ zur tatsächlich erreichbaren Poll-Kadenz
+// definiert werden: bei N aktiven Mints wird jeder Mint nur alle N*SLOT_MS gepollt.
+// Ein fixes 60s-Fenster (CONFIG.PRICE_FEED_LONG_OUTAGE_MS) ist kleiner als dieses
+// Intervall, sobald ~55 Mints aktiv sind (60*1091ms = 65,5s > 60s). Dann würde JEDER
+// normale Tick fälschlich als Outage-Recovery gewertet, die History gelöscht und der
+// Re-Warmup nie abgeschlossen — die Bots traden nie. Daher wird die effektive Schwelle
+// als max(Config-Fenster, OUTAGE_CYCLE_FACTOR * effektives Poll-Intervall) berechnet:
+// ein echter Ausfall = mehrere verpasste Poll-Zyklen in Folge, nicht ein fixes Zeitfenster.
+const OUTAGE_CYCLE_FACTOR = 3;
+
 // Per-Mint 429-Backoff: Slot wird in diesem Zyklus übersprungen.
 const backoffUntil: Map<string, number> = new Map();
 
@@ -330,9 +340,11 @@ export class PriceFeed extends EventEmitter {
       );
 
     this.historyMap.set(mintAddress, uniquePoints.slice(-1000));
-    if (uniquePoints.length > 0) {
-      this.lastFreshAtMap.set(mintAddress, uniquePoints[uniquePoints.length - 1].timestamp);
-    }
+    // Deliberately NOT setting lastFreshAtMap here. Historical timestamps from
+    // the DB would make getFeedStaleMs() return a huge value, causing the
+    // ADR-010 outage-recovery path in poll() to wipe the just-seeded history
+    // on the first real tick. lastFreshAt is only written by poll() when a
+    // genuine fresh price arrives.
     console.log(`[PriceFeed] seeded ${uniquePoints.length} points for ${mintAddress}`);
   }
 
@@ -373,11 +385,18 @@ export class PriceFeed extends EventEmitter {
       const prevFreshAt = this.lastFreshAtMap.get(mintAddress);
 
       // Outage-Recovery (ADR-010): nach langem Ausfall History bereinigen.
+      // Schwelle skaliert mit der effektiven Poll-Kadenz (N*SLOT_MS), damit ein
+      // legitim langsamer Feed (viele aktive Mints) nicht als Ausfall fehlinterpretiert
+      // wird. Siehe OUTAGE_CYCLE_FACTOR.
+      const outageThresholdMs = Math.max(
+        CONFIG.PRICE_FEED_LONG_OUTAGE_MS,
+        this.getEffectiveIntervalMs() * OUTAGE_CYCLE_FACTOR,
+      );
       let recoveredFromOutage = false;
-      if (prevFreshAt !== undefined && (now - prevFreshAt) > CONFIG.PRICE_FEED_LONG_OUTAGE_MS) {
+      if (prevFreshAt !== undefined && (now - prevFreshAt) > outageThresholdMs) {
         this.historyMap.set(mintAddress, []);
         recoveredFromOutage = true;
-        console.warn(`[PriceFeed] 🔄 Langer Feed-Ausfall beendet (${Math.round((now - prevFreshAt) / 1000)}s). History bereinigt, Re-Warmup aktiv.`);
+        console.warn(`[PriceFeed] 🔄 Langer Feed-Ausfall beendet (${Math.round((now - prevFreshAt) / 1000)}s > ${Math.round(outageThresholdMs / 1000)}s Schwelle). History bereinigt, Re-Warmup aktiv.`);
       }
 
       this.lastFreshAtMap.set(mintAddress, now);
@@ -413,7 +432,7 @@ export class PriceFeed extends EventEmitter {
 // Standalone Test
 if (process.argv[1]?.endsWith('priceFeed.ts')) {
   const feed = PriceFeed.getInstance();
-  const testMint = 'UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW';
+  const testMint = 'So11111111111111111111111111111111111111112';
   console.log(`[Test] Starte Preis-Feed Test für ${testMint}…`);
 
   feed.subscribe(testMint);

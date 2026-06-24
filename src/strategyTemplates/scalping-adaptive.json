@@ -3,7 +3,7 @@
   "strategy_type": "scalping-adaptive",
   "description": "Adaptive scalping fork that reads market context — session, volatility, trend bias, and higher timeframe — to dynamically tune entry and exit thresholds. Built for professionals who want context-aware execution instead of static parameters.",
   "market": {
-    "symbol": "UGOR/SOL",
+    "symbol": "SOL/USDC",
     "timeframe": "1m",
     "exchange": "solana"
   },

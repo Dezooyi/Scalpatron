@@ -24,7 +24,7 @@ export type ExitType = 'take_profit' | 'stop_loss' | 'trailing_stop' | 'indicato
 export type OrderType = 'market' | 'limit';
 
 export interface MarketConfig {
-  symbol: string;       // e.g. "UGOR/SOL" or "BTCUSDT"
+  symbol: string;       // e.g. "SOL/USDC" or "BTCUSDT"
   timeframe: Timeframe;
   exchange: string;     // e.g. "solana" | "binance"
 }

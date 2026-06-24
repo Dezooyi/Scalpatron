@@ -3,7 +3,7 @@
   "strategy_type": "dca",
   "description": "Dollar-cost averaging strategy that buys in fixed intervals or on RSI dips below 40. Sells the full position when price recovers above the average entry + target profit.",
   "market": {
-    "symbol": "UGOR/SOL",
+    "symbol": "SOL/USDC",
     "timeframe": "5m",
     "exchange": "solana"
   },

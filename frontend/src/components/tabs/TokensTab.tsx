@@ -161,7 +161,7 @@ export function TokensTab({
               <div className="flex gap-2">
                 <Input
                   id="mintAddress"
-                  placeholder="e.g. UGoRwdj9SK78V6Pq9YMz9BvmNuJTLNqPZyS5WnGd8uW"
+                  placeholder="e.g. So11111111111111111111111111111111111111112"
                   value={newTokenMintAddress}
                   onChange={(e) => setNewTokenMintAddress(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && onLookupToken()}

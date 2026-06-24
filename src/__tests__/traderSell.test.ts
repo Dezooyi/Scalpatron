@@ -1,7 +1,7 @@
 import { Trader } from '../trader.js';
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 
-const TARGET_MINT = 'UGOR111111111111111111111111111111111111111';
+const TARGET_MINT = 'TEST111111111111111111111111111111111111111';
 
 async function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));

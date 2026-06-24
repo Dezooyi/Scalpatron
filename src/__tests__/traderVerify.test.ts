@@ -1,6 +1,6 @@
 import { Trader } from '../trader.js';
 
-const TARGET_MINT = 'UGOR111111111111111111111111111111111111111';
+const TARGET_MINT = 'TEST111111111111111111111111111111111111111';
 
 async function testExecuteLiveSwapReturnType(): Promise<boolean> {
   const trader = new Trader({

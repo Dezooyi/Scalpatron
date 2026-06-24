@@ -261,11 +261,17 @@ export class BotInstance {
    *  ADR-019: settings are always passed through `clampScalpingSettings`
    *  so no caller (AI, fork, REST endpoint) can drive parameters into a
    *  fee-loss region.
+   *  NO reset: this is an in-place Object.assign on the settings object, so a
+   *  threshold tweak takes effect on the next analyze() tick immediately. A
+   *  reset here would discard the warmup/running state (inSpike, peakPrice,
+   *  entryPrice, entryTick, tickCounter, breakevenRatcheted) — that drops an
+   *  OPEN position, makes the SELL arm unreachable and silently nullifies the
+   *  ADR-019 min-hold-time. Real strategy switches go through updateStrategy()
+   *  / applyStrategySwitch(), which keep their own reset.
    */
   public updateSettings(newSettings: Partial<PatternSettings>) {
     const clamped = clampScalpingSettings(newSettings);
     this.detector.updateSettings(clamped);
-    this.detector.reset();
     // Also update strategy engine if it's a scalping type
     if (this.strategyEngine && this.activeStrategyConfig && isScalpingType(this.activeStrategyConfig.strategy_type)) {
       this.strategyEngine.updateScalpingSettings(clamped);

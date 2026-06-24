@@ -548,7 +548,10 @@ export class StrategyEngine {
         ...settings,
       };
       this.scalpingDetector.updateSettings(settings);
-      this.scalpingDetector.reset();
+      // NO reset: threshold tweaks must preserve the running position lifecycle
+      // (inSpike/peakPrice/entryPrice/entryTick/tickCounter). A reset would drop
+      // an open position and make the SELL arm unreachable. Real strategy
+      // switches go through updateStrategy(), which builds a fresh engine.
     }
   }
 

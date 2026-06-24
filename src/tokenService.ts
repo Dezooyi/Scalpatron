@@ -164,10 +164,11 @@ export function saveTokenToDb(tokenInfo: TokenInfo): void {
     tokenInfo.createdAt ?? Date.now()
   );
 
-  // Token-Feed aktivieren: ab jetzt läuft das Polling token-zentrisch, unabhängig
-  // davon, ob/welche Strategien/Bots gerade für dieses Token laufen.
-  PriceFeed.getInstance().activate(tokenInfo.mintAddress);
-
+  // Bot-zentrisches Polling: Das Hinzufügen zur Whitelist startet KEIN Feed-Polling.
+  // Der PriceFeed pollt einen Mint erst, wenn ein Bot ihn via subscribe() abonniert.
+  // So bleibt die per-Mint-Poll-Kadenz unabhängig von der Whitelist-Größe und Bots
+  // kommen aus dem Warmup. Die Preisspalte der Whitelist wird separat über
+  // refreshAllTokenPrices() versorgt.
   console.log(`[TokenService] Token saved to DB: ${tokenInfo.symbol} (${tokenInfo.mintAddress})`);
 }
 

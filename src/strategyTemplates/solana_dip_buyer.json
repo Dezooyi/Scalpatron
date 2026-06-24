@@ -2,7 +2,7 @@
   "strategy_name": "Solana V-Shape Dip Buyer",
   "strategy_type": "mean_reversion",
   "description": "Exploits liquidity cascades (flash crashes). Buys when price wick drops massively below VWAP and Stochastic/RSI is heavily oversold. Captures V-shape recoveries.",
-  "market": { "symbol": "UGOR/SOL", "timeframe": "1m", "exchange": "solana" },
+  "market": { "symbol": "SOL/USDC", "timeframe": "1m", "exchange": "solana" },
   "indicators": [
     { "type": "VWAP" },
     { "type": "STOCH", "k_period": 14, "d_period": 3 },

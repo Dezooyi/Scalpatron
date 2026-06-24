@@ -2,7 +2,7 @@
   "strategy_name": "Asymmetric Breakout (Runner)",
   "strategy_type": "breakout",
   "description": "Mathematically optimal for Solana: No Take-Profit! Let winners run infinitely. Exits strictly via tight Trailing Stop-Loss. Enters on price crossing above upper Bollinger Band AND being above VWAP.",
-  "market": { "symbol": "UGOR/SOL", "timeframe": "1m", "exchange": "solana" },
+  "market": { "symbol": "SOL/USDC", "timeframe": "1m", "exchange": "solana" },
   "indicators": [
     { "type": "BB", "period": 20, "std_dev": 2.5 },
     { "type": "VWAP" }

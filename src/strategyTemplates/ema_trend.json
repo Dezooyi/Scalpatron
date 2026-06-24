@@ -3,7 +3,7 @@
   "strategy_type": "trend",
   "description": "Follows the trend using EMA crossover (fast/slow). RSI filter avoids overbought entries. Best for trending markets with clear directional momentum.",
   "market": {
-    "symbol": "UGOR/SOL",
+    "symbol": "SOL/USDC",
     "timeframe": "1m",
     "exchange": "solana"
   },

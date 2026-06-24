@@ -880,7 +880,7 @@ interface PatternResult {
                         <li>No cooldown phase active</li>
                       </ol>
                       <p className="text-sm text-muted-foreground mt-2">
-                        <strong>Action:</strong> Buy UGOR with <code>tradeSize</code> SOL
+                        <strong>Action:</strong> Buy the target token with <code>tradeSize</code> SOL
                       </p>
                     </CardContent>
                   </Card>
@@ -896,7 +896,7 @@ interface PatternResult {
                         <li>Price has fallen from peak by <code>sellDropThreshold</code>%</li>
                       </ol>
                       <p className="text-sm text-muted-foreground mt-2">
-                        <strong>Action:</strong> Sell entire UGOR position back to SOL. Then: <code>cooldownTicks</code> ticks pause.
+                        <strong>Action:</strong> Sell entire token position back to SOL. Then: <code>cooldownTicks</code> ticks pause.
                       </p>
                     </CardContent>
                   </Card>

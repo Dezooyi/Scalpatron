@@ -199,7 +199,7 @@ export function StrategiesTab({
             <textarea
               rows={20}
               className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-xs font-mono text-zinc-200 focus:outline-none focus:border-primary/50 resize-none"
-              placeholder={`{\n  "strategy_name": "Meine Strategie",\n  "strategy_type": "trend",\n  "market": { "symbol": "UGOR/SOL", "timeframe": "5m", "exchange": "solana" },\n  "indicators": [{ "type": "EMA", "period": 20 }, { "type": "EMA", "period": 50 }],\n  "entry_conditions": [{ "left": "EMA_20", "operator": ">", "right": "EMA_50" }],\n  "exit_conditions": [{ "type": "take_profit", "value": 0.05 }, { "type": "stop_loss", "value": 0.02 }],\n  "risk_management": { "position_size": 0.1, "max_positions": 1, "leverage": 1 },\n  "execution": { "order_type": "market", "slippage_tolerance": 0.001 }\n}`}
+              placeholder={`{\n  "strategy_name": "Meine Strategie",\n  "strategy_type": "trend",\n  "market": { "symbol": "SOL/USDC", "timeframe": "5m", "exchange": "solana" },\n  "indicators": [{ "type": "EMA", "period": 20 }, { "type": "EMA", "period": 50 }],\n  "entry_conditions": [{ "left": "EMA_20", "operator": ">", "right": "EMA_50" }],\n  "exit_conditions": [{ "type": "take_profit", "value": 0.05 }, { "type": "stop_loss", "value": 0.02 }],\n  "risk_management": { "position_size": 0.1, "max_positions": 1, "leverage": 1 },\n  "execution": { "order_type": "market", "slippage_tolerance": 0.001 }\n}`}
               value={strategyEditorJson}
               onChange={(e) => {
                 setStrategyEditorJson(e.target.value);
