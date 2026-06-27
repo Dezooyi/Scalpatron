@@ -113,3 +113,14 @@ import { Trader } from '../trader';     // will fail at runtime
 
 ## ADR Index
 Architecture Decision Records are in `docs/decisions/`. ADR-010 (stale price handling) and ADR-017 (OllamaAgent timer management) are the most operationally significant ones.
+
+**Cross-Asset / Funding-Carry investigated & rejected (ADR-023/024).** A synthetic
+cross-asset "strategic default" idea was decomposed (it is a capped net-short BTC, not a
+win-win), pivoted to a delta-neutral funding-carry bot, then **killed in Phase 0** by a
+backtest on real 2-year Binance funding: threshold-gating a noisy carry signal is
+value-destructive (re-entry fees > extra carry), and the only profitable variant just
+replicates sUSDe (~9%). Decision: hold sUSDe, do not build. Validation tooling is kept at
+`src/strategy/fundingCarry.ts`, `src/backtest/fundingDataLoader.ts`,
+`src/__tests__/fundingCarry.{backtest,test}.ts` — re-run with
+`npx tsx src/__tests__/fundingCarry.backtest.ts --refresh`. Do not resurrect a gated
+funding-carry bot without new evidence from that backtest.

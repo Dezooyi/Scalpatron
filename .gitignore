@@ -16,6 +16,11 @@ wallet.json
 wallet.key
 *.wallet
 keypair.json
+# Dedizierte Carry-Bot-Wallets (ADR-024) — NIEMALS committen
+data/wallets/
+
+# --- Backtest-Daten-Cache (ADR-024, regenerierbar via --refresh) ---
+data/backtest/
 
 # --- Node.js ---
 node_modules/

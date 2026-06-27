@@ -2,7 +2,7 @@ import { PriceFeed, PricePoint } from './priceFeed.js';
 import { PatternDetector, PatternSettings, DEFAULT_SETTINGS } from './patternDetector.js';
 import { Trader, TraderStats, type TradeLogEntry } from './trader.js';
 import { logger } from './appLogger.js';
-import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, listStrategies, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt, getBotKillSwitch, setBotKillSwitch, getSetting, setSetting, insertLesson } from './db.js';
+import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, listStrategies, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt, getBotKillSwitch, setBotKillSwitch, getSetting, setSetting, insertLesson, setBotStrategyConfig } from './db.js';
 import { StrategyEngine, isScalpingType } from './strategyEngine.js';
 import type { StrategyConfig, IndicatorConfig } from './strategyTypes.js';
 import { TIMEFRAME_MS } from './candleAggregator.js';
@@ -11,7 +11,9 @@ import { clampScalpingSettings } from './strategy/scalpingSafetyBounds.js';
 import { KillSwitchEngine } from './killSwitch.js';
 import type { KillSwitchConfig, KillSwitchRuntime } from './killSwitch.js';
 import { adaptPAETSettings, PAET_DEFAULTS } from './strategyForks/paetAdaptiveFork.js';
+import { normalizePaetSelfOptConfig } from './strategy/paetTargets.js';
 import { adaptNovaPulseSettingsBounded, NOVAPULSE_PROGRAMMATIC_KEYS } from './strategyForks/novaPulseAdaptiveFork.js';
+import { DEFAULT_NOVAPULSE_CONFIG, normalizeNovaPulseConfig, type NovaPulseConfig } from './strategy/novaPulseTargets.js';
 
 const PRICE_FEED_TICKRATE_MS = process.env.PRICE_FEED_TICKRATE_MS
   ? parseInt(process.env.PRICE_FEED_TICKRATE_MS, 10)
@@ -329,6 +331,17 @@ export class BotInstance {
   public updateStrategy(config: StrategyConfig): void {
     this.activeStrategyConfig = config;
     this.strategyEngine = new StrategyEngine(config);
+    // ADR-021 (Bug-Fix Cross-Bot-Leak): Per-Bot-Persistierung. Vorher schrieb
+    // updateStrategy nichts → Self-Opt-Tweaks waren nach Restart weg und
+    // mehrten sich zudem via strategies-Template auf andere Bots. Jetzt:
+    // Jeder Bot hat seinen eigenen strategyConfig-Snapshot in bots.strategyConfig.
+    if (this.id) {
+      try {
+        setBotStrategyConfig(this.id, config);
+      } catch (e) {
+        console.warn(`[BotInstance] Per-Bot strategyConfig-Persistierung fehlgeschlagen fuer ${this.id}: ${(e as Error).message}`);
+      }
+    }
     // If scalping, also sync the PatternDetector settings
     if (isScalpingType(config.strategy_type) && config.scalping_settings) {
       this.detector.updateSettings(config.scalping_settings);
@@ -382,6 +395,12 @@ export class BotInstance {
   ): void {
     if (!this.activeStrategyConfig || !indicatorValues) return;
 
+    // ADR-021: Master-Toggle lesen (default an, wenn nicht gesetzt).
+    const paetOpt = normalizePaetSelfOptConfig(
+      this.activeStrategyConfig.paet_settings?.paetConfig,
+    );
+    if (!paetOpt.enabled) return;  // ADR-021: Self-Optimization aus → kein Write
+
     const sigma = indicatorValues['paet_sigma'];
     const period = indicatorValues['paet_period'];
     const omega = indicatorValues['paet_omega'];
@@ -393,7 +412,7 @@ export class BotInstance {
       ...(this.activeStrategyConfig.paet_settings ?? {}),
     };
 
-    const adapted = adaptPAETSettings(current, { sigma, period, trendPrice, omega });
+    const adapted = adaptPAETSettings(current, { sigma, period, trendPrice, omega }, paetOpt);
     if (Object.keys(adapted).length === 0) return;
 
     this.activeStrategyConfig.paet_settings = {
@@ -438,6 +457,11 @@ export class BotInstance {
     // baseline — activeStrategyConfig.scalping_settings is only updated by
     // applyStrategyAdjustments and this method itself, not by updateSettings.
     const ds = this.detector.settings;
+    // ADR-020: master-toggle + blend rates aus den Detector-Settings lesen.
+    // Detector-Settings sind die kanonische Quelle (single source of truth
+    // nach updateSettings → clampScalpingSettings → detector.updateSettings).
+    const npCfg: NovaPulseConfig = normalizeNovaPulseConfig(ds.novaPulseConfig);
+    if (!npCfg.enabled) return;  // ADR-020: master-off → komplett überspringen
     const current = {
       floorWindow:          ds.floorWindow,
       spikeThreshold:       ds.spikeThreshold,
@@ -445,7 +469,7 @@ export class BotInstance {
       takeProfitThreshold:  ds.takeProfitThreshold,
     };
 
-    const adapted = adaptNovaPulseSettingsBounded(current, { volatility, avgRange });
+    const adapted = adaptNovaPulseSettingsBounded(current, { volatility, avgRange }, npCfg);
     if (Object.keys(adapted).length === 0) return;
 
     this.activeStrategyConfig.scalping_settings = { ...ss, ...adapted };
@@ -500,22 +524,28 @@ export class BotInstance {
       }
     }
     if (adjustments.paetAdjustments && this.activeStrategyConfig.strategy_type === 'paet') {
+      // ADR-021 (Q4 Offene Fragen): paetConfig ist User-Tuning und darf vom
+      // AI-Agent NICHT überschrieben werden. Hier defensiv rausfiltern, falls
+      // das LLM es doch zurückgibt.
+      const { paetConfig: _ignored, ...safePaetAdjustments } =
+        adjustments.paetAdjustments as Record<string, unknown>;
       this.activeStrategyConfig.paet_settings = {
         ...(this.activeStrategyConfig.paet_settings ?? {}),
-        ...adjustments.paetAdjustments,
+        ...safePaetAdjustments,
       };
     }
     if (this.strategyEngine) {
       this.strategyEngine.updateConfig(this.activeStrategyConfig);
     }
     // Persist adjustment to DB
+    // ADR-021 (Bug-Fix Cross-Bot-Leak): Vorher schrieb dieser Pfad die
+    // activeStrategyConfig zurück in die strategies-Tabelle (WHERE id = ...
+    // activeStrategyConfig.id). Dadurch wirkten AI-Adaptionen auf alle Bots
+    // mit gleichem strategyId (Cross-Bot-Leak). Jetzt: per-bot-Snapshot in
+    // bots.strategyConfig — andere Bots mit derselben Strategie bleiben unberührt.
     try {
-      db.prepare('UPDATE strategies SET config = ? WHERE id = ?').run(
-        JSON.stringify(this.activeStrategyConfig),
-        this.activeStrategyConfig.id
-      );
-      // Also update bots table if strategyId is set
       if (this.id) {
+        setBotStrategyConfig(this.id, this.activeStrategyConfig);
         db.prepare('UPDATE bots SET strategyId = ? WHERE id = ?').run(
           this.activeStrategyConfig.id,
           this.id

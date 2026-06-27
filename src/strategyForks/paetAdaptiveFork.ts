@@ -1,5 +1,7 @@
 import type { PaetSettings } from '../paetEngine.js';
 import { PAET_DEFAULTS } from '../paetEngine.js';
+import { DEFAULT_PAET_SELFOPT, normalizePaetSelfOptConfig } from '../strategy/paetTargets.js';
+import type { PaetSelfOptConfig } from '../strategy/paetTargets.js';
 
 /**
  * Live snapshot of PAET's internal signal state, extracted from indicatorValues
@@ -54,7 +56,17 @@ function blend(current: number, target: number, rate: number): number {
 export function adaptPAETSettings(
   current: Required<PaetSettings>,
   snapshot: PAETInternalSnapshot,
+  config?: PaetSelfOptConfig | unknown,
 ): Partial<PaetSettings> {
+  // ADR-021: Normalize config defensively. Akzeptiert unknown, damit alte
+  // Aufrufer mit `adaptPAETSettings(current, snapshot)` weiter funktionieren.
+  const cfg: PaetSelfOptConfig = normalizePaetSelfOptConfig(
+    config === undefined ? DEFAULT_PAET_SELFOPT : config,
+  );
+
+  // ADR-021: Master-Toggle. Bei enabled=false → keine Anpassung.
+  if (!cfg.enabled) return {};
+
   const adapted: Partial<PaetSettings> = {};
   const { sigma, period, trendPrice, omega } = snapshot;
 
@@ -65,7 +77,7 @@ export function adaptPAETSettings(
   // ── Rule 1: STL trend window ≥ 2 × period ────────────────────────────────
   if (validPeriod) {
     const target = clamp(Math.round(2 * period) + 10, 20, 200);
-    const blended = Math.round(blend(current.stl_trend_window, target, 0.3));
+    const blended = Math.round(blend(current.stl_trend_window, target, cfg.blendRateR1));
     if (blended !== current.stl_trend_window) {
       adapted.stl_trend_window = blended;
     }
@@ -75,10 +87,12 @@ export function adaptPAETSettings(
   if (validSigma && validTrend) {
     const noiseFraction = current.volatility_sigma_multiplier * sigma / trendPrice;
     const target = clamp(2.0 * noiseFraction, 0.05, 0.50);
-    // Asymmetric blend: rise quickly when market gets noisy (20%) to protect
+    // Asymmetric blend: rise quickly when market gets noisy to protect
     // against volatility-induced false collapses; tighten slowly in calm markets
-    // (10%) to avoid overshooting downward.
-    const blendRate = target > current.collapse_threshold_pct ? 0.20 : 0.10;
+    // to avoid overshooting downward.
+    const blendRate = target > current.collapse_threshold_pct
+      ? cfg.blendRateR2
+      : cfg.blendRateR2 * 0.5;
     const blended = blend(current.collapse_threshold_pct, target, blendRate);
     const rounded = Math.round(blended * 1000) / 1000; // 3 decimal places
     if (Math.abs(rounded - current.collapse_threshold_pct) > 1e-4) {
@@ -87,6 +101,8 @@ export function adaptPAETSettings(
   }
 
   // ── Rule 3: evacuation ticks ~ period / 15 ────────────────────────────────
+  // ADR-021: Regel 3 hat keinen User-Blend-Slider — direkter Set (Integer,
+  // Range 1-8, kleiner Suchraum — gradueller Blend bringt keinen Mehrwert).
   if (validPeriod) {
     const target = clamp(Math.round(period / 15), 1, 8);
     if (target !== current.evacuation_ticks) {
@@ -103,9 +119,8 @@ export function adaptPAETSettings(
     const storedBaseline = current.false_alarm_penalty_omega;
     const delta = omega - storedBaseline;
     if (Math.abs(delta) > 0.5) {
-      // Nudge stored baseline 5% toward live ω (very slow — this is a safety net).
       adapted.false_alarm_penalty_omega = clamp(
-        blend(storedBaseline, omega, 0.05),
+        blend(storedBaseline, omega, cfg.blendRateGuard),
         0.5, 5.0,
       );
     }

@@ -1,5 +1,6 @@
 import { CONFIG } from '../config.js';
 import type { PatternSettings } from '../patternDetector.js';
+import { normalizeNovaPulseConfig, type NovaPulseConfig } from './novaPulseTargets.js';
 
 /**
  * ADR-019: Fee-Aware Scalping Safety Bounds.
@@ -88,6 +89,11 @@ export function clampScalpingSettings(
   }
   if (typeof s.breakevenTriggerPct === 'number' && Number.isFinite(s.breakevenTriggerPct)) {
     out.breakevenTriggerPct = Math.max(0, s.breakevenTriggerPct);
+  }
+  // ADR-020: Nova-Pulse-Self-Optimization-Konfiguration. Wird validiert und
+  // auf gültige Blend-Raten geclampt, aber ansonsten durchgereicht.
+  if (s.novaPulseConfig !== undefined) {
+    out.novaPulseConfig = normalizeNovaPulseConfig(s.novaPulseConfig) as NovaPulseConfig;
   }
 
   return out;

@@ -28,6 +28,8 @@ export interface PatternSettings {
   minHoldTicks?: number;
   /** ADR-019: fraction above entry that triggers breakeven-trail ratchet. */
   breakevenTriggerPct?: number;
+  /** ADR-020: Nova-Pulse-Self-Optimization-Tuning (Master-Toggle + Blend-Raten). */
+  novaPulseConfig?: import('./strategy/novaPulseTargets.js').NovaPulseConfig;
 }
 
 export const DEFAULT_SETTINGS: PatternSettings = {

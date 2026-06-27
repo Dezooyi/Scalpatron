@@ -29,6 +29,11 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 | [017](adr-017-ollamaagent-timer-management.md) | OllamaAgent Timer-Management & Analyse-Zyklus-Schutz | Akzeptiert & Implementiert | AI Agent |
 | [018](adr-018-ai-programmatic-adaptation-cooperation.md) | KI- & Programmatische-Adaptation Kooperationsmodell | Akzeptiert & Implementiert | AI Agent / Strategie |
 | [019](adr-019-fee-aware-scalping-safety-bounds.md) | Fee-Aware Scalping Safety Bounds & AI-Gate (nach Agent-ORUGA Vorfall) | Vorgeschlagen | Strategie / AI Agent / Risk |
+| [020](adr-020-nova-pulse-self-optimization-control.md) | Nova-Pulse Self-Optimization Panel | Vorgeschlagen | Strategie / Frontend-UX |
+| [021](adr-021-paet-self-optimization-panel.md) | PAET Self-Optimization Panel | Vorgeschlagen | Strategie (PAET) / Frontend-UX |
+| [022](adr-022-sse-state-memory-footprint.md) | Langzeit-stabiler SSE/State-Memory-Footprint (Browser-OOM nach Stunden) | Akzeptiert & Implementiert | Architektur / Frontend / Backend-SSE |
+| [023](adr-023-cross-asset-synthetic-hedge.md) | Synthetische Cross-Asset-Hedge-Strategie (Perp-Replikation) | Ersetzt durch ADR-024 | Strategie / Architektur / Risk |
+| [024](adr-024-delta-neutral-funding-carry.md) | Delta-neutraler BTC Funding-Carry-Bot (Pivot nach Profitabilitäts-Validierung) | Verworfen (Phase 0: ≈ sUSDe) | Strategie / Architektur / Risk |
 
 > **Status-Werte:** `Vorgeschlagen` → `Akzeptiert` → `Veraltet` / `Ersetzt durch ADR-0XXX`
 > Ein `Vorgeschlagen`-ADR beschreibt einen geplanten, noch **nicht** implementierten Change.
@@ -116,6 +121,21 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 - Fix 3: Minimum `cycleMinutes = 5` in `updateConfig()` erzwungen (AI braucht mindestens
   5 Minuten neue Daten für sinnvolle Empfehlungen)
 - Symptom war: unerwartete AI-Optimierungen alle 2 Minuten für Bot „Agent-ROL69"
+
+### ADR-023 — Synthetische Cross-Asset-Hedge (Ersetzt durch ADR-024)
+- User-Konzept (Treasury→BTC-Kredit + Strategic Default) ökonomisch zerlegt:
+  **keine Win-Win-Wette**, sondern gedeckelter Netto-BTC-Short (Equity = `125 − 25·m`)
+- „Bull-Case-Gewinn" ist Rechenfehler (erst > 3× BTC, nach Zwangsliquidation bei m≈1,6)
+- Reine RWA-Variante nicht wallet-tauglich (OUSG permissioned/KYC, dünne BTC-Borrow-Märkte)
+- Pivot zu ADR-024
+
+### ADR-024 — Delta-neutraler BTC Funding-Carry-Bot (Verworfen, Phase 0)
+- Pivot: delta-neutral (long cbBTC + short Drift-Perp), Edge = adaptives Funding-Gate
+- **Backtest-First (Phase 0)** als Pflicht-Gate vor jedem Bau
+- **Empirisch widerlegt** (echte 2J Binance-Funding): Gate verliert durch Fee-Churn
+  (−2,8…−7,3 %); nur naive always-on verdient ~9,1 % ≈ sUSDe → **MARGINAL**
+- Beschluss: passiv sUSDe halten statt bauen. Tooling: `src/strategy/fundingCarry.ts`,
+  `src/backtest/fundingDataLoader.ts`, `src/__tests__/fundingCarry.*`
 
 ---
 

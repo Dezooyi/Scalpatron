@@ -122,6 +122,10 @@ export interface StrategyConfig {
     // Emergency hard stop-loss as fallback if PNR/anomaly never fires (e.g. dead market).
     // 0.08 = 8% below entry price triggers forced SELL. 0 = disabled.
     stop_loss_pct?: number;
+    /** ADR-021: PAET Self-Optimization Tuning (Master-Toggle + Blend-Raten).
+     * Wird via clampPaetSettings validiert. AI-Agent (ollamaAgent.ts) filtert
+     * dieses Feld bei eingehenden paet_settings-Updates heraus — User-Tuning. */
+    paetConfig?: import('./strategy/paetTargets.js').PaetSelfOptConfig;
   };
   // Custom system prompt for the Ollama Strategy Assistant
   // If set, overrides the auto-generated prompt for this strategy

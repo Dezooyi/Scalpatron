@@ -15,17 +15,30 @@ import {
 // Module-level ticking clock (pure during render via useSyncExternalStore)
 let clockNow = Date.now();
 const clockSubs = new Set<() => void>();
-const subscribeClock = (cb: () => void) => {
-  clockSubs.add(cb);
-  return () => { clockSubs.delete(cb); };
-};
-const getClockNow = () => clockNow;
-if (typeof window !== "undefined") {
-  setInterval(() => {
+// ADR-022 (M4): Sekunden-Timer nur aktiv, solang Subscriber vorhanden.
+let clockIntervalId: ReturnType<typeof setInterval> | null = null;
+
+function startClockTimer(): void {
+  if (clockIntervalId !== null || typeof window === "undefined") return;
+  clockIntervalId = setInterval(() => {
     clockNow = Date.now();
     clockSubs.forEach(cb => cb());
   }, 1000);
 }
+
+function stopClockTimerIfIdle(): void {
+  if (clockIntervalId !== null && clockSubs.size === 0) {
+    clearInterval(clockIntervalId);
+    clockIntervalId = null;
+  }
+}
+
+const subscribeClock = (cb: () => void) => {
+  clockSubs.add(cb);
+  startClockTimer();
+  return () => { clockSubs.delete(cb); stopClockTimerIfIdle(); };
+};
+const getClockNow = () => clockNow;
 
 interface PricePoint {
   timestamp: number;

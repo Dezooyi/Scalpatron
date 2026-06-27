@@ -39,6 +39,9 @@ import {
   Check,
   Wand2,
   Wallet,
+  Power,
+  PowerOff,
+  RotateCcw,
 } from "lucide-react";
 import { EquityCurveChart } from "@/components/performance/EquityCurveChart";
 import { PriceChart } from "@/components/performance/PriceChart";
@@ -192,6 +195,117 @@ type StrategyTemplate = {
   system_prompt?: string;
 };
 
+// ADR-020: Nova Pulse Self-Optimization Tuning.
+type NovaPulseConfig = {
+  enabled: boolean;
+  blendRateA: number;
+  blendRateB: number;
+  blendRateC: number;
+  blendRateD: number;
+};
+
+const DEFAULT_NOVAPULSE_CONFIG: NovaPulseConfig = {
+  enabled: true,
+  blendRateA: 0.30,
+  blendRateB: 0.20,
+  blendRateC: 0.25,
+  blendRateD: 0.10,
+};
+
+const BLEND_RATE_BOUNDS = {
+  A: { min: 0.10, max: 0.50 },
+  B: { min: 0.05, max: 0.30 },
+  C: { min: 0.10, max: 0.40 },
+  D: { min: 0.05, max: 0.20 },
+} as const;
+
+const ACTIVE_RULE_EPSILON = {
+  floorWindow: 2,
+  spikeThreshold: 0.05,
+  sellDropThreshold: 0.10,
+  takeProfitThreshold: 0.005,
+} as const;
+
+// ADR-020 (B6b/B8): Per-Tick-Fork-Multiplier + Pressure-Range aus shared Modul.
+const computeForkMultipliers = (ctx: {
+  session?: string | number;
+  volatility?: number;
+  trendBias?: string;
+  higherTimeframeSignal?: string;
+}): { spike: number; sellDrop: number; takeProfit: number; cooldown: number; triggers: string[] } => {
+  let spike = 1.0;
+  let cooldown = 1.0;
+  const triggers: string[] = [];
+  if (ctx.session === 'asia' || (typeof ctx.volatility === 'number' && ctx.volatility < 0.5)) {
+    spike *= 1.3;
+    if (ctx.session === 'asia') triggers.push('Asia');
+    if (typeof ctx.volatility === 'number' && ctx.volatility < 0.5) triggers.push('LowVol');
+  }
+  if (ctx.session === 'overlap' && typeof ctx.volatility === 'number' && ctx.volatility > 1.5) {
+    spike *= 0.9;
+    triggers.push('Overlap+HighVol');
+  }
+  if (ctx.trendBias === 'down' && ctx.higherTimeframeSignal === 'bearish') {
+    spike *= 1.2;
+    triggers.push('BearishHTF');
+  } else if (ctx.trendBias === 'up' && ctx.higherTimeframeSignal === 'bullish') {
+    spike *= 0.95;
+    triggers.push('BullishHTF');
+  }
+  let sellDrop = 1.0;
+  let takeProfit = 1.0;
+  if (typeof ctx.volatility === 'number' && ctx.volatility > 3.0) {
+    sellDrop *= 0.85;
+    takeProfit *= 0.9;
+    triggers.push('HighVol');
+  } else if (typeof ctx.volatility === 'number' && ctx.volatility < 0.3) {
+    sellDrop *= 1.15;
+    triggers.push('DeadVol');
+  }
+  if (ctx.session === 'overlap') cooldown *= 0.8;
+  else if (ctx.session === 'asia') cooldown *= 1.2;
+  return { spike, sellDrop, takeProfit, cooldown, triggers };
+};
+
+const PRESSURE_RANGE = {
+  floorWindow: 40,           // MAX - MIN = 50 - 10
+  spikeThreshold: 4.95,      // MAX - MIN = 5.0 - 0.05
+  sellDropThreshold: 9.5,    // MAX - MIN = 10.0 - 0.5
+  takeProfitThreshold: 0.49, // MAX - MIN = 0.50 - 0.01
+} as const;
+
+// ADR-021: PAET Self-Optimization Tuning (spiegelt src/strategy/paetTargets.ts).
+// PAET hat 3 user-tunable Blend-Raten (R3 = evacuation_ticks ist direkter Set,
+// kein User-Slider).
+type PaetSelfOptConfig = {
+  enabled: boolean;
+  blendRateR1: number;     // stl_trend_window
+  blendRateR2: number;     // collapse_threshold_pct (asymmetric: × 0.5 down)
+  blendRateGuard: number;  // ω-baseline Nudge
+};
+
+const DEFAULT_PAET_SELFOPT: PaetSelfOptConfig = {
+  enabled: true,
+  blendRateR1: 0.30,
+  blendRateR2: 0.20,
+  blendRateGuard: 0.05,
+};
+
+const PAET_BLEND_RATE_BOUNDS = {
+  R1: { min: 0.05, max: 0.50 },
+  R2: { min: 0.05, max: 0.30 },
+  Guard: { min: 0.05, max: 0.15 },
+} as const;
+
+// ADR-021: Live-Badge-Schwellen für die 4 PAET-Regel-Karten. Spiegelt
+// PAET_ACTIVE_RULE_EPSILON aus dem shared Modul (paetTargets.ts).
+const PAET_ACTIVE_RULE_EPSILON = {
+  stl_trend_window: 5,
+  collapse_threshold_pct: 0.0001, // spiegelt paetAdaptiveFork.ts:84 (`> 1e-4`)
+  evacuation_ticks: 1,
+  false_alarm_penalty_omega: 0.05,
+} as const;
+
 type StrategyConfig = {
   id?: string;
   strategy_name: string;
@@ -213,8 +327,18 @@ type StrategyConfig = {
   exit_conditions: Array<{ type: string; value?: number; trailing_pct?: number; condition?: { left: string; operator: string; right: string | number } }>;
   risk_management: { position_size: number; max_positions: number; leverage: number; max_drawdown?: number };
   execution: { order_type: string; slippage_tolerance: number };
-  scalping_settings?: { floorWindow?: number; spikeThreshold?: number; sellDropThreshold?: number; cooldownTicks?: number; takeProfitThreshold?: number; startDelayTicks?: number };
-  paet_settings?: { stl_seasonal_period?: number; stl_trend_window?: number; volatility_sigma_multiplier?: number; collapse_threshold_pct?: number; evacuation_ticks?: number; safety_coefficient_k?: number; false_alarm_penalty_omega?: number; min_history_candles?: number; acceleration_ema_period?: number; entry_mode?: 'once' | 'paet_plus'; entry_cooldown_ticks?: number };
+  scalping_settings?: {
+    floorWindow?: number;
+    spikeThreshold?: number;
+    sellDropThreshold?: number;
+    cooldownTicks?: number;
+    takeProfitThreshold?: number;
+    startDelayTicks?: number;
+    minHoldTicks?: number;
+    breakevenTriggerPct?: number;
+    novaPulseConfig?: NovaPulseConfig;
+  };
+  paet_settings?: { stl_seasonal_period?: number; stl_trend_window?: number; volatility_sigma_multiplier?: number; collapse_threshold_pct?: number; evacuation_ticks?: number; safety_coefficient_k?: number; false_alarm_penalty_omega?: number; min_history_candles?: number; acceleration_ema_period?: number; entry_mode?: 'once' | 'paet_plus'; entry_cooldown_ticks?: number; paetConfig?: PaetSelfOptConfig };
   system_prompt?: string;
   isTemplate?: boolean;
   grid_levels?: number | string;
@@ -501,8 +625,35 @@ export default function App() {
 
   // Inline Bot Settings Panel
   const [botSettingsPanelId, setBotSettingsPanelId] = useState<string | null>(null);
-  const [botSettingsDraft, setBotSettingsDraft] = useState<{ floorWindow: number; spikeThreshold: number; sellDropThreshold: number; cooldownTicks: number; takeProfitThreshold: number; startDelayTicks: number; tradeSize: number; aggressiveness: number; tradingMode: "fixed" | "aggressive"; walletAddress: string; strategyConfigDraft: StrategyConfig | null; aggPreset: number; killSwitchDraft: KillSwitchConfig }>({ floorWindow: 20, spikeThreshold: 0.3, sellDropThreshold: 5, cooldownTicks: 5, takeProfitThreshold: 0.10, startDelayTicks: 30, tradeSize: 1, aggressiveness: 10, tradingMode: "fixed", walletAddress: "", strategyConfigDraft: null, aggPreset: 50, killSwitchDraft: defaultKillSwitchConfig() });
+  // ADR-020 (B10): Initial-Draft-Defaults innerhalb ADR-019-Floors.
+  const [botSettingsDraft, setBotSettingsDraft] = useState<{ floorWindow: number; spikeThreshold: number; sellDropThreshold: number; cooldownTicks: number; takeProfitThreshold: number; startDelayTicks: number; tradeSize: number; aggressiveness: number; tradingMode: "fixed" | "aggressive"; walletAddress: string; strategyConfigDraft: StrategyConfig | null; aggPreset: number; killSwitchDraft: KillSwitchConfig }>({ floorWindow: 20, spikeThreshold: 1.0, sellDropThreshold: 5, cooldownTicks: 10, takeProfitThreshold: 0.10, startDelayTicks: 30, tradeSize: 1, aggressiveness: 10, tradingMode: "fixed", walletAddress: "", strategyConfigDraft: null, aggPreset: 50, killSwitchDraft: defaultKillSwitchConfig() });
   const [botSettingsSaveStatus, setBotSettingsSaveStatus] = useState<"idle" | "saved" | "error">("idle");
+  // ADR-020: dirty-flag für novaPulseConfig-Änderungen im Self-Opt-Panel.
+  const [novaPulseDirty, setNovaPulseDirty] = useState(false);
+  // ADR-021: dirty-flag für paetConfig-Änderungen im Self-Opt-Panel.
+  const [paetDirty, setPaetDirty] = useState(false);
+  // ADR-021 (Bug-Fix Cross-Bot-Leak): Wenn der User per Bot-Chip einen
+  // anderen Bot waehlt, ohne das Settings-Panel zu schliessen und neu zu
+  // oeffnen, bleibt der Draft-State des vorherigen Bots aktiv und kann
+  // bei Save auf den falschen Bot geschrieben werden. Wir invalidieren
+  // den Draft defensiv, sobald selectedBotId wechselt UND das Panel offen ist.
+  const lastDraftBotIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      botSettingsPanelId !== null &&
+      selectedBotId !== null &&
+      selectedBotId !== lastDraftBotIdRef.current &&
+      botSettingsPanelId !== selectedBotId
+    ) {
+      // Bot-Wechsel bei offenem Panel: Draft ist stale. Sicherheitshalber
+      // Dirty-Flags loeschen und dem User signalisieren, dass ein Save jetzt
+      // unsinnig waere (Status auf 'idle' = keine Anzeige, kein Auto-Save).
+      setNovaPulseDirty(false);
+      setPaetDirty(false);
+      setBotSettingsSaveStatus("idle");
+    }
+    lastDraftBotIdRef.current = selectedBotId;
+  }, [selectedBotId, botSettingsPanelId, novaPulseDirty, paetDirty]);
   const [tradeFlash, setTradeFlash] = useState<Record<string, "buy" | "sell" | null>>({});
   const [aiFlash, setAiFlash] = useState<Record<string, boolean>>({});
   const aiFlashTimeoutRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -513,6 +664,13 @@ export default function App() {
   const sseThrottleRef = useRef<Record<string, number>>({});
   const pendingBotsUpdateRef = useRef<BotState[] | null>(null);
   const botsUpdateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ADR-022 (M1/M2/I3): Delta-SSE Sequence-Tracking + Resync-State.
+  // stateSeqRef: letzte vom Backend gesehene state-Sequenz (-1 = unbekannt).
+  // isResyncedRef: Frontend-Image stimmt mit Backend überein (für Write-Gate I3).
+  const stateSeqRef = useRef<number>(-1);
+  const isResyncedRef = useRef<boolean>(true);
+  const sseRef = useRef<EventSource | null>(null);
 
   // Performance: Batch log updates to prevent re-render floods
   const logBufferRef = useRef<Record<string, LogEntry[]>>({});
@@ -588,8 +746,105 @@ export default function App() {
   // Globale Animation-Konfiguration
   const [animConfig, setAnimConfig] = useState<AnimationConfig>(loadAnimationConfig());
 
+  // ADR-022 (M1): Wendet einen VOLLSTÄNDIGEN Bot-State an (Handshake / Full-Resync).
+  // Übernimmt Bot-Order + priceHistory-Erhaltung + Throttling. Setzt isResyncedRef.
+  const applyFullState = useCallback((data: BotState[]) => {
+    const now = Date.now();
+    const lastUpdate = sseThrottleRef.current['bots'] || 0;
+    const minInterval = 150;
+
+    let orderedData = data;
+    if (botOrderRef.current && botOrderRef.current.length > 0) {
+      const orderMap = new Map<string, number>(botOrderRef.current.map((id: string, index: number): [string, number] => [id, index]));
+      orderedData = [...data].sort((a, b) => {
+        const aIndex = orderMap.get(a.id) ?? Infinity;
+        const bIndex = orderMap.get(b.id) ?? Infinity;
+        return aIndex - bIndex;
+      });
+    }
+
+    const buildWithHistory = (prevBots: BotState[]) => {
+      const priceHistoryMap = new Map(prevBots.map(b => [b.id, b.priceHistory || []]));
+      return orderedData.map(bot => {
+        const hist = priceHistoryMap.get(bot.id) || [];
+        return { ...bot, priceHistory: hist.length > 500 ? hist.slice(-500) : hist };
+      });
+    };
+
+    setBots(prevBots => {
+      const updated = buildWithHistory(prevBots);
+      if (now - lastUpdate >= minInterval) {
+        sseThrottleRef.current['bots'] = now;
+        return updated;
+      }
+      pendingBotsUpdateRef.current = updated;
+      if (botsUpdateTimeoutRef.current) return prevBots;
+      botsUpdateTimeoutRef.current = setTimeout(() => {
+        if (pendingBotsUpdateRef.current) {
+          sseThrottleRef.current['bots'] = Date.now();
+          setBots(pendingBotsUpdateRef.current);
+          pendingBotsUpdateRef.current = null;
+        }
+        botsUpdateTimeoutRef.current = null;
+      }, minInterval - (now - lastUpdate));
+      return prevBots;
+    });
+    isResyncedRef.current = true;
+  }, []);
+
+  // ADR-022 (M1): Mergt inkrementelle Top-Level-Patches in den bots-State.
+  // settings/strategyConfig kommen als ganze Felder (I1). priceHistory & Order
+  // werden bewahrt. Setzt KEIN isResynced (Delta allein reicht für Write-Gate).
+  const applyDelta = useCallback((patches: Array<Partial<BotState> & { id: string }>) => {
+    setBots(prevBots => {
+      const byId = new Map(prevBots.map(b => [b.id, b]));
+      let touched = false;
+      for (const patch of patches) {
+        const existing = byId.get(patch.id);
+        if (!existing) {
+          // Unbekannter Bot → Frontend-Baseline veraltet → Resync nötig (Signal).
+          touched = false;
+          break;
+        }
+        const { id: _id, priceHistory: _ph, ...fields } = patch;
+        byId.set(patch.id, { ...existing, ...fields });
+        touched = true;
+      }
+      if (!touched) return prevBots;
+      // Order bewahren (prevBots-Reihenfolge beibehalten, neue IDs gibt es nicht).
+      return prevBots.map(b => byId.get(b.id) ?? b);
+    });
+  }, []);
+
+  // ADR-022 (I3): Write-Back-Gate. Stellt vor jedem Apply/Reset aus den
+  // Self-Opt-Panels sicher, dass das Frontend-Image mit dem Backend synchron
+  // ist. Bei isResynced=false wird per REST ein frischer Voll-State gezogen
+  // und gemerged, BEVOR der Write an das Backend geht. Verhindert das
+  // Zurückschreiben veralteter Parameter (einziger Trade-Einflusspfad).
+  const ensureResyncedBeforeWrite = useCallback(async (): Promise<void> => {
+    if (isResyncedRef.current) return;
+    try {
+      const res = await fetch(`${getApiBase()}/api/bots`);
+      if (res.ok) {
+        const data = (await res.json()) as BotState[];
+        applyFullState(data);
+      }
+    } catch {
+      // Fallback: Backend ist Source of Truth; Write ohne Resync ist sicherer
+      // als abbrechen, da das Backend die Parameter ohnehin validiert.
+    }
+  }, [applyFullState]);
+
   useEffect(() => {
-    const sse = new EventSource(`${getApiBase()}/api/stream`);
+    let disposed = false;
+
+    // ADR-022 (M2): connect() kapselt den EventSource-Aufbau inkl. aller Handler,
+    // sodass bei Visibility-Wechsel sauber getrennt/verbunden werden kann.
+    const connect = () => {
+      if (disposed) return;
+      if (sseRef.current) { try { sseRef.current.close(); } catch { /* noop */ } }
+      const sse = new EventSource(`${getApiBase()}/api/stream`);
+      sseRef.current = sse;
 
     sse.onopen = () => {
       setServerStatus("connected");
@@ -601,66 +856,53 @@ export default function App() {
       setServerStatus("disconnected");
       setIsConnecting(false);
       sse.close();
+      sseRef.current = null;
     };
 
     // Throttled bot state update - batches rapid SSE updates to prevent excessive re-renders
-    const throttledSetBots = (data: BotState[]) => {
-      const now = Date.now();
-      const lastUpdate = sseThrottleRef.current['bots'] || 0;
-      const minInterval = 150; // Performance: Lower throttle for faster UI feedback
-
-      // Apply saved bot order if available
-      let orderedData = data;
-      if (botOrderRef.current && botOrderRef.current.length > 0) {
-        const orderMap = new Map<string, number>(botOrderRef.current.map((id: string, index: number): [string, number] => [id, index]));
-        orderedData = [...data].sort((a, b) => {
-          const aIndex = orderMap.get(a.id) ?? Infinity;
-          const bIndex = orderMap.get(b.id) ?? Infinity;
-          return aIndex - bIndex;
-        });
+    // ADR-022 (M1): Full-State vom Backend (Handshake, Reconnect, strukturelle
+    // Änderung). Akzeptiert das neue Format {seq, full, bots} sowie das Legacy-
+    // Format (plain BotState[]). Setzt die Delta-Sequenz-Baseline (I2) und
+    // markiert das Image als synchronisiert (isResynced, I3).
+    const handleFullState = (payload: any) => {
+      const bots: BotState[] = Array.isArray(payload) ? payload : payload?.bots;
+      if (!Array.isArray(bots)) return;
+      if (payload && typeof payload.seq === 'number') {
+        stateSeqRef.current = payload.seq;
       }
-
-      // Preserve priceHistory from current state when updating via SSE (cap at 500 to prevent unbounded growth)
-      setBots(prevBots => {
-        const priceHistoryMap = new Map(prevBots.map(b => [b.id, b.priceHistory || []]));
-        const updatedWithHistory = orderedData.map(bot => {
-          const hist = priceHistoryMap.get(bot.id) || [];
-          return {
-            ...bot,
-            priceHistory: hist.length > 500 ? hist.slice(-500) : hist
-          };
-        });
-        
-        if (now - lastUpdate >= minInterval) {
-          // Immediate update if throttle interval has passed
-          sseThrottleRef.current['bots'] = now;
-          return updatedWithHistory;
-        } else {
-          // Queue update for later batching
-          pendingBotsUpdateRef.current = updatedWithHistory;
-          if (botsUpdateTimeoutRef.current) return prevBots;
-
-          botsUpdateTimeoutRef.current = setTimeout(() => {
-            if (pendingBotsUpdateRef.current) {
-              sseThrottleRef.current['bots'] = Date.now();
-              setBots(pendingBotsUpdateRef.current);
-              pendingBotsUpdateRef.current = null;
-            }
-            botsUpdateTimeoutRef.current = null;
-          }, minInterval - (now - lastUpdate));
-          return prevBots;
-        }
-      });
+      applyFullState(bots);
     };
 
     sse.addEventListener("state", (e) => {
       try {
         const data = JSON.parse(e.data);
-        throttledSetBots(data);
+        handleFullState(data);
       } catch (err) {
         console.error("SSE Parse Error", err);
       }
     });
+
+    // ADR-022 (M1): Inkrementeller Delta-Pfad. Sequenz-Lücke → nicht
+    // synchronisiert (isResynced=false), der nächste Write-Back forciert per
+    // I3 einen REST-Voll-Resync. Bis dahin läuft das Backend unbeeinträchtigt
+    // weiter (Display wird nachträglich per Resync korrigiert).
+    sse.addEventListener("state_delta", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const seq: number = data?.seq;
+        const patches = Array.isArray(data?.patches) ? data.patches : [];
+        if (stateSeqRef.current !== -1 && seq !== stateSeqRef.current + 1) {
+          isResyncedRef.current = false;
+          return;
+        }
+        stateSeqRef.current = seq;
+        applyDelta(patches);
+      } catch (err) {
+        console.error("SSE Parse Error Delta", err);
+        isResyncedRef.current = false;
+      }
+    });
+
 
     sse.addEventListener("agent_advice", (e) => {
       try {
@@ -810,9 +1052,28 @@ export default function App() {
         console.error("SSE Parse Error Terminal", err);
       }
     });
+    }; // end connect()
+
+    connect();
+
+    // ADR-022 (M2): Tab im Hintergrund → EventSource schließen (Last/Heap
+    // entlasten), Image als nicht-synchronisiert markieren (I3). Tab wieder
+    // sichtbar → neu verbinden; der Handshake liefert frischen Voll-State.
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        isResyncedRef.current = false;
+        if (sseRef.current) { try { sseRef.current.close(); } catch { /* noop */ } sseRef.current = null; }
+        setServerStatus("disconnected");
+      } else {
+        connect();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
-      sse.close();
+      disposed = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
       if (botsUpdateTimeoutRef.current) {
         clearTimeout(botsUpdateTimeoutRef.current);
       }
@@ -1174,9 +1435,14 @@ export default function App() {
         : 50;
     setBotSettingsDraft({
       floorWindow:          baseCfg?.floorWindow          ?? bot.settings?.floorWindow          ?? 20,
-      spikeThreshold:       baseCfg?.spikeThreshold       ?? bot.settings?.spikeThreshold       ?? 0.3,
+      // ADR-020 (B10): Draft-Defaults innerhalb ADR-019-Floors.
+      // spikeThreshold MIN = 1.0 (MIN_SPIKE_THRESHOLD_PCT).
+      spikeThreshold:       baseCfg?.spikeThreshold       ?? bot.settings?.spikeThreshold       ?? 1.0,
+      // sellDropThreshold MIN = 2.0 (MIN_SELL_DROP_THRESHOLD_PCT).
       sellDropThreshold:    baseCfg?.sellDropThreshold    ?? bot.settings?.sellDropThreshold    ?? 5,
-      cooldownTicks:        baseCfg?.cooldownTicks        ?? bot.settings?.cooldownTicks        ?? 5,
+      // cooldownTicks MIN = 10 (MIN_COOLDOWN_TICKS).
+      cooldownTicks:        baseCfg?.cooldownTicks        ?? bot.settings?.cooldownTicks        ?? 10,
+      // takeProfitThreshold MIN = roundtrip + 3% = 0.05; Default 0.10 ist sicher.
       takeProfitThreshold:  baseCfg?.takeProfitThreshold  ?? bot.settings?.takeProfitThreshold  ?? 0.10,
       startDelayTicks:      baseCfg?.startDelayTicks      ?? bot.settings?.startDelayTicks      ?? 30,
       tradeSize: bot.tradeSize ?? 1,
@@ -1191,6 +1457,8 @@ export default function App() {
     });
     setBotSettingsPanelId(bot.id);
     setBotSettingsSaveStatus("idle");
+    setNovaPulseDirty(false);
+    setPaetDirty(false);
   };
 
   const saveBotSettings = async (id: string) => {
@@ -1200,6 +1468,12 @@ export default function App() {
         strategyConfigDraft, killSwitchDraft } = botSettingsDraft;
       const stratType = strategyConfigDraft?.strategy_type ?? 'scalping';
       const isScalpingFamily = stratType === 'scalping' || stratType === 'scalping-adaptive';
+      // ADR-020: novaPulseConfig wird mit den scalping-settings mitgesendet,
+      // sodass das Backend es via clampScalpingSettings validiert und in
+      // bots.settings persistiert.
+      const novaPulseConfig = isScalpingFamily
+        ? strategyConfigDraft?.scalping_settings?.novaPulseConfig
+        : undefined;
 
       // Always save trade config + scalping pattern settings + kill switch
       const settingsRes = await fetch(`${getApiBase()}/api/bots/${id}/settings`, {
@@ -1209,6 +1483,7 @@ export default function App() {
           tradeSize, aggressiveness, tradingMode, walletAddress,
           killSwitch: killSwitchDraft,
           ...(isScalpingFamily ? { floorWindow, spikeThreshold, sellDropThreshold, cooldownTicks, takeProfitThreshold, startDelayTicks } : {}),
+          ...(novaPulseConfig ? { novaPulseConfig } : {}),
         }),
       });
       if (!settingsRes.ok) throw new Error();
@@ -1224,6 +1499,8 @@ export default function App() {
       }
 
       setBotSettingsSaveStatus("saved");
+      setNovaPulseDirty(false);
+      setPaetDirty(false);
       setTimeout(() => setBotSettingsSaveStatus("idle"), 2500);
     } catch {
       setBotSettingsSaveStatus("error");
@@ -1389,7 +1666,8 @@ export default function App() {
   useEffect(() => { void fetchAdvisorSuggestions(false); }, [fetchAdvisorSuggestions]);
 
   const handleCreateFromAdvisor = (suggestion: AdvisorSuggestion) => {
-    setNewBotName(`${suggestion.tokenSymbol} ${suggestion.strategyName.split(' ')[0]}`);
+    const randomSuffix = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
+    setNewBotName(`${suggestion.tokenSymbol} ${suggestion.strategyName.split(' ')[0]} ${randomSuffix}`);
     setNewBotMintAddress(suggestion.mintAddress);
     setNewBotStrategyId(suggestion.templateId);
     setPendingAdvisorToken({
@@ -2507,8 +2785,9 @@ export default function App() {
                             const labelCls = "text-[10px] font-bold uppercase text-muted-foreground tracking-wide";
                             const descCls = "text-[10px] text-muted-foreground/60 mt-0.5";
                             const aggPreset = botSettingsDraft.aggPreset ?? 50;
+                            // ADR-020 (B12): Label- und Color-Buckets synchron (33/66 → 20/40/60/80).
                             const presetLabel = aggPreset <= 20 ? 'Konservativ' : aggPreset <= 40 ? 'Defensiv' : aggPreset <= 60 ? 'Ausgewogen' : aggPreset <= 80 ? 'Aggressiv' : 'Max-Aggro';
-                            const presetColor = aggPreset <= 33 ? 'text-blue-400' : aggPreset <= 66 ? 'text-yellow-400' : 'text-red-400';
+                            const presetColor = aggPreset <= 40 ? 'text-blue-400' : aggPreset <= 80 ? 'text-yellow-400' : 'text-red-400';
 
                             const applyPreset = (v: number) => {
                               const t = (v - 1) / 99;
@@ -2516,8 +2795,15 @@ export default function App() {
                               const lerpF = (a: number, b: number, dp = 3) => parseFloat((a + (b - a) * t).toFixed(dp));
                               setBotSettingsDraft((p) => {
                                 const base = { ...p, aggPreset: v };
-                                if (stratType === 'scalping' || stratType === 'scalping-adaptive') {
-                                  return { ...base, floorWindow: lerp(35, 5), spikeThreshold: lerpF(0.8, 0.1), sellDropThreshold: lerpF(5.0, 0.5), cooldownTicks: lerp(25, 2), takeProfitThreshold: lerpF(0.08, 0.25), startDelayTicks: lerp(40, 5) };
+                                // ADR-020 (B2/B9): scalping-adaptive darf aggressiver mappen
+                                // (Nova-Pulse + adaptiveScalpingFork ziehen zurück in sichere
+                                // Zonen). Non-adaptive scalping muss ADR-019-Floors respektieren,
+                                // weil dort kein programmischer Schutz existiert.
+                                if (stratType === 'scalping-adaptive') {
+                                  return { ...base, floorWindow: lerp(35, 10), spikeThreshold: lerpF(2.0, 1.0), sellDropThreshold: lerpF(6.0, 2.0), cooldownTicks: lerp(25, 10), takeProfitThreshold: lerpF(0.08, 0.10), startDelayTicks: lerp(40, 10) };
+                                }
+                                if (stratType === 'scalping') {
+                                  return { ...base, floorWindow: lerp(35, 20), spikeThreshold: lerpF(2.0, 1.0), sellDropThreshold: lerpF(6.0, 2.0), cooldownTicks: lerp(25, 10), takeProfitThreshold: lerpF(0.10, 0.06), startDelayTicks: lerp(40, 20) };
                                 }
                                 if (!p.strategyConfigDraft) return base;
                                 const sc = p.strategyConfigDraft;
@@ -2543,6 +2829,8 @@ export default function App() {
                                   // Start-value params (R1/R2/R3 converge these after ~30 ticks):
                                   //   stl_trend_window, collapse_threshold_pct, evacuation_ticks
                                   // All midpoints at t=0.5 align with PAET_DEFAULTS.
+                                  // ADR-021: paetConfig (Master-Toggle + 3 Blend-Raten) reist mit.
+                                  // Höherer Aggro-Slider → schnellerer Blend (höhere Konvergenz).
                                   return { ...base, strategyConfigDraft: { ...sc, paet_settings: {
                                     ...(sc.paet_settings ?? {}),
                                     collapse_threshold_pct:      lerpF(0.38, 0.12, 3),
@@ -2554,6 +2842,12 @@ export default function App() {
                                     stl_trend_window:            lerp(90, 30),
                                     min_history_candles:         lerp(160, 80),
                                     entry_cooldown_ticks:        lerp(15, 5),
+                                    paetConfig: {
+                                      enabled: true,
+                                      blendRateR1:    lerpF(0.05, 0.50, 3),
+                                      blendRateR2:    lerpF(0.05, 0.30, 3),
+                                      blendRateGuard: lerpF(0.05, 0.15, 3),
+                                    },
                                   }}};
                                 }
                                 return base;
@@ -3377,48 +3671,94 @@ export default function App() {
                                   const vol   = indVals['adaptive_volatility'];
                                   const range = indVals['adaptive_avgRange'];
                                   const sessionCode = indVals['adaptive_session'];
+                                  const trendBias = indVals['adaptive_trendBias'];
+                                  const htfSignal = indVals['adaptive_higherTimeframeSignal'];
 
                                   const baseSettings = selectedBot.strategyConfig?.scalping_settings;
-                                  const cFW = baseSettings?.floorWindow         ?? selectedBot.settings?.floorWindow         ?? 20;
-                                  const cST = baseSettings?.spikeThreshold      ?? selectedBot.settings?.spikeThreshold      ?? 1.0;
-                                  const cSD = baseSettings?.sellDropThreshold   ?? selectedBot.settings?.sellDropThreshold   ?? 5.0;
-                                  const cTP = baseSettings?.takeProfitThreshold ?? selectedBot.settings?.takeProfitThreshold ?? 0.10;
+                                  // ADR-020: Priorität auf selectedBot.settings (live Detector),
+                                  // denn das ist der Wert, den Nova Pulse alle 30 Ticks per
+                                  // detector.updateSettings(adapted) überschreibt. baseSettings
+                                  // ist der unveränderte User-Preset und dient nur als Fallback
+                                  // wenn der SSE-Stream noch keine Live-Werte geliefert hat.
+                                  const cFW = selectedBot.settings?.floorWindow         ?? baseSettings?.floorWindow         ?? 20;
+                                  const cST = selectedBot.settings?.spikeThreshold      ?? baseSettings?.spikeThreshold      ?? 1.0;
+                                  const cSD = selectedBot.settings?.sellDropThreshold   ?? baseSettings?.sellDropThreshold   ?? 5.0;
+                                  const cTP = selectedBot.settings?.takeProfitThreshold ?? baseSettings?.takeProfitThreshold ?? 0.10;
+                                  // Differenz Live vs. User-Preset (für den "live"-Indikator).
+                                  const baseFW = baseSettings?.floorWindow;
+                                  const baseST = baseSettings?.spikeThreshold;
+                                  const baseSD = baseSettings?.sellDropThreshold;
+                                  const baseTP = baseSettings?.takeProfitThreshold;
+
+                                  // ADR-020: Nova-Pulse-Config aus dem aktuellen Strategy-Draft
+                                  // (oder Backend-State, wenn der Panel noch keinen Draft hat).
+                                  const npc: NovaPulseConfig = botSettingsDraft.strategyConfigDraft?.scalping_settings?.novaPulseConfig
+                                    ?? baseSettings?.novaPulseConfig
+                                    ?? DEFAULT_NOVAPULSE_CONFIG;
+                                  const npcEnabled = npc.enabled !== false;
 
                                   const hasData = vol > 0 && range > 0;
 
+                                  // ADR-020 (B1 fix): Zielwerte spiegeln die echten
+                                  // backend-Clamp-Boundaries (10-50, 0.05-5, 0.5-10, 0.01-0.5).
                                   const tFW = hasData ? Math.max(10, Math.min(50, Math.round(15 / Math.max(0.1, vol)))) : null;
                                   const tST = hasData ? Math.max(0.05, Math.min(5.0,  parseFloat((2.5 * range).toFixed(2)))) : null;
                                   const tSD = hasData ? Math.max(0.5,  Math.min(10.0, parseFloat((2.0 * range).toFixed(2)))) : null;
                                   const tTP = hasData ? Math.max(0.01, Math.min(0.5,  parseFloat((range * 2.0 / 100).toFixed(3)))) : null;
 
-                                  const activeRules = [
-                                    tFW !== null && Math.abs(tFW - cFW) > 2,
-                                    tST !== null && Math.abs(tST - cST) > 0.05,
-                                    tSD !== null && Math.abs(tSD - cSD) > 0.10,
-                                    tTP !== null && Math.abs(tTP - cTP) > 0.005,
-                                  ].filter(Boolean).length;
+                                  // ADR-020 (B5 fix): aktive-Regel-Schwellen aus shared constants.
+                                  const activeRules = npcEnabled ? [
+                                    tFW !== null && Math.abs(tFW - cFW) > ACTIVE_RULE_EPSILON.floorWindow,
+                                    tST !== null && Math.abs(tST - cST) > ACTIVE_RULE_EPSILON.spikeThreshold,
+                                    tSD !== null && Math.abs(tSD - cSD) > ACTIVE_RULE_EPSILON.sellDropThreshold,
+                                    tTP !== null && Math.abs(tTP - cTP) > ACTIVE_RULE_EPSILON.takeProfitThreshold,
+                                  ].filter(Boolean).length : 0;
 
-                                  const sessionName = ({ 1: 'Asia', 2: 'London', 3: 'NY', 4: 'Overlap', 5: 'Other' } as Record<number, string>)[sessionCode] ?? '—';
+                                  const sessionName = sessionCode === undefined ? '—'
+                                    : ({ 1: 'Asia', 2: 'London', 3: 'NY', 4: 'Overlap', 5: 'Other' } as Record<number, string>)[sessionCode] ?? '—';
 
-                                  const reason = !hasData
-                                    ? 'Warming up — awaiting market signal data'
-                                    : vol > 1.5
-                                      ? 'High volatility — floor window compressed, thresholds raised to filter noise'
-                                      : vol < 0.3
-                                        ? 'Dead market — widening floor window, lowering entry bar'
-                                        : range > 3.0
-                                          ? 'Wide tick range — spike & sell-drop thresholds elevated'
-                                          : range < 0.2
-                                            ? 'Tick range very tight — all thresholds approaching floor'
-                                            : activeRules === 0
-                                              ? 'Converged — all parameters at optimal market-calibrated targets'
-                                              : `${activeRules} rule${activeRules > 1 ? 's' : ''} converging toward market-calibrated targets`;
+                                  // ADR-020 (B6b): Per-Tick-Fork-Multiplier aus dem gleichen
+                                  // Pure-Function-Modell wie das Backend. Damit zeigt das Panel
+                                  // den effektiven Runtime-Wert (Base × Multiplier).
+                                  const fm = computeForkMultipliers({
+                                    session: sessionName === '—' ? undefined : sessionName.toLowerCase(),
+                                    volatility: vol,
+                                    // Indikator-Werte sind Record<string, number>; die Felder
+                                    // trendBias/htfSignal sind im Backend als string-codierte
+                                    // Enums (z.B. "up"/"bearish") gespeichert, deshalb der
+                                    // Doppel-Cast number → unknown → string.
+                                    trendBias: (trendBias as unknown as string | undefined),
+                                    higherTimeframeSignal: (htfSignal as unknown as string | undefined),
+                                  });
+                                  // Effektive Runtime-Werte (Base × Fork-Multiplier).
+                                  const eST = npcEnabled ? cST * fm.spike : cST;
+                                  const eSD = npcEnabled ? cSD * fm.sellDrop : cSD;
+                                  const eTP = npcEnabled ? cTP * fm.takeProfit : cTP;
+                                  const eCT = npcEnabled ? Math.max(2, Math.floor((selectedBot.settings?.cooldownTicks ?? baseSettings?.cooldownTicks ?? 10) * fm.cooldown)) : (selectedBot.settings?.cooldownTicks ?? baseSettings?.cooldownTicks ?? 10);
 
-                                  const pressure = !hasData ? 0 : Math.min(100, Math.round(
-                                    ((tFW ? Math.abs(tFW - cFW) / 20 : 0)
-                                    + (tST ? Math.abs(tST - cST) / 2 : 0)
-                                    + (tSD ? Math.abs(tSD - cSD) / 5 : 0)
-                                    + (tTP ? Math.abs(tTP - cTP) / 0.2 : 0)) / 4 * 100
+                                  const reason = !npcEnabled
+                                    ? 'Self-Optimization deaktiviert — Basis-Settings aus dem User-Preset bleiben unverändert.'
+                                    : !hasData
+                                      ? 'Warming up — awaiting market signal data'
+                                      : vol > 1.5
+                                        ? 'High volatility — floor window compressed, thresholds raised to filter noise'
+                                        : vol < 0.3
+                                          ? 'Dead market — widening floor window, lowering entry bar'
+                                          : range > 3.0
+                                            ? 'Wide tick range — spike & sell-drop thresholds elevated'
+                                            : range < 0.2
+                                              ? 'Tick range very tight — all thresholds approaching floor'
+                                              : activeRules === 0
+                                                ? 'Converged — all parameters at optimal market-calibrated targets'
+                                                : `${activeRules} rule${activeRules > 1 ? 's' : ''} converging toward market-calibrated targets`;
+
+                                  // ADR-020 (B8): Pressure normalisiert auf Clamp-Range
+                                  // (statt Magic-Numbers). Volle Range-Auslenkung = 100%.
+                                  const pressure = !npcEnabled || !hasData ? 0 : Math.min(100, Math.round(
+                                    ((tFW ? Math.abs(tFW - cFW) / PRESSURE_RANGE.floorWindow : 0)
+                                    + (tST ? Math.abs(tST - cST) / PRESSURE_RANGE.spikeThreshold : 0)
+                                    + (tSD ? Math.abs(tSD - cSD) / PRESSURE_RANGE.sellDropThreshold : 0)
+                                    + (tTP ? Math.abs(tTP - cTP) / PRESSURE_RANGE.takeProfitThreshold : 0)) / 4 * 100
                                   ));
 
                                   const pressureColor = pressure === 0 ? 'text-zinc-500'
@@ -3437,17 +3777,117 @@ export default function App() {
                                         ? 'text-amber-400 bg-amber-500/15 border-amber-500/30'
                                         : 'text-rose-400 bg-rose-500/15 border-rose-500/30';
 
+                                  // ADR-020: novaPulseConfig-Update-Helper. Schreibt in
+                                  // den Strategy-Draft und triggert sofortiges Speichern
+                                  // via settings-Endpoint (Body erweitert um novaPulseConfig).
+                                  const updateNpc = (patch: Partial<NovaPulseConfig>) => {
+                                    const next: NovaPulseConfig = { ...npc, ...patch };
+                                    setBotSettingsDraft(p => {
+                                      const scd = p.strategyConfigDraft;
+                                      if (!scd) return p;
+                                      return {
+                                        ...p,
+                                        strategyConfigDraft: {
+                                          ...scd,
+                                          scalping_settings: {
+                                            ...(scd.scalping_settings ?? {}),
+                                            novaPulseConfig: next,
+                                          },
+                                        },
+                                      };
+                                    });
+                                    setNovaPulseDirty(true);
+                                  };
+
+                                  const handleMasterToggle = async () => {
+                                    const nextEnabled = !npcEnabled;
+                                    if (nextEnabled) {
+                                      updateNpc({ enabled: true });
+                                      return;
+                                    }
+                                    // Going OFF → confirm + reset
+                                    const res = await confirm({
+                                      title: 'Self-Optimization deaktivieren?',
+                                      message: 'Die zuletzt konvergierten Nova-Pulse-Anpassungen werden verworfen. Der Bot läuft ab jetzt mit den unveränderten Basis-Settings aus dem User-Preset weiter.',
+                                      confirmLabel: 'Deaktivieren & Zurücksetzen',
+                                      cancelLabel: 'Abbrechen',
+                                      variant: 'warning',
+                                    });
+                                    if (!res.confirmed) return;
+                                    updateNpc({ enabled: false });
+                                    try {
+                                      // ADR-022 (I3): vor Write-Back sicherstellen, dass das
+                                      // Frontend-Image synchronisiert ist (verhindert veraltete
+                                      // Parameter nach Visibility-Pause / Delta-Lücke).
+                                      await ensureResyncedBeforeWrite();
+                                      await fetch(`${getApiBase()}/api/bots/${selectedBot?.id}/adaptations/reset`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ scope: 'novapulse' }),
+                                      });
+                                    } catch (e) {
+                                      console.warn('[SelfOpt] Reset-Endpoint fehlgeschlagen:', e);
+                                    }
+                                  };
+
+                                  const handleResetAdapted = async () => {
+                                    const res = await confirm({
+                                      title: 'Konvergierte Werte zurücksetzen?',
+                                      message: 'Die persistierten Nova-Pulse-Anpassungen werden gelöscht. Der Bot konvergiert beim nächsten 30-Tick-Zyklus neu von den aktuellen Basis-Settings.',
+                                      confirmLabel: 'Zurücksetzen',
+                                      cancelLabel: 'Abbrechen',
+                                      variant: 'info',
+                                    });
+                                    if (!res.confirmed) return;
+                                    try {
+                                      // ADR-022 (I3): vor Write-Back sicherstellen, dass das
+                                      // Frontend-Image synchronisiert ist (verhindert veraltete
+                                      // Parameter nach Visibility-Pause / Delta-Lücke).
+                                      await ensureResyncedBeforeWrite();
+                                      await fetch(`${getApiBase()}/api/bots/${selectedBot?.id}/adaptations/reset`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ scope: 'novapulse' }),
+                                      });
+                                    } catch (e) {
+                                      console.warn('[SelfOpt] Reset-Endpoint fehlgeschlagen:', e);
+                                    }
+                                  };
+
+                                  const blendRules: Array<{ rule: 'A' | 'B' | 'C' | 'D'; label: string; key: keyof NovaPulseConfig; bounds: { min: number; max: number } }> = [
+                                    { rule: 'A', label: 'A · Floor',    key: 'blendRateA', bounds: BLEND_RATE_BOUNDS.A },
+                                    { rule: 'B', label: 'B · Spike',    key: 'blendRateB', bounds: BLEND_RATE_BOUNDS.B },
+                                    { rule: 'C', label: 'C · Drop',     key: 'blendRateC', bounds: BLEND_RATE_BOUNDS.C },
+                                    { rule: 'D', label: 'D · TP',       key: 'blendRateD', bounds: BLEND_RATE_BOUNDS.D },
+                                  ];
+
                                   return (
-                                    <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/15 p-3 space-y-2.5">
+                                    <div className={`rounded-lg border p-3 space-y-2.5 transition-colors ${npcEnabled ? 'bg-emerald-500/5 border-emerald-500/15' : 'bg-muted/10 border-border/40'}`}>
                                       {/* Header */}
-                                      <div className="flex items-center justify-between">
+                                      <div className="flex items-center justify-between gap-2 flex-wrap">
                                         <div className="flex items-center gap-1.5">
-                                          <Wand2 className="h-3.5 w-3.5 text-emerald-400/70" />
+                                          <Wand2 className={`h-3.5 w-3.5 ${npcEnabled ? 'text-emerald-400/70' : 'text-muted-foreground/40'}`} />
                                           <span className="text-sm font-bold uppercase text-muted-foreground tracking-wider">Self-Optimization</span>
-                                          <span className="text-[10px] font-black uppercase px-1.5 py-0.5 rounded border bg-emerald-500/20 text-emerald-300 border-emerald-500/30">Nova Pulse</span>
+                                          <span className={`text-[10px] font-black uppercase px-1.5 py-0.5 rounded border ${npcEnabled ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' : 'bg-muted text-muted-foreground border-border'}`}>
+                                            Nova Pulse
+                                          </span>
                                         </div>
                                         <div className="flex items-center gap-1.5">
-                                          {hasData && (
+                                          {/* Master-Toggle (ADR-020) */}
+                                          <button
+                                            type="button"
+                                            onClick={handleMasterToggle}
+                                            title={npcEnabled ? 'Self-Optimization deaktivieren (löscht konvergierte Werte)' : 'Self-Optimization aktivieren'}
+                                            className={`flex items-center gap-1 text-[10px] font-black uppercase px-1.5 py-0.5 rounded border transition-colors ${
+                                              npcEnabled
+                                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
+                                                : 'bg-muted text-muted-foreground border-border hover:bg-muted/60'
+                                            }`}
+                                          >
+                                            {npcEnabled ? <Power className="h-3 w-3" /> : <PowerOff className="h-3 w-3" />}
+                                            {npcEnabled ? 'AN' : 'AUS'}
+                                          </button>
+                                          {npcEnabled && hasData && (
                                             <span className={`text-[10px] font-black uppercase px-1.5 py-0.5 rounded border ${pressureBadge}`}>
                                               {pressureLabel}
                                             </span>
@@ -3458,14 +3898,24 @@ export default function App() {
                                             onMouseMove={(e) => tooltip.move(e)}
                                             onMouseLeave={() => tooltip.hide()}
                                           >{activeRules}/4 rules active</span>
+                                          {npcEnabled && (
+                                            <button
+                                              type="button"
+                                              onClick={handleResetAdapted}
+                                              title="Persistierte konvergierte Werte zurücksetzen"
+                                              className="flex items-center text-[10px] font-bold text-muted-foreground hover:text-foreground transition-colors"
+                                            >
+                                              <RotateCcw className="h-3 w-3" />
+                                            </button>
+                                          )}
                                         </div>
                                       </div>
 
                                       {/* Reason line */}
-                                      <div className="text-xs text-muted-foreground/70 italic leading-tight pl-0.5">{reason}</div>
+                                      <div className={`text-xs italic leading-tight pl-0.5 ${npcEnabled ? 'text-muted-foreground/70' : 'text-muted-foreground/50'}`}>{reason}</div>
 
                                       {/* 8-col card grid — single row: market inputs + meta */}
-                                      <div className="grid grid-cols-8 gap-1.5">
+                                      <div className={`grid grid-cols-8 gap-1.5 transition-opacity ${npcEnabled ? 'opacity-100' : 'opacity-50'}`}>
                                         {/* Vol σ — Rule A + C driver */}
                                         <div
                                           className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
@@ -3494,10 +3944,10 @@ export default function App() {
                                           <div className="text-[10px] text-muted-foreground/50">B + D input</div>
                                         </div>
 
-                                        {/* Session */}
+                                        {/* Session + aktive Fork-Trigger (B6b) */}
                                         <div
                                           className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
-                                          onMouseEnter={(e) => tooltip.show('Aktuelles Handelsfenster. Der adaptive Fork multipliziert die Schwellwerte kontextabhängig — Overlap ist am liquidesten, Asia am ruhigsten.', e)}
+                                          onMouseEnter={(e) => tooltip.show(`Aktuelles Handelsfenster. Der adaptive Fork multipliziert die Schwellwerte kontextabhängig.${fm.triggers.length > 0 ? ` Aktive Trigger: ${fm.triggers.join(', ')} (Spike ×${fm.spike.toFixed(2)}, Drop ×${fm.sellDrop.toFixed(2)}, TP ×${fm.takeProfit.toFixed(2)}, Cooldown ×${fm.cooldown.toFixed(2)}).` : ' Keine Multiplier aktiv.'}`, e)}
                                           onMouseMove={(e) => tooltip.move(e)}
                                           onMouseLeave={() => tooltip.hide()}
                                         >
@@ -3505,7 +3955,10 @@ export default function App() {
                                           <div className={`text-base font-black font-mono ${sessionName === 'Overlap' ? 'text-emerald-400' : sessionName === 'NY' || sessionName === 'London' ? 'text-primary' : 'text-zinc-400'}`}>
                                             {sessionName}
                                           </div>
-                                          <div className="text-[10px] text-muted-foreground/50">Fork multiplier</div>
+                                          {fm.triggers.length > 0
+                                            ? <div className="text-[10px] text-amber-300/80">×{fm.spike !== 1 ? `s${fm.spike.toFixed(2)} ` : ''}{fm.sellDrop !== 1 ? `d${fm.sellDrop.toFixed(2)} ` : ''}{fm.cooldown !== 1 ? `c${fm.cooldown.toFixed(2)} ` : ''}</div>
+                                            : <div className="text-[10px] text-muted-foreground/50">×1.00 idle</div>
+                                          }
                                         </div>
 
                                         {/* Adapt Pressure */}
@@ -3517,7 +3970,7 @@ export default function App() {
                                         >
                                           <div className="text-[11px] font-bold uppercase text-muted-foreground">Pressure</div>
                                           <div className={`text-base font-black font-mono ${pressureColor}`}>
-                                            {hasData ? `${pressure}%` : '—'}
+                                            {npcEnabled && hasData ? `${pressure}%` : '—'}
                                           </div>
                                           <div className="text-[10px] text-muted-foreground/50">Adapt intensity</div>
                                         </div>
@@ -3525,71 +3978,522 @@ export default function App() {
                                         {/* Floor Window — Rule A */}
                                         <div
                                           className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
-                                          onMouseEnter={(e) => tooltip.show(`Regel A — Floor Window. Ziel = round(15 / max(0.1, σ)). Kürzeres Fenster in volatilen Märkten damit der Boden schneller folgt.`, e)}
+                                          onMouseEnter={(e) => tooltip.show(`Regel A — Floor Window. Ziel = round(15 / max(0.1, σ)). Kürzeres Fenster in volatilen Märkten damit der Boden schneller folgt. Der angezeigte Wert ist live-adaptiert; bei aktivem Nova Pulse weicht er ggf. vom User-Preset ab.`, e)}
                                           onMouseMove={(e) => tooltip.move(e)}
                                           onMouseLeave={() => tooltip.hide()}
                                         >
-                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Floor Win</div>
-                                          <div className={`text-base font-black font-mono ${tFW !== null && Math.abs(tFW - cFW) > 2 ? 'text-cyan-400' : 'text-foreground'}`}>
+                                          <div className="flex items-center justify-between">
+                                            <div className="text-[11px] font-bold uppercase text-muted-foreground">Floor Win</div>
+                                            {baseFW !== undefined && Math.abs(baseFW - cFW) > 0.5 && (
+                                              <span
+                                                className="text-[8px] font-bold uppercase px-1 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                                                title={`User-Preset: ${baseFW}`}
+                                              >live</span>
+                                            )}
+                                          </div>
+                                          <div className={`text-base font-black font-mono ${npcEnabled && tFW !== null && Math.abs(tFW - cFW) > ACTIVE_RULE_EPSILON.floorWindow ? 'text-cyan-400' : 'text-foreground'}`}>
                                             {cFW}
                                           </div>
-                                          {tFW !== null && Math.abs(tFW - cFW) > 2
+                                          {npcEnabled && tFW !== null && Math.abs(tFW - cFW) > ACTIVE_RULE_EPSILON.floorWindow
                                             ? <div className="text-[10px] text-cyan-300/60">→ {tFW} ticks</div>
                                             : <div className="text-[10px] text-muted-foreground/50">A · optimal</div>
                                           }
                                         </div>
 
-                                        {/* Spike Threshold — Rule B */}
+                                        {/* Spike Threshold — Rule B (effektiv = Nova-Pulse × Fork) */}
                                         <div
                                           className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
-                                          onMouseEnter={(e) => tooltip.show(`Regel B — Spike-Schwelle. Ziel = 2.5 × AvgRange. Asymmetrischer Blend: steigt schnell (20%) wenn Markt lauter wird, fällt langsam (10%) bei Beruhigung.`, e)}
+                                          onMouseEnter={(e) => tooltip.show(`Regel B — Spike-Schwelle. Ziel = 2.5 × AvgRange. Asymmetrischer Blend: steigt schnell (20%) wenn Markt lauter wird, fällt langsam (10%) bei Beruhigung. Angezeigt: effektiver Runtime-Wert (Detector-Settings ${cST.toFixed(2)}%${fm.spike !== 1 ? ` × ${fm.spike.toFixed(2)} Fork` : ''}).`, e)}
                                           onMouseMove={(e) => tooltip.move(e)}
                                           onMouseLeave={() => tooltip.hide()}
                                         >
-                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Spike Thr.</div>
-                                          <div className={`text-base font-black font-mono ${tST !== null && Math.abs(tST - cST) > 0.05 ? 'text-amber-400' : 'text-foreground'}`}>
-                                            {cST.toFixed(2)}%
+                                          <div className="flex items-center justify-between">
+                                            <div className="text-[11px] font-bold uppercase text-muted-foreground">Spike Thr.</div>
+                                            {baseST !== undefined && Math.abs(baseST - eST) > 0.01 && (
+                                              <span
+                                                className="text-[8px] font-bold uppercase px-1 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                                                title={`User-Preset: ${baseST.toFixed(2)}%`}
+                                              >live</span>
+                                            )}
                                           </div>
-                                          {tST !== null && Math.abs(tST - cST) > 0.05
-                                            ? <div className="text-[10px] text-amber-300/60">→ {tST.toFixed(2)}%</div>
-                                            : <div className="text-[10px] text-muted-foreground/50">B · optimal</div>
+                                          <div className={`text-base font-black font-mono ${npcEnabled && tST !== null && Math.abs(tST - cST) > ACTIVE_RULE_EPSILON.spikeThreshold ? 'text-amber-400' : 'text-foreground'}`}>
+                                            {eST.toFixed(2)}%
+                                          </div>
+                                          {fm.spike !== 1
+                                            ? <div className="text-[10px] text-muted-foreground/60">×{fm.spike.toFixed(2)} fork</div>
+                                            : npcEnabled && tST !== null && Math.abs(tST - cST) > ACTIVE_RULE_EPSILON.spikeThreshold
+                                              ? <div className="text-[10px] text-amber-300/60">→ {tST.toFixed(2)}%</div>
+                                              : <div className="text-[10px] text-muted-foreground/50">B · optimal</div>
                                           }
                                         </div>
 
-                                        {/* Sell Drop — Rule C */}
+                                        {/* Sell Drop — Rule C (effektiv = Nova-Pulse × Fork) */}
                                         <div
                                           className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
-                                          onMouseEnter={(e) => tooltip.show(`Regel C — Sell-Drop. Ziel = 2.0 × AvgRange. Größere Range → mehr Raum bevor Exit, um echte Umkehrungen von Rauschen zu trennen.`, e)}
+                                          onMouseEnter={(e) => tooltip.show(`Regel C — Sell-Drop. Ziel = 2.0 × AvgRange. Größere Range → mehr Raum bevor Exit, um echte Umkehrungen von Rauschen zu trennen. Angezeigt: effektiver Runtime-Wert (Detector ${cSD.toFixed(2)}%${fm.sellDrop !== 1 ? ` × ${fm.sellDrop.toFixed(2)} Fork` : ''}).`, e)}
                                           onMouseMove={(e) => tooltip.move(e)}
                                           onMouseLeave={() => tooltip.hide()}
                                         >
-                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Sell Drop</div>
-                                          <div className={`text-base font-black font-mono ${tSD !== null && Math.abs(tSD - cSD) > 0.1 ? 'text-rose-400' : 'text-foreground'}`}>
-                                            {cSD.toFixed(2)}%
+                                          <div className="flex items-center justify-between">
+                                            <div className="text-[11px] font-bold uppercase text-muted-foreground">Sell Drop</div>
+                                            {baseSD !== undefined && Math.abs(baseSD - eSD) > 0.05 && (
+                                              <span
+                                                className="text-[8px] font-bold uppercase px-1 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                                                title={`User-Preset: ${baseSD.toFixed(2)}%`}
+                                              >live</span>
+                                            )}
                                           </div>
-                                          {tSD !== null && Math.abs(tSD - cSD) > 0.1
-                                            ? <div className="text-[10px] text-rose-300/60">→ {tSD.toFixed(2)}%</div>
-                                            : <div className="text-[10px] text-muted-foreground/50">C · optimal</div>
+                                          <div className={`text-base font-black font-mono ${npcEnabled && tSD !== null && Math.abs(tSD - cSD) > ACTIVE_RULE_EPSILON.sellDropThreshold ? 'text-rose-400' : 'text-foreground'}`}>
+                                            {eSD.toFixed(2)}%
+                                          </div>
+                                          {fm.sellDrop !== 1
+                                            ? <div className="text-[10px] text-muted-foreground/60">×{fm.sellDrop.toFixed(2)} fork</div>
+                                            : npcEnabled && tSD !== null && Math.abs(tSD - cSD) > ACTIVE_RULE_EPSILON.sellDropThreshold
+                                              ? <div className="text-[10px] text-rose-300/60">→ {tSD.toFixed(2)}%</div>
+                                              : <div className="text-[10px] text-muted-foreground/50">C · optimal</div>
                                           }
                                         </div>
 
-                                        {/* Take Profit — Rule D */}
+                                        {/* Take Profit — Rule D (effektiv = Nova-Pulse × Fork) */}
                                         <div
                                           className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
-                                          onMouseEnter={(e) => tooltip.show(`Regel D — Take-Profit. Ziel = AvgRange × 2 / 100. Sehr langsamer Blend (10%) verhindert TP-Whipsawing in schnell wechselnden Märkten.`, e)}
+                                          onMouseEnter={(e) => tooltip.show(`Regel D — Take-Profit. Ziel = AvgRange × 2 / 100. Sehr langsamer Blend (10%) verhindert TP-Whipsawing in schnell wechselnden Märkten. Angezeigt: effektiver Runtime-Wert (Detector ${(cTP * 100).toFixed(1)}%${fm.takeProfit !== 1 ? ` × ${fm.takeProfit.toFixed(2)} Fork` : ''}).`, e)}
                                           onMouseMove={(e) => tooltip.move(e)}
                                           onMouseLeave={() => tooltip.hide()}
                                         >
-                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Take Profit</div>
-                                          <div className={`text-base font-black font-mono ${tTP !== null && Math.abs(tTP - cTP) > 0.005 ? 'text-emerald-400' : 'text-foreground'}`}>
-                                            {(cTP * 100).toFixed(1)}%
+                                          <div className="flex items-center justify-between">
+                                            <div className="text-[11px] font-bold uppercase text-muted-foreground">Take Profit</div>
+                                            {baseTP !== undefined && Math.abs(baseTP - eTP) > 0.005 && (
+                                              <span
+                                                className="text-[8px] font-bold uppercase px-1 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                                                title={`User-Preset: ${(baseTP * 100).toFixed(1)}%`}
+                                              >live</span>
+                                            )}
                                           </div>
-                                          {tTP !== null && Math.abs(tTP - cTP) > 0.005
-                                            ? <div className="text-[10px] text-emerald-300/60">→ {(tTP * 100).toFixed(1)}%</div>
-                                            : <div className="text-[10px] text-muted-foreground/50">D · optimal</div>
+                                          <div className={`text-base font-black font-mono ${npcEnabled && tTP !== null && Math.abs(tTP - cTP) > ACTIVE_RULE_EPSILON.takeProfitThreshold ? 'text-emerald-400' : 'text-foreground'}`}>
+                                            {(eTP * 100).toFixed(1)}%
+                                          </div>
+                                          {fm.takeProfit !== 1
+                                            ? <div className="text-[10px] text-muted-foreground/60">×{fm.takeProfit.toFixed(2)} fork</div>
+                                            : npcEnabled && tTP !== null && Math.abs(tTP - cTP) > ACTIVE_RULE_EPSILON.takeProfitThreshold
+                                              ? <div className="text-[10px] text-emerald-300/60">→ {(tTP * 100).toFixed(1)}%</div>
+                                              : <div className="text-[10px] text-muted-foreground/50">D · optimal</div>
                                           }
                                         </div>
                                       </div>
+
+                                      {/* ADR-020: Compact blend-rate-Slider-Reihe (4-col) */}
+                                      <div className={`grid grid-cols-4 gap-1.5 transition-opacity ${npcEnabled ? 'opacity-100' : 'opacity-40 pointer-events-none'}`}>
+                                        {blendRules.map(({ rule, label, key, bounds }) => {
+                                          const val = npc[key] as number;
+                                          return (
+                                            <div
+                                              key={rule}
+                                              className="rounded bg-muted/30 border border-border/50 p-1.5 space-y-0.5 cursor-help"
+                                              onMouseEnter={(e) => tooltip.show(`Blend-Rate für Regel ${rule}. Höher = schnellere Konvergenz zum Zielwert, aber unruhiger. Niedriger = träger, aber stabiler. Default: ${((DEFAULT_NOVAPULSE_CONFIG[key] as number) * 100).toFixed(0)}%.`, e)}
+                                              onMouseMove={(e) => tooltip.move(e)}
+                                              onMouseLeave={() => tooltip.hide()}
+                                            >
+                                              <div className="flex items-baseline justify-between gap-1">
+                                                <span className="text-[10px] font-bold uppercase text-muted-foreground truncate">{label}</span>
+                                                <span className="text-[10px] font-mono font-bold text-primary tabular-nums">{Math.round(val * 100)}%</span>
+                                              </div>
+                                              <input
+                                                type="range"
+                                                min={bounds.min}
+                                                max={bounds.max}
+                                                step={0.01}
+                                                value={val}
+                                                onChange={(e) => updateNpc({ [key]: Number(e.target.value) } as Partial<NovaPulseConfig>)}
+                                                className="w-full accent-primary cursor-pointer"
+                                                style={{ height: '3px' }}
+                                              />
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                      {novaPulseDirty && (
+                                        <div className="flex items-center justify-between gap-2 pt-1 border-t border-border/30">
+                                          <span className="text-[10px] text-amber-400 italic">Ungespeicherte Änderungen — „Speichern" klicken.</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => saveBotSettings(selectedBot?.id ?? '')}
+                                            className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-primary/20 border border-primary/40 text-primary hover:bg-primary/30"
+                                          >
+                                            Speichern
+                                          </button>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+
+                                {/* PAET Self-Optimization — only for paet strategy (ADR-021) */}
+                                {selectedBot.strategyType === 'paet' && (() => {
+                                  const indVals = botIndicators[selectedBot?.id]?.latestValues ?? {};
+                                  const sigma = indVals['paet_sigma'];
+                                  const period = indVals['paet_period'];
+                                  const omega = indVals['paet_omega'];
+                                  const velocity = indVals['paet_velocity'];
+                                  const acceleration = indVals['paet_acceleration'];
+
+                                  const baseSettings = selectedBot.strategyConfig?.paet_settings;
+                                  // Live-Werte aus activeStrategyConfig.paet_settings (Detector hat Priorität,
+                                  // da PAET-Adaptation alle 30 Ticks darauf schreibt).
+                                  const liveSettings = (selectedBot as any).strategyConfig?.paet_settings ?? {};
+                                  const cSTW = liveSettings.stl_trend_window          ?? baseSettings?.stl_trend_window          ?? 60;
+                                  const cCT  = liveSettings.collapse_threshold_pct    ?? baseSettings?.collapse_threshold_pct    ?? 0.25;
+                                  const cEVT = liveSettings.evacuation_ticks          ?? baseSettings?.evacuation_ticks          ?? 3;
+                                  const cOM  = liveSettings.false_alarm_penalty_omega ?? baseSettings?.false_alarm_penalty_omega ?? 1.5;
+                                  const baseSTW = baseSettings?.stl_trend_window;
+                                  const baseCT  = baseSettings?.collapse_threshold_pct;
+                                  const baseEVT = baseSettings?.evacuation_ticks;
+                                  const baseOM  = baseSettings?.false_alarm_penalty_omega;
+
+                                  const hasData = !isNaN(period) && period > 1 && !isNaN(sigma) && sigma > 1e-6;
+
+                                  // ADR-021: paetConfig aus Draft oder Backend-State.
+                                  const pc: PaetSelfOptConfig = botSettingsDraft.strategyConfigDraft?.paet_settings?.paetConfig
+                                    ?? baseSettings?.paetConfig
+                                    ?? DEFAULT_PAET_SELFOPT;
+                                  const pcEnabled = pc.enabled !== false;
+
+                                  // PAET hat keine Target-Berechnung im Frontend (kein Dual-Source).
+                                  // Live-Badge-Logik basiert auf Live vs. User-Preset direkt.
+                                  const activeRules = pcEnabled ? [
+                                    baseSTW !== undefined && Math.abs(cSTW - baseSTW) > PAET_ACTIVE_RULE_EPSILON.stl_trend_window,
+                                    baseCT  !== undefined && Math.abs(cCT  - baseCT)  > PAET_ACTIVE_RULE_EPSILON.collapse_threshold_pct,
+                                    baseEVT !== undefined && Math.abs(cEVT - baseEVT) > PAET_ACTIVE_RULE_EPSILON.evacuation_ticks,
+                                    baseOM  !== undefined && Math.abs(cOM  - baseOM)  > PAET_ACTIVE_RULE_EPSILON.false_alarm_penalty_omega,
+                                  ].filter(Boolean).length : 0;
+
+                                  const reason = !pcEnabled
+                                    ? 'Self-Optimization deaktiviert — Basis-PAET-Settings aus dem User-Preset bleiben unverändert.'
+                                    : !hasData
+                                      ? 'Warming up — PAET-Indikatoren noch nicht stabil (FFT-Periode unbekannt).'
+                                      : activeRules === 0
+                                        ? 'Converged — alle 4 programmatischen PAET-Parameter am User-Preset.'
+                                        : `${activeRules} rule${activeRules > 1 ? 's' : ''} converging toward STL/FFT-derived targets`;
+
+                                  // ADR-021: Update-Helper. Schreibt in den Strategy-Draft und
+                                  // markiert als dirty. Persistenz via /strategy-Endpoint (s. saveBotSettings).
+                                  const updatePc = (patch: Partial<PaetSelfOptConfig>) => {
+                                    const next: PaetSelfOptConfig = { ...pc, ...patch };
+                                    setBotSettingsDraft(p => {
+                                      const scd = p.strategyConfigDraft;
+                                      if (!scd) return p;
+                                      return {
+                                        ...p,
+                                        strategyConfigDraft: {
+                                          ...scd,
+                                          paet_settings: {
+                                            ...(scd.paet_settings ?? {}),
+                                            paetConfig: next,
+                                          },
+                                        },
+                                      };
+                                    });
+                                    setPaetDirty(true);
+                                  };
+
+                                  const handleMasterToggle = async () => {
+                                    const nextEnabled = !pcEnabled;
+                                    if (nextEnabled) {
+                                      updatePc({ enabled: true });
+                                      return;
+                                    }
+                                    const res = await confirm({
+                                      title: 'PAET Self-Optimization deaktivieren?',
+                                      message: 'Die zuletzt konvergierten PAET-Anpassungen (stl_trend_window, collapse_threshold_pct, evacuation_ticks, ω-Baseline) werden verworfen. Der Bot läuft ab jetzt mit den unveränderten Basis-Settings aus dem User-Preset weiter.',
+                                      confirmLabel: 'Deaktivieren & Zurücksetzen',
+                                      cancelLabel: 'Abbrechen',
+                                      variant: 'warning',
+                                    });
+                                    if (!res.confirmed) return;
+                                    updatePc({ enabled: false });
+                                    try {
+                                      // ADR-022 (I3): vor Write-Back sicherstellen, dass das
+                                      // Frontend-Image synchronisiert ist (verhindert veraltete
+                                      // Parameter nach Visibility-Pause / Delta-Lücke).
+                                      await ensureResyncedBeforeWrite();
+                                      await fetch(`${getApiBase()}/api/bots/${selectedBot?.id}/adaptations/reset`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ scope: 'paet' }),
+                                      });
+                                    } catch (e) {
+                                      console.warn('[SelfOpt PAET] Reset-Endpoint fehlgeschlagen:', e);
+                                    }
+                                  };
+
+                                  const handleResetAdapted = async () => {
+                                    const res = await confirm({
+                                      title: 'Konvergierte PAET-Werte zurücksetzen?',
+                                      message: 'Die persistierten PAET-Anpassungen und der live-ω werden gelöscht. Der Bot konvergiert beim nächsten 30-Tick-Zyklus neu von den aktuellen Basis-Settings.',
+                                      confirmLabel: 'Zurücksetzen',
+                                      cancelLabel: 'Abbrechen',
+                                      variant: 'info',
+                                    });
+                                    if (!res.confirmed) return;
+                                    try {
+                                      // ADR-022 (I3): vor Write-Back sicherstellen, dass das
+                                      // Frontend-Image synchronisiert ist (verhindert veraltete
+                                      // Parameter nach Visibility-Pause / Delta-Lücke).
+                                      await ensureResyncedBeforeWrite();
+                                      await fetch(`${getApiBase()}/api/bots/${selectedBot?.id}/adaptations/reset`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ scope: 'paet' }),
+                                      });
+                                    } catch (e) {
+                                      console.warn('[SelfOpt PAET] Reset-Endpoint fehlgeschlagen:', e);
+                                    }
+                                  };
+
+                                  const paetBlendRules: Array<{ rule: string; label: string; key: keyof PaetSelfOptConfig; bounds: { min: number; max: number } }> = [
+                                    { rule: 'R1', label: 'R1 · Window',   key: 'blendRateR1',   bounds: PAET_BLEND_RATE_BOUNDS.R1 },
+                                    { rule: 'R2', label: 'R2 · Collapse',  key: 'blendRateR2',   bounds: PAET_BLEND_RATE_BOUNDS.R2 },
+                                    { rule: 'G',  label: 'G · ω-Guard',    key: 'blendRateGuard', bounds: PAET_BLEND_RATE_BOUNDS.Guard },
+                                  ];
+
+                                  return (
+                                    <div className={`rounded-lg border p-3 space-y-2.5 transition-colors ${pcEnabled ? 'bg-violet-500/5 border-violet-500/15' : 'bg-muted/10 border-border/40'}`}>
+                                      {/* Header */}
+                                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                                        <div className="flex items-center gap-1.5">
+                                          <Wand2 className={`h-3.5 w-3.5 ${pcEnabled ? 'text-violet-400/70' : 'text-muted-foreground/40'}`} />
+                                          <span className="text-sm font-bold uppercase text-muted-foreground tracking-wider">Self-Optimization</span>
+                                          <span className={`text-[10px] font-black uppercase px-1.5 py-0.5 rounded border ${pcEnabled ? 'bg-violet-500/20 text-violet-300 border-violet-500/30' : 'bg-muted text-muted-foreground border-border'}`}>
+                                            PAET
+                                          </span>
+                                        </div>
+                                        <div className="flex items-center gap-1.5">
+                                          <button
+                                            type="button"
+                                            onClick={handleMasterToggle}
+                                            title={pcEnabled ? 'Self-Optimization deaktivieren (löscht konvergierte Werte)' : 'Self-Optimization aktivieren'}
+                                            className={`flex items-center gap-1 text-[10px] font-black uppercase px-1.5 py-0.5 rounded border transition-colors ${
+                                              pcEnabled
+                                                ? 'bg-violet-500/15 text-violet-300 border-violet-500/30 hover:bg-violet-500/25'
+                                                : 'bg-muted text-muted-foreground border-border hover:bg-muted/60'
+                                            }`}
+                                          >
+                                            {pcEnabled ? <Power className="h-3 w-3" /> : <PowerOff className="h-3 w-3" />}
+                                            {pcEnabled ? 'AN' : 'AUS'}
+                                          </button>
+                                          {pcEnabled && hasData && activeRules > 0 && (
+                                            <span className="text-[10px] font-black uppercase px-1.5 py-0.5 rounded border text-amber-400 bg-amber-500/15 border-amber-500/30">
+                                              Calibrating
+                                            </span>
+                                          )}
+                                          <span
+                                            className="text-[10px] font-mono text-muted-foreground cursor-help"
+                                            onMouseEnter={(e) => tooltip.show('Anzahl PAET-Regeln mit aktiver Konvergenz. R1 (STL-Trend-Fenster), R2 (Collapse-Schwelle), R3 (Evacuation-Ticks) und ω-Guard laufen alle 30 Ticks und passen die 4 programmatischen PAET-Parameter automatisch an.', e)}
+                                            onMouseMove={(e) => tooltip.move(e)}
+                                            onMouseLeave={() => tooltip.hide()}
+                                          >{activeRules}/4 rules active</span>
+                                          {pcEnabled && (
+                                            <button
+                                              type="button"
+                                              onClick={handleResetAdapted}
+                                              title="Persistierte konvergierte PAET-Werte zurücksetzen"
+                                              className="flex items-center text-[10px] font-bold text-muted-foreground hover:text-foreground transition-colors"
+                                            >
+                                              <RotateCcw className="h-3 w-3" />
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      {/* Reason line */}
+                                      <div className={`text-xs italic leading-tight pl-0.5 ${pcEnabled ? 'text-muted-foreground/70' : 'text-muted-foreground/50'}`}>{reason}</div>
+
+                                      {/* 5 Indicator-Cards (σ, Period, Velocity, Acceleration, ω) */}
+                                      <div className={`grid grid-cols-5 gap-1.5 transition-opacity ${pcEnabled ? 'opacity-100' : 'opacity-50'}`}>
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show('Residual-Standardabweichung σ aus der STL-Zerlegung. Treibt R2 (Collapse-Schwelle). Höhere σ → höhere Mindest-Collapse-Schwelle.', e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">σ Residual</div>
+                                          <div className={`text-base font-black font-mono ${!hasData ? 'text-zinc-600' : sigma > 0.5 ? 'text-rose-400' : sigma < 0.01 ? 'text-zinc-400' : 'text-violet-400'}`}>
+                                            {hasData ? sigma.toFixed(6) : '—'}
+                                          </div>
+                                          <div className="text-[10px] text-muted-foreground/50">R2 input</div>
+                                        </div>
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show('FFT-detektierte dominante Zykluslänge in Kerzen. Treibt R1 (STL-Trend-Fenster = 2×Periode+10) und R3 (Evac-Ticks = round(Periode/15)).', e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Period</div>
+                                          <div className={`text-base font-black font-mono ${!hasData ? 'text-zinc-600' : 'text-violet-400'}`}>
+                                            {hasData ? `${Math.round(period)}c` : '—'}
+                                          </div>
+                                          <div className="text-[10px] text-muted-foreground/50">R1 + R3 input</div>
+                                        </div>
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show('Velocity der Trend-Komponente (dv/dt). Wird im Frontend nur angezeigt; R1/R2/R3 nutzen σ + Periode, nicht Velocity direkt.', e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Velocity</div>
+                                          <div className={`text-base font-black font-mono ${!isNaN(velocity) ? (velocity < 0 ? 'text-red-400' : 'text-emerald-400') : 'text-zinc-600'}`}>
+                                            {!isNaN(velocity) ? velocity.toFixed(6) : '—'}
+                                          </div>
+                                          <div className="text-[10px] text-muted-foreground/50">diagnostic</div>
+                                        </div>
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show('Acceleration der Trend-Komponente (d²v/dt²). Diagnostisch — kein Eingang in die 4 Regeln.', e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">Acceleration</div>
+                                          <div className={`text-base font-black font-mono ${!isNaN(acceleration) ? (acceleration < 0 ? 'text-orange-400' : 'text-zinc-400') : 'text-zinc-600'}`}>
+                                            {!isNaN(acceleration) ? acceleration.toFixed(6) : '—'}
+                                          </div>
+                                          <div className="text-[10px] text-muted-foreground/50">diagnostic</div>
+                                        </div>
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show('False-Alarm-Penalty ω (self-calibrating). Treibt den ω-Guard: wenn live-ω um >0.5 vom gespeicherten Baseline abweicht, wird Baseline um cfg.blendRateGuard (default 5%) Richtung live-ω genudged.', e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="text-[11px] font-bold uppercase text-muted-foreground">ω Live</div>
+                                          <div className={`text-base font-black font-mono ${!isNaN(omega) ? 'text-amber-400' : 'text-zinc-600'}`}>
+                                            {!isNaN(omega) ? omega.toFixed(2) : '—'}
+                                          </div>
+                                          <div className="text-[10px] text-muted-foreground/50">Guard input</div>
+                                        </div>
+                                      </div>
+
+                                      {/* 4 PAET-Regel-Karten (R1/R2/R3/Guard) mit Live-Badges */}
+                                      <div className={`grid grid-cols-4 gap-1.5 transition-opacity ${pcEnabled ? 'opacity-100' : 'opacity-50'}`}>
+                                        {/* R1: STL Trend Window */}
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show(`Regel R1 — STL-Trend-Fenster. Ziel = round(2 × Periode) + 10, geclampt auf [20, 200]. Langsamer Blend (default 30%) verhindert STL-Instabilität bei abrupten Fenster-Wechseln.`, e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="flex items-center justify-between">
+                                            <div className="text-[11px] font-bold uppercase text-muted-foreground">STW Window</div>
+                                            {baseSTW !== undefined && Math.abs(baseSTW - cSTW) > PAET_ACTIVE_RULE_EPSILON.stl_trend_window && (
+                                              <span
+                                                className="text-[8px] font-bold uppercase px-1 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30"
+                                                title={`User-Preset: ${baseSTW}`}
+                                              >live</span>
+                                            )}
+                                          </div>
+                                          <div className="text-base font-black font-mono text-foreground">{cSTW}</div>
+                                          <div className="text-[10px] text-muted-foreground/50">R1 · ticks</div>
+                                        </div>
+                                        {/* R2: Collapse Threshold */}
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show(`Regel R2 — Collapse-Schwelle. Ziel = 2 × (σ × volatility_sigma_multiplier / T(t)), geclampt auf [0.05, 0.50]. Asymmetrischer Blend: schnell nach oben bei Lärm (default 20%), langsam nach unten (× 0.5 = 10%).`, e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="flex items-center justify-between">
+                                            <div className="text-[11px] font-bold uppercase text-muted-foreground">Collapse</div>
+                                            {baseCT !== undefined && Math.abs(baseCT - cCT) > PAET_ACTIVE_RULE_EPSILON.collapse_threshold_pct && (
+                                              <span
+                                                className="text-[8px] font-bold uppercase px-1 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                                                title={`User-Preset: ${(baseCT * 100).toFixed(1)}%`}
+                                              >live</span>
+                                            )}
+                                          </div>
+                                          <div className="text-base font-black font-mono text-foreground">{(cCT * 100).toFixed(1)}%</div>
+                                          <div className="text-[10px] text-muted-foreground/50">R2 · threshold</div>
+                                        </div>
+                                        {/* R3: Evacuation Ticks (kein Slider, direkter Set) */}
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show(`Regel R3 — Evacuation-Ticks. Ziel = round(Periode / 15), geclampt auf [1, 8]. Wird DIREKT gesetzt (kein Blend-Slider) — kleine Range macht graduellen Blend wertlos.`, e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="flex items-center justify-between">
+                                            <div className="text-[11px] font-bold uppercase text-muted-foreground">Evac Ticks</div>
+                                            {baseEVT !== undefined && baseEVT !== cEVT && (
+                                              <span
+                                                className="text-[8px] font-bold uppercase px-1 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                                                title={`User-Preset: ${baseEVT}`}
+                                              >live</span>
+                                            )}
+                                          </div>
+                                          <div className="text-base font-black font-mono text-foreground">{cEVT}</div>
+                                          <div className="text-[10px] text-muted-foreground/50">R3 · direct</div>
+                                        </div>
+                                        {/* Guard: ω-Baseline */}
+                                        <div
+                                          className="rounded bg-muted/30 border border-border/50 p-2 space-y-0.5 cursor-help"
+                                          onMouseEnter={(e) => tooltip.show(`ω-Guard — Baseline-Nudge. Wenn |live-ω − gespeicherte Baseline| > 0.5: Baseline um cfg.blendRateGuard (default 5%) Richtung live-ω, geclampt auf [0.5, 5.0]. Sehr langsam als Sicherheitsnetz.`, e)}
+                                          onMouseMove={(e) => tooltip.move(e)}
+                                          onMouseLeave={() => tooltip.hide()}
+                                        >
+                                          <div className="flex items-center justify-between">
+                                            <div className="text-[11px] font-bold uppercase text-muted-foreground">ω Baseline</div>
+                                            {baseOM !== undefined && Math.abs(baseOM - cOM) > PAET_ACTIVE_RULE_EPSILON.false_alarm_penalty_omega && (
+                                              <span
+                                                className="text-[8px] font-bold uppercase px-1 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                                                title={`User-Preset: ${baseOM.toFixed(2)}`}
+                                              >live</span>
+                                            )}
+                                          </div>
+                                          <div className="text-base font-black font-mono text-foreground">{cOM.toFixed(2)}</div>
+                                          <div className="text-[10px] text-muted-foreground/50">Guard · nudge</div>
+                                        </div>
+                                      </div>
+
+                                      {/* 3 Blend-Rate-Slider (R1, R2, Guard) */}
+                                      <div className={`grid grid-cols-3 gap-1.5 transition-opacity ${pcEnabled ? 'opacity-100' : 'opacity-40 pointer-events-none'}`}>
+                                        {paetBlendRules.map(({ rule, label, key, bounds }) => {
+                                          const val = pc[key] as number;
+                                          return (
+                                            <div
+                                              key={rule}
+                                              className="rounded bg-muted/30 border border-border/50 p-1.5 space-y-0.5 cursor-help"
+                                              onMouseEnter={(e) => tooltip.show(`Blend-Rate für ${rule}. Höher = schnellere Konvergenz zum Zielwert, aber unruhiger. Niedriger = träger, aber stabiler. Default: ${(Number(DEFAULT_PAET_SELFOPT[key]) * 100).toFixed(0)}%.`, e)}
+                                              onMouseMove={(e) => tooltip.move(e)}
+                                              onMouseLeave={() => tooltip.hide()}
+                                            >
+                                              <div className="flex items-baseline justify-between gap-1">
+                                                <span className="text-[10px] font-bold uppercase text-muted-foreground truncate">{label}</span>
+                                                <span className="text-[10px] font-mono font-bold text-primary tabular-nums">{Math.round(val * 100)}%</span>
+                                              </div>
+                                              <input
+                                                type="range"
+                                                min={bounds.min}
+                                                max={bounds.max}
+                                                step={0.01}
+                                                value={val}
+                                                onChange={(e) => updatePc({ [key]: Number(e.target.value) } as Partial<PaetSelfOptConfig>)}
+                                                className="w-full accent-primary cursor-pointer"
+                                                style={{ height: '3px' }}
+                                              />
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                      {paetDirty && (
+                                        <div className="flex items-center justify-between gap-2 pt-1 border-t border-border/30">
+                                          <span className="text-[10px] text-amber-400 italic">Ungespeicherte Änderungen — „Speichern" klicken.</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => saveBotSettings(selectedBot?.id ?? '')}
+                                            className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-primary/20 border border-primary/40 text-primary hover:bg-primary/30"
+                                          >
+                                            Speichern
+                                          </button>
+                                        </div>
+                                      )}
                                     </div>
                                   );
                                 })()}

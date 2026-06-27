@@ -22,6 +22,9 @@ export const PAET_DEFAULTS: Required<PaetSettings> = {
   entry_mode: 'once',
   entry_cooldown_ticks: 10,
   stop_loss_pct: 0.08,
+  // ADR-021: paetConfig ist optional; wenn nicht gesetzt, fällt das Backend
+  // via normalizePaetSelfOptConfig(undefined) auf DEFAULT_PAET_SELFOPT zurück.
+  paetConfig: undefined as never,
 };
 
 // Projects the number of candles until price reaches `vCollapse` given current

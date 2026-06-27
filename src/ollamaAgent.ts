@@ -471,22 +471,22 @@ function mixPatternSettings(
   if (mix <= 0) return {};
   if (mix >= 1) return { ...target };
   const out: Partial<PatternSettings> = {};
-  const keys: (keyof PatternSettings)[] = [
+  const keys = [
     'floorWindow',
     'spikeThreshold',
     'sellDropThreshold',
     'cooldownTicks',
     'takeProfitThreshold',
-  ];
+  ] as const;
   for (const k of keys) {
     const cur = current[k] as number;
     const tgt = target[k] as number | undefined;
     if (typeof tgt !== 'number' || !Number.isFinite(tgt)) continue;
     if (typeof cur !== 'number' || !Number.isFinite(cur)) {
-      out[k] = tgt;
+      (out as Record<string, number>)[k] = tgt;
       continue;
     }
-    out[k] = cur + (tgt - cur) * mix;
+    (out as Record<string, number>)[k] = cur + (tgt - cur) * mix;
   }
   return out;
 }

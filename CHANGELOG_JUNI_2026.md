@@ -320,10 +320,51 @@ sofort die Startbasis für den nächsten Blend.
 
 ---
 
+## 27. Juni 2026 — Synthetische Cross-Asset-Strategie: Analyse, Pivot & Phase-0-Verwerfung (ADR-023/024)
+
+**Status:** Untersucht & verworfen (kein Bot gebaut) — Validierungs-Tooling im Repo behalten
+
+### Anlass
+User-Konzept aus `docs/Synthetische_Cross_Asset-Optionsstrat.md` (Treasury-besicherter
+BTC-Kredit mit „Strategic Default") sollte als Wallet-Bot realisiert werden.
+
+### Untersuchung & Ergebnis (3 Stufen)
+1. **Ökonomie-Teardown (ADR-023):** Das Konzept ist keine Win-Win-Wette, sondern ein
+   gedeckelter Netto-BTC-Short. Equity = `125 − 25·m`; der „Bull-Case-Gewinn" ist ein
+   Rechenfehler (erst > 3× BTC, lange nach Zwangsliquidation bei m≈1,6). Reine
+   RWA-Variante zudem nicht wallet-tauglich (OUSG permissioned/KYC, dünne BTC-Borrow-Märkte).
+2. **Pivot (ADR-024):** Profitabilitäts-Validierung ergab negativen EV der Netto-Short-Form.
+   Umschwenk auf den delta-neutralen Funding-Carry-Trade (long cbBTC-Spot + short Drift-Perp),
+   Edge = adaptives Funding-Gate. **Backtest-First als Pflicht-Gate (Phase 0).**
+3. **Phase 0 — empirisch widerlegt:** Backtest auf **echten ~2 Jahren BTCUSDT-Funding**
+   (2160× 8h). Ø Funding 482 bps p.a., 80 % positiv. Das adaptive Gate **verliert** bei
+   jeder Schwelle (−2,8…−7,3 %) durch Fee-Churn (32–61 Roundtrips à $100). Nur naive
+   „immer delta-neutral" verdient (+4,62 % Alpha = ~9,1 % total) ≈ **sUSDe (9 %)**.
+   → **Verdikt MARGINAL. Beschluss: passiv sUSDe halten statt Bot bauen.**
+
+### Betroffene/Neue Dateien
+- `docs/decisions/adr-023-cross-asset-synthetic-hedge.md` (NEU, Status: Ersetzt durch ADR-024)
+- `docs/decisions/adr-024-delta-neutral-funding-carry.md` (NEU, Status: Verworfen — Phase 0)
+- `docs/decisions/README.md` (Index + Kurzfassungen 020/021/023/024)
+- `src/strategy/fundingCarry.ts` (NEU, Pure-Core + wallet-realistisches Kostenmodell)
+- `src/backtest/fundingDataLoader.ts` (NEU, echte Binance-Funding-Historie + Cache + Fallback)
+- `src/__tests__/fundingCarry.backtest.ts` (NEU, Phase-0-Gate)
+- `src/__tests__/fundingCarry.test.ts` (NEU, 18 Unit-Tests, grün)
+- `src/scripts/createCarryWallet.ts` (NEU, dedizierte Carry-Wallet → `data/wallets/`)
+- `.gitignore` (`data/wallets/`, `data/backtest/`)
+
+### Lehre (für spätere Entwicklungen)
+Threshold-Gating auf einem oszillierenden Carry-Signal ist mit Re-Entry-Fees
+**wertvernichtend** — Fee-Churn schlägt den Zusatz-Carry. Reproduzieren:
+`npx tsx src/__tests__/fundingCarry.backtest.ts --refresh`.
+
+---
+
 ## Zusammenfassung
 
 | Feature | Status | Dateien |
 |---------|--------|---------|
+| Cross-Asset-Strategie: Analyse + Phase-0-Verwerfung (ADR-023/024) | 🛑 Untersucht & verworfen | `docs/decisions/adr-023*.md`, `docs/decisions/adr-024*.md`, `src/strategy/fundingCarry.ts`, `src/backtest/fundingDataLoader.ts`, `src/__tests__/fundingCarry.*`, `src/scripts/createCarryWallet.ts` |
 | Auto-Start Default On | ✅ Implementiert | `frontend/src/App.tsx` |
 | Scalping Start-Cooldown | ✅ Implementiert | `src/patternDetector.ts`, `src/strategyEngine.ts`, `src/botInstance.ts`, `src/strategyTemplates/scalping.json` |
 | Nova Pulse Scalper (Adaptive Fork) | ✅ Implementiert | `src/strategyForks/`, `src/marketContext.ts`, `src/strategyEngine.ts`, `src/strategyTemplates/scalping-adaptive.json`, `frontend/src/components/StrategyChipPicker.tsx`, `frontend/src/components/CreateBotDialog.tsx`, `frontend/src/lib/botUtils.tsx` |

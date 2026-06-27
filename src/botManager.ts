@@ -1,5 +1,6 @@
 import { BotInstance, BotState } from './botInstance.js';
-import { db, wipeLiveFeed, setBotStrategy, getStrategy, getBotStrategyId } from './db.js';
+import { db, wipeLiveFeed, setBotStrategy, getStrategy, getBotStrategyId, deleteSetting, getBotStrategyConfig } from './db.js';
+import type { StrategyConfig } from './strategyTypes.js';
 import { DEFAULT_SETTINGS, PatternSettings } from './patternDetector.js';
 import { randomUUID } from 'crypto';
 import { loadOrCreateKeypair } from './wallet.js';
@@ -44,8 +45,25 @@ export class BotManager {
       );
       // Load assigned strategy first so per-bot persisted settings can override template defaults
       const strategyId = getBotStrategyId(bot.id);
-      const strategyConfig = strategyId ? getStrategy(strategyId) : undefined;
-      if (strategyConfig) bot.updateStrategy(strategyConfig);
+      // ADR-021: Per-Bot strategyConfig hat Vorrang vor Template. Verhindert,
+      // dass Self-Opt-Tweaks eines Bots auf andere Bots derselben Strategie
+      // durchschlagen (Cross-Bot-Leak via strategies-Template).
+      const perBotStrategyConfig = getBotStrategyConfig(bot.id);
+      let strategyConfig: StrategyConfig | null = null;
+      if (perBotStrategyConfig) {
+        try {
+          const parsed = JSON.parse(perBotStrategyConfig) as StrategyConfig;
+          strategyConfig = parsed;
+          bot.updateStrategy(parsed);
+        } catch (e) {
+          console.warn(`[BotManager] Per-Bot strategyConfig fuer Bot ${bot.id} kaputt, fallback auf Template: ${(e as Error).message}`);
+          strategyConfig = strategyId ? getStrategy(strategyId) : null;
+          if (strategyConfig) bot.updateStrategy(strategyConfig);
+        }
+      } else {
+        strategyConfig = strategyId ? getStrategy(strategyId) : null;
+        if (strategyConfig) bot.updateStrategy(strategyConfig);
+      }
 
       // ADR-014: best-effort migration. Legacy bots were persisted with
       // settings = DEFAULT_SETTINGS while they actually traded on the assigned
@@ -238,6 +256,34 @@ export class BotManager {
       db.prepare('UPDATE bots SET settings = ? WHERE id = ?').run(JSON.stringify(bot.getSettings()), id);
     }
     console.log(`[BotManager] Alle ${this.bots.size} Bots mit neuen Settings aktualisiert`);
+  }
+
+  /**
+   * ADR-020: Persistierte Programm-Anpassungen für einen Bot löschen.
+   * Wird vom Frontend genutzt, wenn der User Self-Optimization deaktiviert
+   * oder zurücksetzen will, damit die Werte aus dem User-Preset wieder
+   * reinlaufen (statt der konvergierten Delta-Werte).
+   */
+  public resetBotAdaptations(id: string, scope: 'novapulse' | 'paet' | 'all'): { removed: string[] } {
+    const removed: string[] = [];
+    const targets: string[] = [];
+    if (scope === 'novapulse' || scope === 'all') targets.push(`novapulse_adapted_${id}`);
+    if (scope === 'paet' || scope === 'all') {
+      targets.push(`paet_adapted_${id}`);
+      // ADR-021 (B1-Fix): paet_omega_<id> muss mit gelöscht werden, sonst
+      // bleibt der live-kalibrierte Omega-Wert persistent und der Toggle AUS
+      // wirkt nur halb.
+      targets.push(`paet_omega_${id}`);
+    }
+    for (const key of targets) {
+      try {
+        deleteSetting(key);
+        removed.push(key);
+      } catch (e) {
+        console.warn(`[BotManager] Reset ${key} fehlgeschlagen: ${(e as Error).message}`);
+      }
+    }
+    return { removed };
   }
 
   /**

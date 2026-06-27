@@ -27,59 +27,73 @@ const DEFAULT_GLOBAL_SETTINGS = {
   paperMode: true,
 };
 
-// Performance: Response Caching für häufige GET-Requests
-interface ResponseCache<T> {
-  data: T;
-  timestamp: number;
-  ttl: number;
-}
+// ADR-022 (M3): Gebundener TTL+LRU-Cache. Ersetzt die früheren unbounded Maps
+// (responseCache Map + bodyParserCache mit Date.now()-Key, die über Stunden den
+// Heap aufblähten). max begrenzt die Einträge; abgelaufene werden lazily beim
+// get() entfernt, überschüssige am ältesten Ende (Map-Insertion-Order) evictet.
+class BoundedTTLCache {
+  private map = new Map<string, { data: any; expiresAt: number }>();
+  constructor(private readonly max: number) {}
 
-const responseCache = new Map<string, ResponseCache<any>>();
-
-function getCachedResponse<T>(key: string): T | null {
-  const cached = responseCache.get(key);
-  if (cached && Date.now() - cached.timestamp < cached.ttl) {
-    return cached.data as T;
+  get(key: string): any | null {
+    const entry = this.map.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+      this.map.delete(key);
+      return null;
+    }
+    // LRU: Position auffrischen.
+    this.map.delete(key);
+    this.map.set(key, entry);
+    return entry.data;
   }
-  responseCache.delete(key);
-  return null;
-}
 
-function setCachedResponse<T>(key: string, data: T, ttlMs: number): void {
-  responseCache.set(key, { data, timestamp: Date.now(), ttl: ttlMs });
-  // Cleanup old entries periodically
-  if (responseCache.size > 100) {
-    const now = Date.now();
-    for (const [k, v] of responseCache.entries()) {
-      if (now - v.timestamp > v.ttl) {
-        responseCache.delete(k);
-      }
+  set(key: string, data: any, ttlMs: number): void {
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, { data, expiresAt: Date.now() + ttlMs });
+    while (this.map.size > this.max) {
+      const oldestKey = this.map.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.map.delete(oldestKey);
     }
   }
 }
 
-// Performance: Request Body Parser mit Cache
-const bodyParserCache = new Map<string, any>();
-let lastBodyParseTime = 0;
-const BODY_PARSE_CACHE_TTL = 100; // 100ms
+const responseCache = new BoundedTTLCache(256);
 
-async function parseBody(req: http.IncomingMessage): Promise<any> {
-  const cacheKey = `${req.method}:${req.url}:${Date.now() - lastBodyParseTime < BODY_PARSE_CACHE_TTL ? 'cached' : Date.now()}`;
-  
-  // Check cache for rapid duplicate requests
-  if (bodyParserCache.has(cacheKey)) {
-    return bodyParserCache.get(cacheKey);
+function getCachedResponse<T>(key: string): T | null {
+  return responseCache.get(key) as T | null;
+}
+
+function setCachedResponse<T>(key: string, data: T, ttlMs: number): void {
+  responseCache.set(key, data, ttlMs);
+}
+
+// ADR-022 (M1): Vergleicht zwei Werte auf Wertgleichheit. Primitive direkt,
+// Objekte/Arrays via JSON.stringify (Top-Level-Felder wie settings/stats/
+// strategyConfig werden als ganze Werte verglichen — siehe Delta-Diff).
+function jsonEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (a === null || b === null) return a === b;
+  if (typeof a !== 'object') return a === b;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
   }
-  
+}
+
+// ADR-022 (M3): Request Body Parser OHNE Cache. Der frühere bodyParserCache
+// nutzte Date.now() im Key → jeder Request erzeugte einen neuen Eintrag →
+// unbounded growth. Body-Parsing ist billig, Caching hier bringt keinen Wert.
+async function parseBody(req: http.IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
     let body = '';
     req.on('data', chunk => { body += chunk; });
     req.on('end', () => {
       try {
-        const parsed = body ? JSON.parse(body) : {};
-        lastBodyParseTime = Date.now();
-        bodyParserCache.set(cacheKey, parsed);
-        resolve(parsed);
+        resolve(body ? JSON.parse(body) : {});
       } catch (e: any) {
         reject(new Error(`Invalid JSON: ${e.message}`));
       }
@@ -95,9 +109,11 @@ export class BotServer {
   private tokenService: TokenService;
   private priceFeed: PriceFeed;
   private ollamaAgent: OllamaAgent | null = null;
-  private lastStateCache: any = null;
-  private lastStateCacheTime: number = 0;
-  private readonly STATE_CACHE_TTL = 100; // 100ms für SSE State Updates
+  // ADR-022 (M1): Delta-State-Baseline. lastSentStateById hält den zuletzt an
+  // die Clients serialisierten Bot-State (keyed by bot.id). stateSeq ist der
+  // monotone Sequenz-Zähler für state/state_delta Events.
+  private lastSentStateById: Map<string, any> = new Map();
+  private stateSeq = 0;
 
   constructor(botManager: BotManager, recorder: PriceRecorder, port = 3000) {
     this.botManager = botManager;
@@ -132,22 +148,78 @@ export class BotServer {
   }
 
   /**
-   * Performance: SSE Broadcast mit Throttling um Client-Überlastung zu vermeiden
+   * ADR-022 (M1): SSE Broadcast mit Throttling + Delta-Diff für 'state'.
+   *
+   * Statt jede Sekunde den VOLLSTÄNDIGEN Bot-State-Baum zu serialisieren, wird
+   * nur geändertes je Bot berechnet: Top-Level-Felder werden als ganze Werte
+   * gepatcht (I1: settings/strategyConfig bleiben ganze Objekte — wichtig für
+   * das Dirty-Tracking der Self-Opt-Panels). Strukturelle Änderungen (Bot
+   * hinzugefügt/entfernt) → Voll-State. Sequence-Brüche heilt das Frontend via
+   * Full-Resync (I2). Trading-Pfad wird nicht berührt (Display-Projektion).
    */
   private setupSSEThrottling(): void {
     let lastBroadcastTime = 0;
     const SSE_THROTTLE_MS = 200; // Lower throttle for faster UI responsiveness
-    
+
     const originalBroadcast = this.broadcast.bind(this);
     this.broadcast = (eventName: string, data: any): void => {
       const now = Date.now();
-      
-      // Throttle state events to reduce bandwidth
-      if (eventName === 'state' && now - lastBroadcastTime < SSE_THROTTLE_MS) {
+
+      // Delta-Pfad nur für 'state'; alle anderen Events unverändert.
+      if (eventName === 'state') {
+        if (now - lastBroadcastTime < SSE_THROTTLE_MS) {
+          return; // I4: Trade-Loop hat Vorrang; Throttle entlastet Clients.
+        }
+        lastBroadcastTime = now;
+
+        const fullState: any[] = Array.isArray(data) ? data : [];
+        const newById = new Map<string, any>();
+        for (const bot of fullState) {
+          if (bot && typeof bot.id === 'string') newById.set(bot.id, bot);
+        }
+
+        // Strukturelle Änderung (Bot-Set verändert) → Voll-State senden.
+        const oldIds = this.lastSentStateById;
+        let structuralChange = oldIds.size !== newById.size;
+        if (!structuralChange) {
+          for (const id of newById.keys()) {
+            if (!oldIds.has(id)) { structuralChange = true; break; }
+          }
+        }
+        if (structuralChange) {
+          this.stateSeq++;
+          originalBroadcast('state', { seq: this.stateSeq, full: true, bots: fullState });
+          this.lastSentStateById = newById;
+          return;
+        }
+
+        // Inkrementeller Diff je Bot.
+        const patches: any[] = [];
+        for (const bot of fullState) {
+          const old = oldIds.get(bot.id);
+          const patch: any = {};
+          let changed = false;
+          for (const key of Object.keys(bot)) {
+            const newVal = bot[key];
+            if (old === undefined || !jsonEqual(newVal, old[key])) {
+              patch[key] = newVal; // ganzes Feld (I1)
+              changed = true;
+            }
+          }
+          if (changed) {
+            patch.id = bot.id;
+            patches.push(patch);
+            oldIds.set(bot.id, bot);
+          }
+        }
+
+        if (patches.length > 0) {
+          this.stateSeq++;
+          originalBroadcast('state_delta', { seq: this.stateSeq, patches });
+        }
         return;
       }
-      
-      lastBroadcastTime = now;
+
       originalBroadcast(eventName, data);
     };
   }
@@ -226,15 +298,15 @@ export class BotServer {
       });
       this.sseClients.add(res);
 
-      // Send initial state with caching
-      const cachedState = getCachedResponse<any>('initial-state');
-      if (cachedState) {
-        res.write(`event: state\ndata: ${JSON.stringify(cachedState)}\n\n`);
-      } else {
-        const state = this.botManager.getAllStates();
-        setCachedResponse('initial-state', state, 1000);
-        res.write(`event: state\ndata: ${JSON.stringify(state)}\n\n`);
-      }
+      // ADR-022 (M1): Handshake sendet immer frischen Voll-State im neuen
+      // Format ({seq, full, bots}) mit aktuellem stateSeq, damit der Client
+      // eine korrekte Delta-Baseline hat. Sequence-Lücken heilt das Frontend
+      // per Full-Resync (I2).
+      const initialState = this.botManager.getAllStates();
+      this.stateSeq++;
+      res.write(`event: state\ndata: ${JSON.stringify({ seq: this.stateSeq, full: true, bots: initialState })}\n\n`);
+      // Baseline für künftige Deltas setzen.
+      this.lastSentStateById = new Map(initialState.map((b: any) => [b.id, b]));
 
       req.on('close', () => {
         this.sseClients.delete(res);
@@ -669,6 +741,29 @@ export class BotServer {
         this.broadcast('state', this.botManager.getAllStates());
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      // ADR-020: POST /api/bots/:id/adaptations/reset — gespeicherte Programm-
+      // Anpassungen löschen, sodass der User-Preset wieder reinläuft.
+      if (req.method === 'POST' && action === 'adaptations/reset') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+          try {
+            const { scope } = JSON.parse(body || '{}');
+            if (scope !== 'novapulse' && scope !== 'paet' && scope !== 'all') {
+              throw new Error(`Invalid scope: ${scope}`);
+            }
+            const result = this.botManager.resetBotAdaptations(id, scope);
+            this.broadcast('state', this.botManager.getAllStates());
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, ...result }));
+          } catch (e: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
         return;
       }
 

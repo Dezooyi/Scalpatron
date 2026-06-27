@@ -236,22 +236,36 @@ interface BotChipProps {
 // External store for current time (updates every second)
 const timeSubscribers = new Set<() => void>();
 let currentTimeCache = Date.now();
+// ADR-022 (M4): Timer läuft nur, solange mindestens ein Subscriber existiert.
+// Verhindert, dass das Sekunden-Intervall applikationsweit nie gestoppt wird.
+let timeIntervalId: ReturnType<typeof setInterval> | null = null;
+
+function startTimeTimer(): void {
+  if (timeIntervalId !== null || typeof window === "undefined") return;
+  timeIntervalId = setInterval(() => {
+    currentTimeCache = Date.now();
+    timeSubscribers.forEach(cb => cb());
+  }, 1000);
+}
+
+function stopTimeTimerIfIdle(): void {
+  if (timeIntervalId !== null && timeSubscribers.size === 0) {
+    clearInterval(timeIntervalId);
+    timeIntervalId = null;
+  }
+}
 
 function subscribeToTime(callback: () => void) {
   timeSubscribers.add(callback);
-  return () => timeSubscribers.delete(callback);
+  startTimeTimer();
+  return () => {
+    timeSubscribers.delete(callback);
+    stopTimeTimerIfIdle();
+  };
 }
 
 function getCurrentTime(): number {
   return currentTimeCache;
-}
-
-// Update time cache every second
-if (typeof window !== "undefined") {
-  setInterval(() => {
-    currentTimeCache = Date.now();
-    timeSubscribers.forEach(cb => cb());
-  }, 1000);
 }
 
 const BotUptime = memo(({ startTime, isRunning }: { startTime?: number; isRunning: boolean }) => {

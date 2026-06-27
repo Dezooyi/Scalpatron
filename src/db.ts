@@ -202,6 +202,11 @@ export function initDB() {
     `ALTER TABLE trades ADD COLUMN fee REAL DEFAULT NULL`,
     `ALTER TABLE trades ADD COLUMN slippagePct REAL DEFAULT NULL`,
     `ALTER TABLE trades ADD COLUMN source TEXT DEFAULT 'auto'`,
+    // ADR-021 (Bug-Fix Cross-Bot-Leak): per-bot strategyConfig-Override.
+    // Ohne diese Spalte teilen sich alle Bots mit gleichem strategyId denselben
+    // Config-Eintrag in der strategies-Tabelle → Self-Opt-Toggle eines Bots
+    // wirkt auf alle. Per-bot-Spalte bricht das.
+    `ALTER TABLE bots ADD COLUMN strategyConfig TEXT DEFAULT NULL`,
   ];
 
   for (const sql of migrations) {
@@ -562,6 +567,11 @@ export function getSetting(key: string, defaultValue: string): string {
 export function setSetting(key: string, value: string): void {
   const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
   stmt.run(key, value);
+}
+
+export function deleteSetting(key: string): void {
+  const stmt = db.prepare('DELETE FROM settings WHERE key = ?');
+  stmt.run(key);
 }
 
 // --- Agent Config Persistence ---
@@ -951,6 +961,18 @@ export function setBotStrategy(botId: string, strategyId: string): void {
 export function getBotStrategyId(botId: string): string | null {
   const row = db.prepare('SELECT strategyId FROM bots WHERE id = ?').get(botId) as { strategyId: string | null } | undefined;
   return row?.strategyId ?? null;
+}
+
+// ADR-021: Per-Bot strategyConfig-Override. Verhindert Cross-Bot-Leak bei
+// Strategy-Tweaks (Nova-Pulse-Config, PAET paetConfig, etc.). Wenn gesetzt,
+// überschreibt diese Spalte das Template aus der strategies-Tabelle.
+export function getBotStrategyConfig(botId: string): string | null {
+  const row = db.prepare('SELECT strategyConfig FROM bots WHERE id = ?').get(botId) as { strategyConfig: string | null } | undefined;
+  return row?.strategyConfig ?? null;
+}
+
+export function setBotStrategyConfig(botId: string, config: unknown): void {
+  db.prepare('UPDATE bots SET strategyConfig = ? WHERE id = ?').run(JSON.stringify(config), botId);
 }
 
 // --- Bot Kill-Switch Persistence ---
