@@ -208,6 +208,19 @@ export class PatternDetector {
     this.breakevenRatcheted = false;
   }
 
+  /**
+   * Position-Lifecycle für externe Gates (TimesFM Forecast-Gate): ob der
+   * Detector eine Position trackt (inSpike), wie viele Ticks gehalten wurden
+   * und welche Min-Hold-Zeit gilt. Rein lesend — ändert keinen State.
+   */
+  public getHoldState(): { inPosition: boolean; heldTicks: number; minHoldTicks: number } {
+    return {
+      inPosition: this.inSpike,
+      heldTicks: this.entryTick >= 0 ? Math.max(0, this.tickCounter - this.entryTick) : 0,
+      minHoldTicks: this.settings.minHoldTicks ?? 0,
+    };
+  }
+
   private calcFloor(history: PricePoint[]): number {
     const window = history.slice(-this.settings.floorWindow);
     if (window.length === 0) {

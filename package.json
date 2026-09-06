@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "npx tsx src/index.ts",
     "start": "npx tsx src/index.ts",
+    "timesfm:setup": "python3 -m venv .venv-timesfm && .venv-timesfm/bin/python -m pip install --upgrade pip && .venv-timesfm/bin/python -m pip install -r requirements-timesfm.txt",
+    "timesfm": "if [ -x .venv-timesfm/bin/python ]; then .venv-timesfm/bin/python scripts/timesfm_service.py; else python3 scripts/timesfm_service.py; fi",
     "frontend": "cd frontend && npm run dev",
     "build": "cd frontend && npm run build",
     "test": "echo \"Error: no test specified\" && exit 1"

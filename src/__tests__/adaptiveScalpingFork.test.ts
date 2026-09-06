@@ -1,7 +1,7 @@
 import { adaptiveScalpingFork } from '../strategyForks/adaptiveScalpingFork.js';
 import { buildMarketContext } from '../marketContext.js';
 import type { PricePoint } from '../priceFeed.js';
-import type { StrategyConfig, MarketContext } from '../strategyTypes.js';
+import type { StrategyConfig, MarketContext, MarketForecastEvidence } from '../strategyTypes.js';
 
 const BASE = 0.01;
 
@@ -97,7 +97,69 @@ assert(ctx.lookbackTicks > 0, 'market context has lookback ticks');
 assert(ctx.volatility >= 0, 'market context volatility is non-negative');
 assert(['asia', 'london', 'ny', 'overlap', 'other'].includes(ctx.session), 'market context has valid session');
 
-const elapsed = Date.now() - Date.now(); // placeholder, not meaningful
+// ── TimesFM-Vorwärtsblick (Phase 3.1) ───────────────────────────────────────
+const neutralContext: MarketContext = {
+  hourOfDay: 14,
+  dayOfWeek: 2,
+  session: 'ny',
+  lookbackTicks: 60,
+  lookbackMinutes: 2,
+  volatility: 1.0,
+  avgRange: 1.0,
+  trendBias: 'neutral',
+  higherTimeframeSignal: 'neutral',
+};
+
+const bearishForecast: MarketForecastEvidence = {
+  netReturnPct: -1.2,
+  directionScore: -0.6,
+  slopeConsistency: 0.8,
+  volatilityPct: 2.0,
+  dataQuality: 0.9,
+  ageMs: 1000,
+  horizon: 12,
+};
+
+const bullishForecast: MarketForecastEvidence = {
+  netReturnPct: 0.6,
+  directionScore: 0.5,
+  slopeConsistency: 0.8,
+  volatilityPct: 2.0,
+  dataQuality: 0.9,
+  ageMs: 1000,
+  horizon: 12,
+};
+
+const adaptedNeutral = adaptiveScalpingFork.adapt(baseConfig, neutralContext);
+const adaptedBearish = adaptiveScalpingFork.adapt(baseConfig, { ...neutralContext, forecast: bearishForecast });
+assert(
+  (adaptedBearish.scalping_settings?.spikeThreshold ?? 0) > (adaptedNeutral.scalping_settings?.spikeThreshold ?? 0),
+  'bearish forecast raises spike threshold (entry filter)'
+);
+assert(
+  (adaptedBearish.scalping_settings?.sellDropThreshold ?? 0) < (adaptedNeutral.scalping_settings?.sellDropThreshold ?? 0),
+  'bearish forecast tightens sell drop threshold (protect winners)'
+);
+
+const adaptedBullish = adaptiveScalpingFork.adapt(baseConfig, { ...neutralContext, forecast: bullishForecast });
+assert(
+  (adaptedBullish.scalping_settings?.spikeThreshold ?? 0) < (adaptedNeutral.scalping_settings?.spikeThreshold ?? 0),
+  'bullish forecast lowers spike threshold (entries with trend)'
+);
+assert(
+  (adaptedBullish.scalping_settings?.sellDropThreshold ?? 0) > (adaptedNeutral.scalping_settings?.sellDropThreshold ?? 0),
+  'bullish forecast loosens sell drop threshold (let winners run)'
+);
+
+const weakQuality = adaptiveScalpingFork.adapt(baseConfig, {
+  ...neutralContext,
+  forecast: { ...bearishForecast, dataQuality: 0.4 },
+});
+assert(
+  (weakQuality.scalping_settings?.spikeThreshold ?? 0) === (adaptedNeutral.scalping_settings?.spikeThreshold ?? 0),
+  'low forecast quality → no multiplier effect'
+);
+
 console.log('\n[Test] adaptiveScalpingFork: ' + passed + ' passed, ' + failed + ' failed');
 if (failed > 0) process.exit(1);
 else process.exit(0);

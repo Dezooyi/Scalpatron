@@ -23,42 +23,91 @@ Kopieren, Forken oder Weiterverwenden (auch in veränderter Form) ist **nur mit 
 
 ## Features
 
-| Feature | Beschreibung |
-|---------|-------------|
-| **Multi-Strategy Engine** | Scalping, Trend, Breakout, Momentum, Mean Reversion, DCA, PAET — alles JSON-basiert |
-| **Adaptive Scalping** | `scalping-adaptive` passt Spike-Thresholds pro Tick an Session, Volatilität & Trend an (ADR-012) |
-| **PAET** | Predictive Anomaly & Evacuation Trigger — verkauft *vor* einem Kollaps via STL + FFT + PNR |
-| **PAET Auto-Adapt** | Deterministische Live-Parameter-Anpassung alle 30 Ticks (Zykluslänge, Rauschboden, STL-Fenster) |
-| **Live-Preisdaten** | DexScreener API (kostenlos, kein Key) |
-| **Paper-Trading** | Simuliertes Portfolio ohne echtes Kapital |
-| **Live-Trading** | Jupiter Ultra API (Mainnet-ready, generic SPL Token Support) |
-| **KI-Agent** | Ollama analysiert Markt zyklisch und optimiert Settings |
-| **Advisor Engine** | Empfiehlt Token + Strategie + Parameter basierend auf Markt-Regime |
-| **Feedback-System** | Lernende KI — Outcome-Tracking pro Empfehlung |
-| **Indicator-Engine** | EMA, SMA, RSI, MACD, Bollinger Bands, ATR, Stochastic, VWAP |
-| **Multi-Bot** | Mehrere Bot-Instanzen parallel mit unterschiedlichen Strategien |
-| **Backtesting** | Historisches Replay mit Speed-Control und Markdown-Reports |
-| **Web-Dashboard** | React 19 + Tailwind v4 + Radix UI + SSE Live-Streaming |
-| **Wallet-Tab** | On-Chain Balances, 5-Min Snapshots, Solscan-Links, CSV-Export (ADR-015) |
-| **Persistenz** | SQLite DB + JSONL Trade-Logs |
-| **Memory-Optimiert** | SSE-Payloads minimiert, Browser-stabil auch nach Stunden |
+| Feature                         | Beschreibung                                                                                        |
+| ------------------------------- | --------------------------------------------------------------------------------------------------- |
+| **Multi-Strategy Engine** | Scalping, Trend, Breakout, Momentum, Mean Reversion, DCA, PAET — alles JSON-basiert                |
+| **Adaptive Scalping**     | `scalping-adaptive` passt Spike-Thresholds pro Tick an Session, Volatilität & Trend an (ADR-012) |
+| **PAET**                  | Predictive Anomaly & Evacuation Trigger — verkauft*vor* einem Kollaps via STL + FFT + PNR        |
+| **PAET Auto-Adapt**       | Deterministische Live-Parameter-Anpassung alle 30 Ticks (Zykluslänge, Rauschboden, STL-Fenster)    |
+| **Live-Preisdaten**       | DexScreener API (kostenlos, kein Key)                                                               |
+| **Paper-Trading**         | Simuliertes Portfolio ohne echtes Kapital                                                           |
+| **Live-Trading**          | Jupiter Ultra API (Mainnet-ready, generic SPL Token Support)                                        |
+| **KI-Agent**              | Ollama analysiert Markt zyklisch und optimiert Settings                                             |
+| **Advisor Engine**        | Empfiehlt Token + Strategie + Parameter basierend auf Markt-Regime                                  |
+| **Feedback-System**       | Lernende KI — Outcome-Tracking pro Empfehlung                                                      |
+| **Indicator-Engine**      | EMA, SMA, RSI, MACD, Bollinger Bands, ATR, Stochastic, VWAP                                         |
+| **Multi-Bot**             | Mehrere Bot-Instanzen parallel mit unterschiedlichen Strategien                                     |
+| **Backtesting**           | Historisches Replay mit Speed-Control und Markdown-Reports                                          |
+| **Web-Dashboard**         | React 19 + Tailwind v4 + Radix UI + SSE Live-Streaming                                              |
+| **Wallet-Tab**            | On-Chain Balances, 5-Min Snapshots, Solscan-Links, CSV-Export (ADR-015)                             |
+| **Persistenz**            | SQLite DB + JSONL Trade-Logs                                                                        |
+| **Memory-Optimiert**      | SSE-Payloads minimiert, Browser-stabil auch nach Stunden                                            |
 
 ## Quick Start
 
 ```bash
-# Dependencies installieren
+# Im Repository-Root ausfuehren
 npm install
 cd frontend && npm install && cd ..
 
-# Backend starten
-npx tsx src/index.ts
+# Backend starten (Paper-Trading, keine .env erforderlich)
+npm run dev
 
-# Frontend in separatem Terminal
+# Frontend in einem zweiten Terminal
 cd frontend && npm run dev
 ```
 
+### Optional: TimesFM für Advisor-Optimierung
+
+TimesFM läuft lokal als separater Python/PyTorch-Worker. Die Abhängigkeit wird
+nicht mit `npm install` installiert, sondern isoliert eingerichtet:
+
+```bash
+# Im Repository-Root
+npm run timesfm:setup
+```
+
+In `.env` aktivieren:
+
+```env
+TIMESFM_ENABLED=true
+TIMESFM_CONTEXT_LENGTH=128
+TIMESFM_HORIZON=12
+```
+
+Danach genügt der normale Start:
+
+```bash
+npm start
+```
+
+Die App startet den Worker automatisch mit `.venv-timesfm/bin/python`. TimesFM
+analysiert die persistierte Preisreihe und liefert dem Smart Advisor ein
+begrenztes Forecast-Signal. Es entscheidet keine Orders direkt und ersetzt
+weder Strategie-Gates noch Ollama. Bei fehlender Installation, zu wenig Daten
+oder einem Worker-Fehler verwendet der Advisor automatisch den bisherigen
+Fallback.
+
+Die vollständige Architektur, Fehlerbehebung, Validierung und der Ausbauplan
+stehen in [`docs/timesfm-integration-plan.md`](./docs/timesfm-integration-plan.md).
+
 - Backend: `http://localhost:3000` (API + SSE)
 - Frontend: `http://localhost:5173` (React Dashboard mit Wallet-Tab)
+
+Beim ersten Start werden die SQLite-Datenbank unter `data/scalpatron.db` und
+die benoetigten Tabellen automatisch angelegt. Das Backend startet standardmaessig
+im Paper-Modus mit Devnet-RPC und DexScreener-Preisdaten. Ollama ist optional; ohne
+laufenden Ollama-Dienst bleibt nur der KI-Agent deaktiviert.
+
+Fuer Wallet-Anzeige oder Live-Trading die Beispielkonfiguration kopieren und den
+Private Key nur lokal eintragen:
+
+```bash
+cp .env.example .env
+```
+
+`WALLET_PRIVATE_KEY` ist fuer Paper-Trading nicht erforderlich. Eine fehlende
+`.env` wird beim Schreiben eines lokal generierten Wallets automatisch angelegt.
 
 ## Architektur
 
@@ -110,19 +159,19 @@ paet                          → PAETEngine (STL + FFT + PNR)
 alle anderen                  → CandleAggregator + IndicatorEngine
 ```
 
-| Template | Typ | Indikatoren / Methode | Beschreibung |
-|----------|-----|----------------------|-------------|
-| `scalping` | `scalping` | Floor-Median + Spike | Original Range Spike Scalper |
-| `scalping-adaptive` | `scalping-adaptive` | Fork: Session / Volatilität / Trend | Nova Pulse Scalper |
-| `solana_sniper` | `scalping` | Tick-basiert | +5 % in 15 Ticks Micro-Burst |
-| `breakout` | `breakout` | BB 20, ATR 14, RSI 14 | BB-Squeeze Breakout |
-| `solana_runner` | `breakout` | BB 20, VWAP | Kein TP — nur Trailing-Stop |
-| `ema_trend` | `trend` | EMA 12/26, RSI 14 | EMA-Crossover mit RSI-Filter |
-| `momentum` | `momentum` | MACD, RSI 14, EMA 26 | MACD-Histogram Crossover |
-| `rsi_mean_reversion` | `mean_reversion` | RSI 14, BB 20 | RSI Oversold + unteres Band |
-| `solana_dip_buyer` | `mean_reversion` | VWAP, STOCH, RSI | V-Shape Flash-Crash Käufe |
-| `dca` | `dca` | RSI 14, EMA 20 | Dip-Käufe mit Trendfilter |
-| `paet` | `paet` | FFT + STL + Ableitungen | Prädiktiver Kollaps-Exit |
+| Template               | Typ                   | Indikatoren / Methode                | Beschreibung                 |
+| ---------------------- | --------------------- | ------------------------------------ | ---------------------------- |
+| `scalping`           | `scalping`          | Floor-Median + Spike                 | Original Range Spike Scalper |
+| `scalping-adaptive`  | `scalping-adaptive` | Fork: Session / Volatilität / Trend | Nova Pulse Scalper           |
+| `solana_sniper`      | `scalping`          | Tick-basiert                         | +5 % in 15 Ticks Micro-Burst |
+| `breakout`           | `breakout`          | BB 20, ATR 14, RSI 14                | BB-Squeeze Breakout          |
+| `solana_runner`      | `breakout`          | BB 20, VWAP                          | Kein TP — nur Trailing-Stop |
+| `ema_trend`          | `trend`             | EMA 12/26, RSI 14                    | EMA-Crossover mit RSI-Filter |
+| `momentum`           | `momentum`          | MACD, RSI 14, EMA 26                 | MACD-Histogram Crossover     |
+| `rsi_mean_reversion` | `mean_reversion`    | RSI 14, BB 20                        | RSI Oversold + unteres Band  |
+| `solana_dip_buyer`   | `mean_reversion`    | VWAP, STOCH, RSI                     | V-Shape Flash-Crash Käufe   |
+| `dca`                | `dca`               | RSI 14, EMA 20                       | Dip-Käufe mit Trendfilter   |
+| `paet`               | `paet`              | FFT + STL + Ableitungen              | Prädiktiver Kollaps-Exit    |
 
 > Detaillierte Parameter, Regeln und Einsatzempfehlungen für alle Strategien: [`docs/neue-strategien.md`](./docs/neue-strategien.md)
 >
@@ -179,12 +228,12 @@ Mehr dazu: [`docs/decisions/adr-012-scalping-fork-adaptive-cycles.md`](./docs/de
 
 ### Markt-Regimes
 
-| Regime | Bedeutung | Agent-Reaktion |
-|--------|-----------|----------------|
-| **RANGING** | Seitwärtsbewegung | Normale Settings, niedrige Thresholds |
+| Regime             | Bedeutung                 | Agent-Reaktion                                 |
+| ------------------ | ------------------------- | ---------------------------------------------- |
+| **RANGING**  | Seitwärtsbewegung        | Normale Settings, niedrige Thresholds          |
 | **TRENDING** | Klarer Auf-/Abwärtstrend | Höhere spikeThreshold, größeres floorWindow |
-| **DEAD** | Minimale Volatilität | Niedrige Thresholds für Micro-Moves |
-| **VOLATILE** | Starke Schwankungen | Höhere Thresholds, schnellere Exits |
+| **DEAD**     | Minimale Volatilität     | Niedrige Thresholds für Micro-Moves           |
+| **VOLATILE** | Starke Schwankungen       | Höhere Thresholds, schnellere Exits           |
 
 ### Advisor Engine
 
@@ -201,84 +250,90 @@ SELL-Trade → updateAgentOutcome(botId, pnlPercent, isWin)
 
 ### Aggressiveness (Zwei-Ebenen)
 
-| Ebene | Quelle | Bounds |
-|-------|--------|--------|
-| `maxAggressiveness` | User-Slider | 1–100% (harter Deckel) |
-| `aggressiveness` | OllamaAgent | 5–80% (≤ maxAggressiveness) |
+| Ebene                 | Quelle      | Bounds                        |
+| --------------------- | ----------- | ----------------------------- |
+| `maxAggressiveness` | User-Slider | 1–100% (harter Deckel)       |
+| `aggressiveness`    | OllamaAgent | 5–80% (≤ maxAggressiveness) |
 
 ## Trading-Parameter (Scalping)
 
-| Parameter | Default | Bereich | Beschreibung |
-|-----------|---------|---------|-------------|
-| `floorWindow` | 20 | 5–100 | Ticks für Floor-Median |
-| `spikeThreshold` | 3.0% | 0.05–5.0% | Mindest-Abweichung vom Floor (→ BUY) |
-| `sellDropThreshold` | 5.0% | 0.5–10.0% | Rückgang vom Peak (→ SELL) |
-| `cooldownTicks` | 15 | 2–50 | Pause nach Sell (verhindert Overtrading) |
-| `takeProfitThreshold` | 10.0% | 0.5–20.0% | Hartes Take-Profit |
+| Parameter               | Default | Bereich    | Beschreibung                             |
+| ----------------------- | ------- | ---------- | ---------------------------------------- |
+| `floorWindow`         | 20      | 5–100     | Ticks für Floor-Median                  |
+| `spikeThreshold`      | 3.0%    | 0.05–5.0% | Mindest-Abweichung vom Floor (→ BUY)    |
+| `sellDropThreshold`   | 5.0%    | 0.5–10.0% | Rückgang vom Peak (→ SELL)             |
+| `cooldownTicks`       | 15      | 2–50      | Pause nach Sell (verhindert Overtrading) |
+| `takeProfitThreshold` | 10.0%   | 0.5–20.0% | Hartes Take-Profit                       |
 
 > Die Defaults wurden per ADR-005 an ein 2 % Roundtrip-Fee-Modell angeglichen.
 
 ## API-Referenz
 
 ### Bot Management
-| Endpoint | Methode | Beschreibung |
-|----------|---------|-------------|
-| `/api/state` | GET | Alle Bot-States als JSON |
-| `/api/bots` | GET/POST | Bots auflisten/erstellen |
-| `/api/bots/:id` | GET/DELETE | Bot abrufen/löschen |
-| `/api/bots/:id/settings` | POST | Settings ändern |
-| `/api/bots/:id/strategy` | PUT | Strategie zuweisen |
-| `/api/bots/:id/paperMode` | PUT | Paper/Live umschalten |
-| `/api/bots/:id/manual-buy` | POST | Manuelles BUY |
-| `/api/bots/:id/manual-sell` | POST | Manuelles SELL |
-| `/api/bots/:id/indicators` | GET | Aktuelle Indikator-Werte |
+
+| Endpoint                      | Methode    | Beschreibung             |
+| ----------------------------- | ---------- | ------------------------ |
+| `/api/state`                | GET        | Alle Bot-States als JSON |
+| `/api/bots`                 | GET/POST   | Bots auflisten/erstellen |
+| `/api/bots/:id`             | GET/DELETE | Bot abrufen/löschen     |
+| `/api/bots/:id/settings`    | POST       | Settings ändern         |
+| `/api/bots/:id/strategy`    | PUT        | Strategie zuweisen       |
+| `/api/bots/:id/paperMode`   | PUT        | Paper/Live umschalten    |
+| `/api/bots/:id/manual-buy`  | POST       | Manuelles BUY            |
+| `/api/bots/:id/manual-sell` | POST       | Manuelles SELL           |
+| `/api/bots/:id/indicators`  | GET        | Aktuelle Indikator-Werte |
 
 ### Strategien
-| Endpoint | Methode | Beschreibung |
-|----------|---------|-------------|
-| `/api/strategies` | GET/POST | Strategien CRUD |
-| `/api/strategies/templates` | GET | Built-in Templates laden |
-| `/api/strategies/:id` | GET/DELETE | Einzelne Strategie |
+
+| Endpoint                      | Methode    | Beschreibung             |
+| ----------------------------- | ---------- | ------------------------ |
+| `/api/strategies`           | GET/POST   | Strategien CRUD          |
+| `/api/strategies/templates` | GET        | Built-in Templates laden |
+| `/api/strategies/:id`       | GET/DELETE | Einzelne Strategie       |
 
 ### Backtesting
-| Endpoint | Methode | Beschreibung |
-|----------|---------|-------------|
-| `/api/backtest/data-range` | GET | Verfügbarer Zeitraum |
-| `/api/backtest/import` | POST | Daten von GeckoTerminal importieren |
-| `/api/backtest/start` | POST | Backtest starten |
-| `/api/backtest/stop` | POST | Backtest abbrechen |
-| `/api/backtest/report` | GET | Markdown-Report |
+
+| Endpoint                     | Methode | Beschreibung                        |
+| ---------------------------- | ------- | ----------------------------------- |
+| `/api/backtest/data-range` | GET     | Verfügbarer Zeitraum               |
+| `/api/backtest/import`     | POST    | Daten von GeckoTerminal importieren |
+| `/api/backtest/start`      | POST    | Backtest starten                    |
+| `/api/backtest/stop`       | POST    | Backtest abbrechen                  |
+| `/api/backtest/report`     | GET     | Markdown-Report                     |
 
 ### KI-Agent
-| Endpoint | Methode | Beschreibung |
-|----------|---------|-------------|
-| `/api/agent/status` | GET | Agent-Status |
-| `/api/agent/models` | GET | Ollama-Modelle |
-| `/api/agent/config` | POST | Agent-Konfiguration |
-| `/api/agent/trigger` | POST | Manuelle Analyse |
-| `/api/agent/history` | GET | Analyse-Historie |
-| `/api/agent/regime-performance` | GET | Win-Rate pro Regime |
+
+| Endpoint                          | Methode | Beschreibung        |
+| --------------------------------- | ------- | ------------------- |
+| `/api/agent/status`             | GET     | Agent-Status        |
+| `/api/agent/models`             | GET     | Ollama-Modelle      |
+| `/api/agent/config`             | POST    | Agent-Konfiguration |
+| `/api/agent/trigger`            | POST    | Manuelle Analyse    |
+| `/api/agent/history`            | GET     | Analyse-Historie    |
+| `/api/agent/regime-performance` | GET     | Win-Rate pro Regime |
 
 ### SSE Events
-| Event | Frequenz | Daten |
-|-------|----------|-------|
-| `state` | 1s | Alle Bot-States |
-| `agent_advice` | Bei Analyse | `{ botId, advice }` |
-| `agent_status` | 5s | `{ running, analyzing, config }` |
-| `backtest_progress` | Progress | Fortschritt 0–100% |
-| `wallet_update` | Nach Snapshot | `{ walletAddress, timestamp }` |
+
+| Event                 | Frequenz      | Daten                              |
+| --------------------- | ------------- | ---------------------------------- |
+| `state`             | 1s            | Alle Bot-States                    |
+| `agent_advice`      | Bei Analyse   | `{ botId, advice }`              |
+| `agent_status`      | 5s            | `{ running, analyzing, config }` |
+| `backtest_progress` | Progress      | Fortschritt 0–100%                |
+| `wallet_update`     | Nach Snapshot | `{ walletAddress, timestamp }`   |
 
 ### Wallet (ADR-015)
-| Endpoint | Methode | Beschreibung |
-|----------|---------|-------------|
-| `/api/wallet/info` | GET | SOL-Balance, Netzwerk, Token-Count |
-| `/api/wallet/balances` | GET | Alle Token-Balances der primären Wallet |
-| `/api/wallet/balance/history?range=1h\|24h\|7d\|30d\|all` | GET | Historische Balance-Snapshots |
-| `/api/wallet/transactions?botId=&type=BUY\|SELL&mode=paper\|live&from=&to=&limit=&offset=` | GET | Persistierte Trades mit Solscan-URL |
-| `/api/wallet/transactions/onchain?limit=25` | GET | Live-Tx direkt von Solana RPC |
-| `/api/wallet/transactions/:signature` | GET | Tx-Detail (Slot, Fee, Parsed-Instructions) |
-| `/api/wallet/snapshot` | POST | Manueller Snapshot-Trigger |
-| `/api/wallet/bots` | GET | Bot→Wallet Zuordnung |
+
+| Endpoint                                                                                   | Methode | Beschreibung                               |
+| ------------------------------------------------------------------------------------------ | ------- | ------------------------------------------ |
+| `/api/wallet/info`                                                                       | GET     | SOL-Balance, Netzwerk, Token-Count         |
+| `/api/wallet/balances`                                                                   | GET     | Alle Token-Balances der primären Wallet   |
+| `/api/wallet/balance/history?range=1h\|24h\|7d\|30d\|all`                                    | GET     | Historische Balance-Snapshots              |
+| `/api/wallet/transactions?botId=&type=BUY\|SELL&mode=paper\|live&from=&to=&limit=&offset=` | GET     | Persistierte Trades mit Solscan-URL        |
+| `/api/wallet/transactions/onchain?limit=25`                                              | GET     | Live-Tx direkt von Solana RPC              |
+| `/api/wallet/transactions/:signature`                                                    | GET     | Tx-Detail (Slot, Fee, Parsed-Instructions) |
+| `/api/wallet/snapshot`                                                                   | POST    | Manueller Snapshot-Trigger                 |
+| `/api/wallet/bots`                                                                       | GET     | Bot→Wallet Zuordnung                      |
 
 ## Projektstruktur
 
@@ -338,23 +393,23 @@ Scalpatron/
 
 ## Tech-Stack
 
-| Komponente | Technologie |
-|------------|-------------|
-| Runtime | Node.js v22, TypeScript, `npx tsx` |
-| Blockchain | Solana (`@solana/web3.js`) |
-| DEX | Jupiter Ultra API |
+| Komponente  | Technologie                                        |
+| ----------- | -------------------------------------------------- |
+| Runtime     | Node.js v22, TypeScript,`npx tsx`                |
+| Blockchain  | Solana (`@solana/web3.js`)                       |
+| DEX         | Jupiter Ultra API                                  |
 | Preis-Daten | DexScreener API (Live), GeckoTerminal (Historisch) |
-| KI-Agent | Ollama (lokal, `qwen3.5:4b`) |
-| Frontend | React 19, Vite, Tailwind v4, Radix UI |
-| Charts | Recharts |
-| Datenbank | SQLite (better-sqlite3) |
+| KI-Agent    | Ollama (lokal,`qwen3.5:4b`)                      |
+| Frontend    | React 19, Vite, Tailwind v4, Radix UI              |
+| Charts      | Recharts                                           |
+| Datenbank   | SQLite (better-sqlite3)                            |
 
 ## Voraussetzungen
 
-| Software | Version |
-|----------|---------|
-| Node.js | v22+ |
-| Ollama | beliebig (optional für KI-Agent) |
+| Software | Version                           |
+| -------- | --------------------------------- |
+| Node.js  | v22+                              |
+| Ollama   | beliebig (optional für KI-Agent) |
 
 ```bash
 # Ollama installieren + Modell
@@ -363,6 +418,13 @@ ollama pull qwen3.5:4b
 ```
 
 ## Konfiguration (.env)
+
+Die `.env`-Datei ist fuer den normalen Paper-Trading-Start optional. Fuer eigene
+RPC-, Wallet- oder Ollama-Einstellungen zuerst `.env.example` kopieren:
+
+```bash
+cp .env.example .env
+```
 
 ```env
 SOLANA_RPC_URL=https://api.devnet.solana.com
@@ -381,30 +443,30 @@ AI_MIN_SWITCH_CONFIDENCE=0.85
 
 ## Troubleshooting
 
-| Problem | Lösung |
-|---------|--------|
-| DexScreener 429 | `PRICE_FEED_TICKRATE_MS` erhöhen |
-| Ollama nicht erreichbar | `ollama serve` starten |
-| Bot tradet nicht | `floorWindow` / Warmup-Candles abwarten |
-| Keine Preisdaten | GeckoTerminal Import im Dashboard |
-| Port belegt | Backend erhöht automatisch (3000→3001→...) |
-| Strategie-Änderung wirkt nicht | Bot neu starten oder `PUT /api/bots/:id/strategy` |
+| Problem                         | Lösung                                            |
+| ------------------------------- | -------------------------------------------------- |
+| DexScreener 429                 | `PRICE_FEED_TICKRATE_MS` erhöhen                |
+| Ollama nicht erreichbar         | `ollama serve` starten                           |
+| Bot tradet nicht                | `floorWindow` / Warmup-Candles abwarten          |
+| Keine Preisdaten                | GeckoTerminal Import im Dashboard                  |
+| Port belegt                     | Backend erhöht automatisch (3000→3001→...)      |
+| Strategie-Änderung wirkt nicht | Bot neu starten oder`PUT /api/bots/:id/strategy` |
 
 ## Dokumentation
 
-| Datei | Inhalt |
-|-------|--------|
-| `docs/README.md` | Dokumentations-Index |
-| `docs/architecture.md` | System-Design, Datenfluss |
-| `docs/strategy.md` | Range Spike Scalper (Legacy) |
-| `docs/multi-strategy.md` | JSON Schema, Templates, Feedback-Loop |
-| `docs/neue-strategien.md` | Detaillierter Katalog aller Strategien |
-| `docs/strategy-paet/SPEC.md` | PAET Spezifikation |
-| `docs/configuration.md` | .env, PatternSettings, Aggressiveness |
-| `docs/operations.md` | Starten, Dashboard, Logs |
-| `docs/TRADING_ENGINE.md` | Generic Token Architecture |
-| `docs/memory-optimization.md` | Memory-Leak Fix, SSE-Optimierung |
-| `docs/decisions/` | Architecture Decision Records (ADRs) |
+| Datei                           | Inhalt                                 |
+| ------------------------------- | -------------------------------------- |
+| `docs/README.md`              | Dokumentations-Index                   |
+| `docs/architecture.md`        | System-Design, Datenfluss              |
+| `docs/strategy.md`            | Range Spike Scalper (Legacy)           |
+| `docs/multi-strategy.md`      | JSON Schema, Templates, Feedback-Loop  |
+| `docs/neue-strategien.md`     | Detaillierter Katalog aller Strategien |
+| `docs/strategy-paet/SPEC.md`  | PAET Spezifikation                     |
+| `docs/configuration.md`       | .env, PatternSettings, Aggressiveness  |
+| `docs/operations.md`          | Starten, Dashboard, Logs               |
+| `docs/TRADING_ENGINE.md`      | Generic Token Architecture             |
+| `docs/memory-optimization.md` | Memory-Leak Fix, SSE-Optimierung       |
+| `docs/decisions/`             | Architecture Decision Records (ADRs)   |
 
 ## Lizenz
 

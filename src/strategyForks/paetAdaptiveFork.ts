@@ -2,6 +2,8 @@ import type { PaetSettings } from '../paetEngine.js';
 import { PAET_DEFAULTS } from '../paetEngine.js';
 import { DEFAULT_PAET_SELFOPT, normalizePaetSelfOptConfig } from '../strategy/paetTargets.js';
 import type { PaetSelfOptConfig } from '../strategy/paetTargets.js';
+import type { MarketForecastEvidence } from '../strategyTypes.js';
+import { paetForecastCollapseBias } from '../strategy/selfOptSnapshots.js';
 
 /**
  * Live snapshot of PAET's internal signal state, extracted from indicatorValues
@@ -16,6 +18,8 @@ export interface PAETInternalSnapshot {
   trendPrice: number;
   /** Current false-alarm penalty ω (self-calibrating). */
   omega: number;
+  /** TimesFM-Vorhersage-Evidenz (optional) — Cross-Check für den PNR-Trigger. */
+  forecast?: MarketForecastEvidence;
 }
 
 function clamp(v: number, min: number, max: number): number {
@@ -86,7 +90,12 @@ export function adaptPAETSettings(
   // ── Rule 2: collapse threshold ≥ 2× residual noise floor ─────────────────
   if (validSigma && validTrend) {
     const noiseFraction = current.volatility_sigma_multiplier * sigma / trendPrice;
-    const target = clamp(2.0 * noiseFraction, 0.05, 0.50);
+    let target = clamp(2.0 * noiseFraction, 0.05, 0.50);
+    // TimesFM-Cross-Check (optional): stark negativer Kurzfrist-Forecast senkt
+    // die effektive Kollaps-Schwelle → früherer Evakuierungsauslöser. Durch die
+    // Sicherheits-Bounds [0.05, 0.50] begrenzt.
+    const collapseBias = paetForecastCollapseBias(snapshot.forecast);
+    if (collapseBias < 1) target = clamp(target * collapseBias, 0.05, 0.50);
     // Asymmetric blend: rise quickly when market gets noisy to protect
     // against volatility-induced false collapses; tighten slowly in calm markets
     // to avoid overshooting downward.

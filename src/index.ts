@@ -1,4 +1,4 @@
-import { initDB, startWalCheckpointGuard, db, saveStrategy } from './db.js';
+import { startWalCheckpointGuard, db, saveStrategy } from './db.js';
 import { BotManager } from './botManager.js';
 import { BotServer } from './server.js';
 import { PriceRecorder } from './priceRecorder.js';
@@ -6,12 +6,11 @@ import { loadBuiltinTemplates } from './strategyEngine.js';
 import { PriceFeed } from './priceFeed.js';
 import { startMemoryMonitor } from './memoryMonitor.js';
 import { walletService } from './walletService.js';
+import { startTimesFmWorker } from './timesFmWorker.js';
 
 
 console.log('Scalpatron V1 wird gestartet...');
-
-// Initialize SQLite database
-initDB();
+startTimesFmWorker();
 
 // Speicher-Diagnose: Memory-Usage alle 60s, automatische Heap-Snapshots ab 512 MB RSS.
 startMemoryMonitor({ autoSnapshotRssMB: 512 });

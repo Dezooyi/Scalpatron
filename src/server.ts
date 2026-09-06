@@ -1,10 +1,19 @@
 import http from 'http';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { spawn } from 'child_process';
 import type { BotManager } from './botManager.js';
 import { PriceRecorder } from './priceRecorder.js';
 import { logger } from './appLogger.js';
 import { getAdvisorSuggestions } from './advisorEngine.js';
 import { TokenService, isValidMintAddress, saveTokenToDb } from './tokenService.js';
-import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder, getTradesForPerformance, getTimeWindowPerformance, detectTimeWindowDrift, getLessonsForBot, saveUiSettings, loadUiSettings, type UiSettings } from './db.js';
+import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder, getTradesForPerformance, getTimeWindowPerformance, detectTimeWindowDrift, getLessonsForBot, saveUiSettings, loadUiSettings, getLatestForecastLogs, type UiSettings } from './db.js';
+import { timesFmCache } from './timesFmCache.js';
+import { getTimesFmSettings, updateTimesFmSettings, type TimesFmRuntimeSettings } from './timesFmSettings.js';
+import { isTimesFmInstalled, isTimesFmWorkerRunning, startTimesFmWorker, stopTimesFmWorker } from './timesFmWorker.js';
+
+const serverRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const TIMESFM_INSTALLING_KEY = 'timesfm_installing';
 import { loadBuiltinTemplates } from './strategyEngine.js';
 import { PriceFeed, SLOT_MS } from './priceFeed.js';
 import type { OllamaAgent } from './ollamaAgent.js';
@@ -1038,6 +1047,130 @@ export class BotServer {
     }
 
     // ==================== OLLAMA AGENT API ====================
+
+    // GET /api/timesfm/status - lokaler TimesFM-Worker-Status
+    if (pathname === '/api/timesfm/status' && req.method === 'GET') {
+      const enabled = getTimesFmSettings().enabled;
+      const endpoint = process.env.TIMESFM_URL ?? 'http://127.0.0.1:8001/forecast';
+      const healthUrl = new URL(endpoint);
+      healthUrl.pathname = '/health';
+      healthUrl.search = '';
+      let reachable = false;
+      let model: string | null = null;
+      if (enabled) {
+        try {
+          const health = await fetch(healthUrl, { signal: AbortSignal.timeout(1500) });
+          reachable = health.ok;
+          if (reachable) {
+            const payload = await health.json() as { model?: unknown };
+            model = typeof payload.model === 'string' ? payload.model : null;
+          }
+        } catch {
+          reachable = false;
+        }
+      }
+      const cacheStats = timesFmCache.getCacheStats();
+      const runtime = getTimesFmSettings();
+      const installing = getSetting(TIMESFM_INSTALLING_KEY, '') === '1';
+      let recentForecastCount = 0;
+      try {
+        const mint = cacheStats.mints[0];
+        if (mint) recentForecastCount = getLatestForecastLogs(mint, 500).length;
+      } catch { /* non-critical */ }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        enabled,
+        reachable,
+        model,
+        endpoint,
+        contextLength: Number(process.env.TIMESFM_CONTEXT_LENGTH ?? 128),
+        horizon: Number(process.env.TIMESFM_HORIZON ?? 12),
+        settings: {
+          enabled: runtime.enabled,
+          tradeGate: runtime.tradeGate,
+          selfOptGate: runtime.selfOptGate,
+          minTrades: runtime.minTrades,
+          minWinRate: runtime.minWinRate,
+        },
+        installed: isTimesFmInstalled(),
+        installing,
+        workerRunning: isTimesFmWorkerRunning(),
+        cache: {
+          ttlMs: Number(process.env.TIMESFM_CACHE_TTL_MS ?? 120_000),
+          mints: cacheStats.mints,
+          freshCount: cacheStats.freshCount,
+          staleCount: cacheStats.staleCount,
+        },
+        recentForecastLogCount: recentForecastCount,
+      }));
+      return;
+    }
+
+    // GET /api/timesfm/settings - Runtime-Settings auslesen
+    if (pathname === '/api/timesfm/settings' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        settings: { ...getTimesFmSettings() },
+        installed: isTimesFmInstalled(),
+        installing: getSetting(TIMESFM_INSTALLING_KEY, '') === '1',
+        workerRunning: isTimesFmWorkerRunning(),
+      }));
+      return;
+    }
+
+    // PUT /api/timesfm/settings - Runtime-Settings aktualisieren (Einstellungsseite)
+    if (pathname === '/api/timesfm/settings' && req.method === 'PUT') {
+      const body = await parseBody(req);
+      const patch: Partial<TimesFmRuntimeSettings> = {};
+      for (const key of ['enabled', 'tradeGate', 'selfOptGate', 'minTrades', 'minWinRate'] as const) {
+        if (key in (body as Record<string, unknown>)) {
+          (patch as Record<string, unknown>)[key] = (body as Record<string, unknown>)[key];
+        }
+      }
+      const updated = updateTimesFmSettings(patch);
+      // Worker-Lifecycle an den neuen Zustand koppeln.
+      if (updated.enabled) startTimesFmWorker(); else stopTimesFmWorker();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, settings: updated }));
+      return;
+    }
+
+    // POST /api/timesfm/setup - Voraussetzung installieren (npm run timesfm:setup)
+    if (pathname === '/api/timesfm/setup' && req.method === 'POST') {
+      const alreadyInstalled = isTimesFmInstalled();
+      const installing = getSetting(TIMESFM_INSTALLING_KEY, '') === '1';
+      if (installing) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'TimesFM-Installation läuft bereits.' }));
+        return;
+      }
+      if (alreadyInstalled && !installing) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, message: 'TimesFM ist bereits installiert.', alreadyInstalled: true }));
+        return;
+      }
+      setSetting(TIMESFM_INSTALLING_KEY, '1');
+      const child = spawn('npm', ['run', 'timesfm:setup'], {
+        cwd: serverRoot,
+        env: process.env,
+        shell: process.platform === 'win32',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      child.stdout?.on('data', data => process.stdout.write(`[TimesFM:setup] ${data}`));
+      child.stderr?.on('data', data => process.stderr.write(`[TimesFM:setup] ${data}`));
+      child.on('error', error => {
+        console.error(`[TimesFM:setup] Fehler beim Start: ${error.message}`);
+        setSetting(TIMESFM_INSTALLING_KEY, '0');
+      });
+      child.on('exit', (code) => {
+        setSetting(TIMESFM_INSTALLING_KEY, '0');
+        console.log(`[TimesFM:setup] Beendet (code=${code ?? '-'}).`);
+        if (code === 0 && getTimesFmSettings().enabled) startTimesFmWorker();
+      });
+      res.writeHead(202, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, started: true, message: 'TimesFM-Installation gestartet (läuft im Hintergrund).' }));
+      return;
+    }
     
     // GET /api/agent/status - Agent Status abrufen
     if (pathname === '/api/agent/status' && req.method === 'GET') {
@@ -1060,6 +1193,19 @@ export class BotServer {
         return;
       }
       const models = await this.ollamaAgent.listModels();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(models));
+      return;
+    }
+
+    // GET /api/agent/opencode-models - Modelle aus der lokalen OpenCode-CLI
+    if (pathname === '/api/agent/opencode-models' && req.method === 'GET') {
+      if (!this.ollamaAgent) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'OllamaAgent not initialized' }));
+        return;
+      }
+      const models = await this.ollamaAgent.listOpenCodeModels();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(models));
       return;

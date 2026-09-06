@@ -2,22 +2,36 @@ import { PriceFeed, PricePoint } from './priceFeed.js';
 import { PatternDetector, PatternSettings, DEFAULT_SETTINGS } from './patternDetector.js';
 import { Trader, TraderStats, type TradeLogEntry } from './trader.js';
 import { logger } from './appLogger.js';
-import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, listStrategies, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt, getBotKillSwitch, setBotKillSwitch, getSetting, setSetting, insertLesson, setBotStrategyConfig } from './db.js';
+import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, listStrategies, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt, getBotKillSwitch, setBotKillSwitch, getSetting, setSetting, deleteSetting, insertLesson, setBotStrategyConfig, getBotStrategyConfig, recordSelfOptAction, recordSelfOptOutcome, getSelfOptOutcomes, clearSelfOptOutcomes } from './db.js';
 import { StrategyEngine, isScalpingType } from './strategyEngine.js';
-import type { StrategyConfig, IndicatorConfig } from './strategyTypes.js';
+import type { StrategyConfig, IndicatorConfig, MarketForecastEvidence } from './strategyTypes.js';
 import { TIMEFRAME_MS } from './candleAggregator.js';
 import { CONFIG } from './config.js';
-import { clampScalpingSettings } from './strategy/scalpingSafetyBounds.js';
+import { clampScalpingSettings, MIN_FLOOR_WINDOW, MAX_FLOOR_WINDOW, MIN_SPIKE_THRESHOLD_PCT, MAX_SPIKE_THRESHOLD_PCT, MIN_SELL_DROP_THRESHOLD_PCT, MAX_SELL_DROP_THRESHOLD_PCT, MIN_TAKE_PROFIT, MAX_TAKE_PROFIT } from './strategy/scalpingSafetyBounds.js';
 import { KillSwitchEngine } from './killSwitch.js';
 import type { KillSwitchConfig, KillSwitchRuntime } from './killSwitch.js';
 import { adaptPAETSettings, PAET_DEFAULTS } from './strategyForks/paetAdaptiveFork.js';
 import { normalizePaetSelfOptConfig } from './strategy/paetTargets.js';
 import { adaptNovaPulseSettingsBounded, NOVAPULSE_PROGRAMMATIC_KEYS } from './strategyForks/novaPulseAdaptiveFork.js';
 import { DEFAULT_NOVAPULSE_CONFIG, normalizeNovaPulseConfig, type NovaPulseConfig } from './strategy/novaPulseTargets.js';
+import { timesFmCache } from './timesFmCache.js';
+import { getTimesFmSettings } from './timesFmSettings.js';
+import { evaluateForecastGate } from './forecastGate.js';
+import { forecastToEvidence, enrichNovaPulseSnapshot } from './strategy/selfOptSnapshots.js';
+import { evaluateSelfOptGate, selfOptRewardBoost, evaluateDriftGuard } from './selfOptGate.js';
 
 const PRICE_FEED_TICKRATE_MS = process.env.PRICE_FEED_TICKRATE_MS
   ? parseInt(process.env.PRICE_FEED_TICKRATE_MS, 10)
   : 2000;
+
+// TimesFM-Gates & Self-Opt-Loop werden zentral in `timesFmSettings.ts` gehalten
+// (Default: aktiv, DB-persistiert, über die Einstellungsseite steuerbar).
+
+function unrealizedPnlPct(stats: TraderStats): number | null {
+  const position = stats.currentPosition;
+  if (!position || !(position.entryPrice > 0) || !(stats.lastPrice > 0)) return null;
+  return (stats.lastPrice - position.entryPrice) / position.entryPrice;
+}
 
 export interface BotState {
   id: string;
@@ -388,10 +402,22 @@ export class BotInstance {
     logger.info(this.id, 'SYSTEM', `Strategie aktualisiert: ${config.strategy_name} (${config.strategy_type})`);
   }
 
+  /** Phase 3b: Ist die Self-Optimization für den Strategietyp aktuell aktiv? */
+  private isSelfOptActive(strategyType: string | undefined): boolean {
+    if (strategyType === 'scalping-adaptive') {
+      return normalizeNovaPulseConfig(this.detector.settings.novaPulseConfig).enabled;
+    }
+    if (strategyType === 'paet') {
+      return normalizePaetSelfOptConfig(this.activeStrategyConfig?.paet_settings?.paetConfig).enabled;
+    }
+    return false;
+  }
+
   /** Programmatic PAET adaptation — derives optimal settings from live STL/FFT output. */
   private applyPAETAdaptation(
     trendPrice: number,
     indicatorValues: Record<string, number> | undefined,
+    forecast?: MarketForecastEvidence | null,
   ): void {
     if (!this.activeStrategyConfig || !indicatorValues) return;
 
@@ -400,6 +426,19 @@ export class BotInstance {
       this.activeStrategyConfig.paet_settings?.paetConfig,
     );
     if (!paetOpt.enabled) return;  // ADR-021: Self-Optimization aus → kein Write
+
+    // Phase 3b: Self-Opt-Outcome-Gate — bei schlechter WR unter adaptierter
+    // Parametrik die PAET-Self-Optimization deaktivieren (statt weiterzulaufen).
+    if (getTimesFmSettings().selfOptGate) {
+      const gate = evaluateSelfOptGate(getSelfOptOutcomes(this.id, 'paet'), {
+        minTrades: getTimesFmSettings().minTrades,
+        minWinRate: getTimesFmSettings().minWinRate,
+      });
+      if (gate.disable) {
+        this.disablePaetSelfOpt(gate.reason ?? 'unbekannter Grund');
+        return;
+      }
+    }
 
     const sigma = indicatorValues['paet_sigma'];
     const period = indicatorValues['paet_period'];
@@ -412,7 +451,40 @@ export class BotInstance {
       ...(this.activeStrategyConfig.paet_settings ?? {}),
     };
 
-    const adapted = adaptPAETSettings(current, { sigma, period, trendPrice, omega }, paetOpt);
+    // Phase 3b.4/3b.2: Drift-Guard (Reset auf Baseline) + Reward-Skalierung.
+    // PAET-Clamp-Bounds spiegeln paetAdaptiveFork.ts (R1/R2/R3 + ω-Guard).
+    let effectivePaetOpt = paetOpt;
+    if (getTimesFmSettings().selfOptGate) {
+      const outcome = getSelfOptOutcomes(this.id, 'paet');
+      const drift = evaluateDriftGuard(
+        [
+          { key: 'stl_trend_window', value: current.stl_trend_window ?? 0, min: 20, max: 200 },
+          { key: 'collapse_threshold_pct', value: current.collapse_threshold_pct ?? 0, min: 0.05, max: 0.50 },
+          { key: 'evacuation_ticks', value: current.evacuation_ticks ?? 0, min: 1, max: 8 },
+          { key: 'false_alarm_penalty_omega', value: current.false_alarm_penalty_omega ?? 0, min: 0.5, max: 5.0 },
+        ],
+        outcome,
+      );
+      if (drift.reset) {
+        this.resetPaetBaseline(drift.reason ?? 'Drift-Guard');
+        return;
+      }
+      const reward = selfOptRewardBoost(outcome);
+      if (reward > 1) {
+        effectivePaetOpt = normalizePaetSelfOptConfig({
+          ...paetOpt,
+          blendRateR1: paetOpt.blendRateR1 * reward,
+          blendRateR2: paetOpt.blendRateR2 * reward,
+          blendRateGuard: paetOpt.blendRateGuard * reward,
+        });
+      }
+    }
+
+    const adapted = adaptPAETSettings(
+      current,
+      { sigma, period, trendPrice, omega, ...(forecast ? { forecast } : {}) },
+      effectivePaetOpt,
+    );
     if (Object.keys(adapted).length === 0) return;
 
     this.activeStrategyConfig.paet_settings = {
@@ -438,11 +510,120 @@ export class BotInstance {
     } catch (e) {
       console.warn(`[BotInstance] PAET adapt persist failed: ${(e as Error).message}`);
     }
+
+    // Phase 3b: jede programmatische Anpassung als Aktion loggen (Outcome-Loop).
+    try {
+      const actionSnapshot = { sigma, period, trendPrice, omega, forecast: forecast ?? null };
+      for (const [ruleKey, afterValue] of Object.entries(adapted)) {
+        const numericAfter = Number(afterValue);
+        if (!Number.isFinite(numericAfter)) continue;
+        recordSelfOptAction({
+          botId: this.id,
+          strategyType: 'paet',
+          ruleKey,
+          beforeValue: (current as unknown as Record<string, number>)[ruleKey],
+          afterValue: numericAfter,
+          snapshot: actionSnapshot,
+        });
+      }
+    } catch (e) {
+      console.warn(`[BotInstance] PAET action log failed: ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * Phase 3b: PAET-Self-Opt dauerhaft deaktivieren (WR-Gate). Setzt den
+   * Master-Toggle in `paet_settings.paetConfig` (per-Bot-Snapshot), löscht
+   * konvergierte Werte samt ω und loggt eine Lesson.
+   */
+  private disablePaetSelfOpt(reason: string): void {
+    if (!this.activeStrategyConfig?.paet_settings) return;
+    const paetOpt = normalizePaetSelfOptConfig(this.activeStrategyConfig.paet_settings.paetConfig);
+    const next = { ...paetOpt, enabled: false };
+    this.activeStrategyConfig.paet_settings = {
+      ...this.activeStrategyConfig.paet_settings,
+      paetConfig: next,
+    };
+    this.strategyEngine?.updateConfig(this.activeStrategyConfig);
+    try { setBotStrategyConfig(this.id, this.activeStrategyConfig); } catch { /* best effort */ }
+    deleteSetting(`paet_adapted_${this.id}`);
+    deleteSetting(`paet_omega_${this.id}`);
+    clearSelfOptOutcomes(this.id);
+    insertLesson(this.id, 'param_drift', `selfopt disabled (paet): ${reason}`, { source: 'selfopt_gate' }, 0.8);
+    logger.warn(this.id, 'TIMESFM', `PAET-Self-Opt deaktiviert (Outcome-Gate): ${reason}`);
+  }
+
+  /**
+   * Phase 3b.4: Nova-Pulse-Parametrik auf die Baseline (bots.settings) zurücksetzen.
+   * Löscht die konvergierte Delta-Schicht und startet eine frische Konvergenz.
+   */
+  private resetNovaPulseBaseline(reason: string): void {
+    let baseline: Partial<PatternSettings> = {};
+    try {
+      const row = db.prepare('SELECT settings FROM bots WHERE id = ?').get(this.id) as { settings: string } | undefined;
+      if (row?.settings) {
+        const parsed = JSON.parse(row.settings) as Partial<PatternSettings>;
+        if (parsed && typeof parsed === 'object') baseline = parsed;
+      }
+    } catch { baseline = {}; }
+    const base: Partial<PatternSettings> = {
+      floorWindow: baseline.floorWindow ?? DEFAULT_SETTINGS.floorWindow,
+      spikeThreshold: baseline.spikeThreshold ?? DEFAULT_SETTINGS.spikeThreshold,
+      sellDropThreshold: baseline.sellDropThreshold ?? DEFAULT_SETTINGS.sellDropThreshold,
+      takeProfitThreshold: baseline.takeProfitThreshold ?? DEFAULT_SETTINGS.takeProfitThreshold,
+    };
+    deleteSetting(`novapulse_adapted_${this.id}`);
+    clearSelfOptOutcomes(this.id);
+    this.updateSettings(base);
+    if (this.activeStrategyConfig?.scalping_settings) {
+      this.activeStrategyConfig.scalping_settings = {
+        ...this.activeStrategyConfig.scalping_settings,
+        ...base,
+      };
+      this.strategyEngine?.updateConfig(this.activeStrategyConfig);
+    }
+    insertLesson(this.id, 'param_drift', `selfopt drift reset (novapulse): ${reason}`, { source: 'drift_guard' }, 0.6);
+    logger.info(this.id, 'TIMESFM', `Nova-Pulse-Baseline zurückgesetzt (Drift-Guard): ${reason}`);
+  }
+
+  /**
+   * Phase 3b.4: PAET-Parametrik auf die Baseline (bots.strategyConfig) zurücksetzen.
+   * Löscht die konvergierte Delta-Schicht (inkl. ω) und startet frisch.
+   */
+  private resetPaetBaseline(reason: string): void {
+    if (!this.activeStrategyConfig?.paet_settings) return;
+    let baseline: Partial<Record<string, unknown>> = {};
+    try {
+      const raw = getBotStrategyConfig(this.id);
+      if (raw) {
+        const cfg = JSON.parse(raw) as StrategyConfig;
+        baseline = (cfg.paet_settings ?? {}) as Partial<Record<string, unknown>>;
+      }
+    } catch { baseline = {}; }
+    const num = (key: string, fallback: number): number => {
+      const v = baseline[key];
+      return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+    };
+    this.activeStrategyConfig.paet_settings = {
+      ...this.activeStrategyConfig.paet_settings,
+      stl_trend_window: num('stl_trend_window', PAET_DEFAULTS.stl_trend_window),
+      collapse_threshold_pct: num('collapse_threshold_pct', PAET_DEFAULTS.collapse_threshold_pct),
+      evacuation_ticks: num('evacuation_ticks', PAET_DEFAULTS.evacuation_ticks),
+      false_alarm_penalty_omega: num('false_alarm_penalty_omega', PAET_DEFAULTS.false_alarm_penalty_omega),
+    };
+    this.strategyEngine?.updateConfig(this.activeStrategyConfig);
+    try { setBotStrategyConfig(this.id, this.activeStrategyConfig); } catch { /* best effort */ }
+    deleteSetting(`paet_adapted_${this.id}`);
+    deleteSetting(`paet_omega_${this.id}`);
+    clearSelfOptOutcomes(this.id);
+    insertLesson(this.id, 'param_drift', `selfopt drift reset (paet): ${reason}`, { source: 'drift_guard' }, 0.6);
+    logger.info(this.id, 'TIMESFM', `PAET-Baseline zurückgesetzt (Drift-Guard): ${reason}`);
   }
 
   /** Programmatic Nova Pulse adaptation — derives optimal scalping base settings from live market context. */
   private applyNovaPulseAdaptation(
     indicatorValues: Record<string, number> | undefined,
+    forecast?: MarketForecastEvidence | null,
   ): void {
     if (!this.activeStrategyConfig || !indicatorValues) return;
 
@@ -450,6 +631,12 @@ export class BotInstance {
     const avgRange   = indicatorValues['adaptive_avgRange'];
 
     if (isNaN(volatility) || isNaN(avgRange) || volatility <= 0 || avgRange <= 0) return;
+
+    // TimesFM-Vorwärtsblick (optional): Realisierte Volatilität/Range Richtung
+    // erwarteter Schritt-Volatilität blenden. Qualität steuert das Gewicht und
+    // die Konvergenzgeschwindigkeit (forecastQuality).
+    const enriched = enrichNovaPulseSnapshot({ volatility, avgRange }, forecast);
+    if (enriched.volatility <= 0 || enriched.avgRange <= 0) return;
 
     const ss = this.activeStrategyConfig.scalping_settings ?? {};
     // Use live detector settings as the blend starting point so that AI-adjusted
@@ -462,6 +649,20 @@ export class BotInstance {
     // nach updateSettings → clampScalpingSettings → detector.updateSettings).
     const npCfg: NovaPulseConfig = normalizeNovaPulseConfig(ds.novaPulseConfig);
     if (!npCfg.enabled) return;  // ADR-020: master-off → komplett überspringen
+
+    // Phase 3b: Self-Opt-Outcome-Gate — bei schlechter WR unter adaptierter
+    // Parametrik die Self-Optimization deaktivieren (statt weiter zu konvergieren).
+    if (getTimesFmSettings().selfOptGate) {
+      const gate = evaluateSelfOptGate(getSelfOptOutcomes(this.id, 'scalping-adaptive'), {
+        minTrades: getTimesFmSettings().minTrades,
+        minWinRate: getTimesFmSettings().minWinRate,
+      });
+      if (gate.disable) {
+        this.disableNovaPulseSelfOpt(gate.reason ?? 'unbekannter Grund');
+        return;
+      }
+    }
+
     const current = {
       floorWindow:          ds.floorWindow,
       spikeThreshold:       ds.spikeThreshold,
@@ -469,7 +670,46 @@ export class BotInstance {
       takeProfitThreshold:  ds.takeProfitThreshold,
     };
 
-    const adapted = adaptNovaPulseSettingsBounded(current, { volatility, avgRange }, npCfg);
+    // Phase 3b.4: Drift-/Reversions-Guard — alle Keys an Clamp-Grenzen gepinnt
+    // und WR unter Schwelle → auf Baseline zurücksetzen (frische Konvergenz).
+    let effectiveCfg: NovaPulseConfig = npCfg;
+    if (getTimesFmSettings().selfOptGate) {
+      const outcome = getSelfOptOutcomes(this.id, 'scalping-adaptive');
+      const drift = evaluateDriftGuard(
+        [
+          { key: 'floorWindow', value: current.floorWindow, min: MIN_FLOOR_WINDOW, max: MAX_FLOOR_WINDOW },
+          { key: 'spikeThreshold', value: current.spikeThreshold, min: MIN_SPIKE_THRESHOLD_PCT, max: MAX_SPIKE_THRESHOLD_PCT },
+          { key: 'sellDropThreshold', value: current.sellDropThreshold, min: MIN_SELL_DROP_THRESHOLD_PCT, max: MAX_SELL_DROP_THRESHOLD_PCT },
+          { key: 'takeProfitThreshold', value: current.takeProfitThreshold, min: MIN_TAKE_PROFIT, max: MAX_TAKE_PROFIT },
+        ],
+        outcome,
+      );
+      if (drift.reset) {
+        this.resetNovaPulseBaseline(drift.reason ?? 'Drift-Guard');
+        return;
+      }
+      // Phase 3b.2: Reward-Skalierung — positive Evidenz beschleunigt Konvergenz.
+      const reward = selfOptRewardBoost(outcome);
+      if (reward > 1) {
+        effectiveCfg = normalizeNovaPulseConfig({
+          ...npCfg,
+          blendRateA: npCfg.blendRateA * reward,
+          blendRateB: npCfg.blendRateB * reward,
+          blendRateC: npCfg.blendRateC * reward,
+          blendRateD: npCfg.blendRateD * reward,
+        });
+      }
+    }
+
+    const adapted = adaptNovaPulseSettingsBounded(
+      current,
+      {
+        volatility: enriched.volatility,
+        avgRange: enriched.avgRange,
+        ...(enriched.forecastQuality !== undefined ? { forecastQuality: enriched.forecastQuality } : {}),
+      },
+      effectiveCfg,
+    );
     if (Object.keys(adapted).length === 0) return;
 
     this.activeStrategyConfig.scalping_settings = { ...ss, ...adapted };
@@ -488,6 +728,63 @@ export class BotInstance {
     } catch (e) {
       console.warn(`[BotInstance] Nova Pulse adapt persist failed: ${(e as Error).message}`);
     }
+
+    // Phase 3b: jede programmatische Anpassung als Aktion loggen (Outcome-Loop).
+    try {
+      const actionSnapshot = {
+        volatility: enriched.volatility,
+        avgRange: enriched.avgRange,
+        forecast: forecast ?? null,
+      };
+      for (const [ruleKey, afterValue] of Object.entries(adapted)) {
+        recordSelfOptAction({
+          botId: this.id,
+          strategyType: 'scalping-adaptive',
+          ruleKey,
+          beforeValue: (current as Record<string, number>)[ruleKey],
+          afterValue,
+          snapshot: actionSnapshot,
+        });
+      }
+    } catch (e) {
+      console.warn(`[BotInstance] Nova Pulse action log failed: ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * Phase 3b: Nova-Pulse-Self-Opt dauerhaft deaktivieren (WR-Gate). Setzt den
+   * Master-Toggle überall (Detector, StrategyEngine, bots.settings,
+   * bots.strategyConfig), löscht konvergierte Werte und loggt eine Lesson.
+   */
+  private disableNovaPulseSelfOpt(reason: string): void {
+    const ds = this.detector.settings;
+    const next: NovaPulseConfig = { ...normalizeNovaPulseConfig(ds.novaPulseConfig), enabled: false };
+    this.detector.updateSettings({ novaPulseConfig: next });
+    if (this.activeStrategyConfig) {
+      if (isScalpingType(this.activeStrategyConfig.strategy_type)) {
+        try {
+          const persistable = { ...DEFAULT_SETTINGS, ...this.detector.settings };
+          db.prepare('UPDATE bots SET settings = ? WHERE id = ?').run(JSON.stringify(persistable), this.id);
+        } catch (e) {
+          console.warn(`[BotInstance] Self-Opt-Disable (novapulse) mirror failed: ${(e as Error).message}`);
+        }
+      }
+      // Per-Bot-Snapshot inkl. deaktiviertem Toggle — überlebt Restarts.
+      try {
+        const snapshot: StrategyConfig = {
+          ...this.activeStrategyConfig,
+          scalping_settings: {
+            ...(this.activeStrategyConfig.scalping_settings ?? {}),
+            novaPulseConfig: next,
+          } as StrategyConfig['scalping_settings'],
+        };
+        setBotStrategyConfig(this.id, snapshot);
+      } catch { /* best effort */ }
+    }
+    deleteSetting(`novapulse_adapted_${this.id}`);
+    clearSelfOptOutcomes(this.id);
+    insertLesson(this.id, 'param_drift', `selfopt disabled (novapulse): ${reason}`, { source: 'selfopt_gate' }, 0.8);
+    logger.warn(this.id, 'TIMESFM', `Nova-Pulse-Self-Opt deaktiviert (Outcome-Gate): ${reason}`);
   }
 
   /** Apply strategy parameter adjustments from AI agent */
@@ -709,6 +1006,10 @@ export class BotInstance {
         // Feedback loop: attribute SELL outcome to the active agent advice entry
         if (trade.pnlPercent !== undefined) {
           updateAgentOutcome(this.id, trade.pnlPercent, trade.pnlPercent > 0);
+          const selfOptType = this.activeStrategyConfig?.strategy_type;
+          if (this.isSelfOptActive(selfOptType)) {
+            recordSelfOptOutcome(this.id, selfOptType as 'scalping-adaptive' | 'paet', trade.pnlPercent, trade.pnlPercent > 0);
+          }
         }
       }
       return trade;
@@ -896,9 +1197,27 @@ export class BotInstance {
     const equity = stats.balanceSOL + stats.balanceToken * stats.lastPrice;
     this.killSwitch.updateEquity(equity, Date.now());
 
+    // TimesFM: Forecast-Cache-Refresh-Sampling (non-blocking) + Evidenz-Snapshot.
+    // Refresh liegt im Cache (In-Flight-Dedupe, Failure-Cooldown) — kein HTTP im
+    // Hotpath. Der Snapshot speist die Runtime-Adaption (Vorwärtsblick), das
+    // Trade-Gate und die Trade-Metadaten.
+    timesFmCache.maybeRefresh(this.mintAddress);
+    const forecastSnapshot = timesFmCache.getSnapshot(this.mintAddress);
+    const forecastEvidence = forecastSnapshot
+      ? forecastToEvidence(forecastSnapshot.forecast, forecastSnapshot.ageMs)
+      : null;
+    const forecastMeta = forecastSnapshot
+      ? {
+          forecastNetReturnPct: forecastSnapshot.forecast.netExpectedReturnPct,
+          forecastDirectionScore: forecastSnapshot.forecast.signalVector.directionScore,
+          forecastSlopeConsistency: forecastSnapshot.forecast.signalVector.slopeConsistency,
+          forecastAgeMs: forecastSnapshot.ageMs,
+        }
+      : null;
+
     // Use StrategyEngine if a non-scalping strategy is assigned, else PatternDetector
     const result = this.strategyEngine
-      ? this.strategyEngine.analyze(history, stats)
+      ? this.strategyEngine.analyze(history, stats, forecastEvidence)
       : this.detector.analyze(history);
 
     // PAET programmatic adaptation — every 30 ticks, derive optimal settings
@@ -907,7 +1226,7 @@ export class BotInstance {
       this.activeStrategyConfig?.strategy_type === 'paet' &&
       this.cumulativeTicks % 30 === 0
     ) {
-      this.applyPAETAdaptation(result.floor, result.indicatorValues);
+      this.applyPAETAdaptation(result.floor, result.indicatorValues, forecastEvidence);
     }
 
     // Nova Pulse programmatic adaptation — every 30 ticks, calibrate base
@@ -917,7 +1236,38 @@ export class BotInstance {
       this.activeStrategyConfig?.strategy_type === 'scalping-adaptive' &&
       this.cumulativeTicks % 30 === 0
     ) {
-      this.applyNovaPulseAdaptation(result.indicatorValues);
+      this.applyNovaPulseAdaptation(result.indicatorValues, forecastEvidence);
+    }
+
+    // ── TimesFM: Trade-Gate (Runtime-Steering-Plan Phase 2) ──────────────────
+    let gateActionForTrade: string | null = null;
+    if (getTimesFmSettings().tradeGate) {
+      const holdState =
+        this.strategyEngine?.getScalpingHoldState() ?? this.detector.getHoldState();
+      const gateDecision = evaluateForecastGate({
+        signal: result.signal,
+        forecast: forecastSnapshot?.forecast ?? null,
+        ageMs: forecastSnapshot?.ageMs,
+        enabled: true,
+        inPosition: (stats.openPositionsCount ?? 0) > 0,
+        detectorInPosition: holdState.inPosition,
+        minHoldOk: holdState.minHoldTicks <= 0 || holdState.heldTicks >= holdState.minHoldTicks,
+        unrealizedPnlPct: unrealizedPnlPct(stats),
+      });
+      if (gateDecision.action === 'demote_buy' && result.signal === 'BUY') {
+        result.signal = 'HOLD';
+        result.reason = result.reason
+          ? `${result.reason}; forecast_gate_buy_demote`
+          : 'forecast_gate_buy_demote';
+        logger.action(this.id, 'TIMESFM', `BUY demoted → HOLD (${gateDecision.reason})`);
+      } else if (gateDecision.action === 'allow_exit' && result.signal === 'HOLD') {
+        result.signal = 'SELL';
+        result.reason = result.reason
+          ? `${result.reason}; forecast_gate_exit`
+          : 'forecast_gate_exit';
+        gateActionForTrade = 'forecast_exit';
+        logger.action(this.id, 'TIMESFM', `Früh-Exit durch Forecast (${gateDecision.reason})`);
+      }
     }
 
     if (result.signal === 'BUY') {
@@ -952,22 +1302,37 @@ export class BotInstance {
          logger.action(this.id, 'TRADER', `Trade ausgefuehrt: SELL bei $${trade.price.toFixed(8)} | PnL: ${trade.pnlPercent?.toFixed(2)}%`);
        }
 
-       // Save trade to database for persistent storage and frontend display
+       // Save trade to database for persistent storage and frontend display.
+       // TimesFM-Runtime-Steering: Forecast-Snapshot am Trade für Outcome-Zuordnung.
        db.prepare(`
-         INSERT INTO trades (botId, timestamp, action, price, amount, pnlPercent)
-         VALUES (?, ?, ?, ?, ?, ?)
+         INSERT INTO trades (
+           botId, timestamp, action, price, amount, pnlPercent,
+           forecastNetReturnPct, forecastDirectionScore, forecastSlopeConsistency,
+           forecastAgeMs, gateAction
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        `).run(
          this.id,
          Date.now(),
          trade.action,
          trade.price,
          trade.amount ?? null,
-         trade.pnlPercent ?? null
+         trade.pnlPercent ?? null,
+         forecastMeta?.forecastNetReturnPct ?? null,
+         forecastMeta?.forecastDirectionScore ?? null,
+         forecastMeta?.forecastSlopeConsistency ?? null,
+         forecastMeta?.forecastAgeMs ?? null,
+         gateActionForTrade,
        );
 
        // Feedback loop: attribute SELL outcome to the active agent advice entry
        if (trade.action === 'SELL' && trade.pnlPercent !== undefined) {
          updateAgentOutcome(this.id, trade.pnlPercent, trade.pnlPercent > 0);
+         // Phase 3b: SELL-Outcome an die Self-Opt-Epoche attribuieren (nur solange aktiv).
+         const selfOptType = this.activeStrategyConfig?.strategy_type;
+         if (this.isSelfOptActive(selfOptType)) {
+           recordSelfOptOutcome(this.id, selfOptType as 'scalping-adaptive' | 'paet', trade.pnlPercent, trade.pnlPercent > 0);
+         }
          this.killSwitch.recordTradeClosed(trade.pnlPercent);
 
          // PAET: schedule a delayed price check (10 ticks) to adapt ω

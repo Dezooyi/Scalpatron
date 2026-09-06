@@ -4,7 +4,7 @@ import type { BotInstance } from './botInstance.js';
 import type { BotState } from './botInstance.js';
 import type { IndicatorConfig } from './strategyTypes.js';
 import type { TradeLogEntry } from './trader.js';
-import { exec, spawn } from 'child_process';
+import { exec, execFile, spawn } from 'child_process';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
@@ -25,6 +25,7 @@ import {
   getTimeWindowPerformance,
   detectTimeWindowDrift,
   getLessonsForBot,
+  getSelfOptOutcomes,
   type TimeWindowPerformance,
   type TimeWindowDrift,
   type LessonEntry,
@@ -32,6 +33,7 @@ import {
   type ForceMultiplierTierStats,
   db,
 } from './db.js';
+import { timesFmCache } from './timesFmCache.js';
 import { generateLessons } from './lessonsGenerator.js';
 import { PriceFeed } from './priceFeed.js';
 import { isScalpingType } from './strategyEngine.js';
@@ -383,7 +385,7 @@ const DEFAULT_SYSTEM_PROMPT = buildSystemPrompt('scalping');
 
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   provider: (process.env.OLLAMA_PROVIDER as any) ?? 'ollama',
-  model: process.env.OLLAMA_MODEL ?? 'alibaba-cn/qwen3.5-plus',
+  model: process.env.OLLAMA_MODEL ?? ((process.env.OLLAMA_PROVIDER ?? 'ollama') === 'opencode' ? 'opencode/default' : 'alibaba-cn/qwen3.5-plus'),
   cycleMinutes: 21,
   temperature: 0.3,
   maxTokens: 1536,
@@ -758,6 +760,23 @@ export class OllamaAgent {
     } catch { return []; }
   }
 
+  async listOpenCodeModels(): Promise<string[]> {
+    const command = process.env.OPENCODE_BIN ?? (process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
+    return new Promise((resolve) => {
+      execFile(command, ['models'], { timeout: 15_000, maxBuffer: 512 * 1024 }, (error, stdout) => {
+        if (error) {
+          console.error(`[OllamaAgent] OpenCode-Modellliste konnte nicht geladen werden: ${error.message}`);
+          resolve([]);
+          return;
+        }
+        const models = stdout.split(/\r?\n/)
+          .map(line => line.trim())
+          .filter(line => /^[a-z0-9_-]+\/[a-z0-9._:+-]+$/i.test(line));
+        resolve([...new Set(models)]);
+      });
+    });
+  }
+
   async isAvailable(): Promise<boolean> {
     try {
       const res = await fetch(`${OLLAMA_URL}/api/tags`);
@@ -941,6 +960,51 @@ export class OllamaAgent {
     // Trigger GeckoTerminal background refresh for this token (non-blocking, cached)
     if (botTokenMint) geckoTerminalFeed.getLatest(botTokenMint);
 
+    // Phase 4 (TimesFM-Runtime-Steering): numerische Forecast-Evidenz + Self-Opt-
+    // Zustand als zusätzlicher Prompt-Kontext. Optional — ohne frischen Forecast
+    // wird nur der Self-Opt-Status (falls vorhanden) ergänzt.
+    let runtimeEvidenceBlock = '';
+    try {
+      const fresh = timesFmCache.getSnapshot(botTokenMint);
+      if (!fresh) {
+        await timesFmCache.refresh(botTokenMint).catch(() => null);
+      }
+      const snapshot = fresh ?? timesFmCache.getSnapshot(botTokenMint);
+      const forecastLines: string[] = [];
+      if (snapshot) {
+        const sv = snapshot.forecast.signalVector;
+        forecastLines.push(`- netReturnPct (nach Kosten): ${snapshot.forecast.netExpectedReturnPct.toFixed(2)}%`);
+        forecastLines.push(`- directionScore: ${sv.directionScore.toFixed(2)} | slopeConsistency: ${sv.slopeConsistency.toFixed(2)}`);
+        forecastLines.push(`- forecastVolatilityPct: ${sv.forecastVolatilityPct.toFixed(2)} | dataQuality: ${sv.dataQualityScore.toFixed(2)}`);
+        forecastLines.push(`- Alter: ${Math.round(snapshot.ageMs / 1000)}s | Horizont: ${snapshot.forecast.horizon}`);
+      }
+      const selfOptLines: string[] = [];
+      const stratType = (state as { strategyType?: string }).strategyType ?? 'scalping';
+      if (stratType === 'scalping-adaptive' || stratType === 'paet') {
+        const active = stratType === 'paet'
+          ? (state.strategyConfig?.paet_settings?.paetConfig?.enabled ?? true)
+          : ((settings as { novaPulseConfig?: { enabled?: boolean } }).novaPulseConfig?.enabled ?? true);
+        selfOptLines.push(`- self-opt (${stratType}): ${active ? 'aktiv' : 'deaktiviert'}`);
+        const outcome = getSelfOptOutcomes(state.id, stratType);
+        if (outcome && outcome.tradeCount > 0) {
+          const wr = ((outcome.wins / outcome.tradeCount) * 100).toFixed(0);
+          selfOptLines.push(`- Epoch-Outcome: ${outcome.tradeCount} Trades, WR ${wr}%, totalPnl ${outcome.totalPnl.toFixed(1)}%`);
+        } else {
+          selfOptLines.push('- Epoch-Outcome: keine Trades seit letztem Reset');
+        }
+      }
+      if (forecastLines.length > 0 || selfOptLines.length > 0) {
+        runtimeEvidenceBlock = `FORECAST & SELF-OPT EVIDENCE (numerisch, optional):
+Anweisung: Diese Evidenz ist KEINE Orderanweisung — bestehende Gates, Sicherheitsgrenzen und das Outcome-Gate nicht umgehen. Forecast höchstens als Zusatz-Kontext für Begründungen von Settings/Regime/Parametern verwenden.
+${forecastLines.length > 0
+    ? `TIMESFM-FORECAST (${botTokenMint.slice(0, 6)}…):\n${forecastLines.join('\n')}`
+    : 'TIMESFM-FORECAST: nicht verfügbar (Worker/Cache leer) — ignoriert.'}
+${selfOptLines.length > 0 ? `SELF-OPT:\n${selfOptLines.join('\n')}` : ''}`;
+      }
+    } catch (err) {
+      logger.warn(state.id, 'AI_AGENT', `[OllamaAgent] Runtime-Evidenz nicht ladbar: ${(err as Error).message}`);
+    }
+
     const prompt = await this.buildPrompt(
       recentStats,
       longTermStats,
@@ -954,6 +1018,7 @@ export class OllamaAgent {
       botTokenMint,
       openPositionBlock,
       { hourPerf, dayPerf, hourDrift, dayDrift, lessons, strategyRegimePerf, forceMultiplierStats },
+      runtimeEvidenceBlock,
     );
 
     const activeStrategyType = (state as any).strategyType ?? 'scalping';
@@ -1136,6 +1201,7 @@ export class OllamaAgent {
       strategyRegimePerf?: StrategyRegimePerformance[];
       forceMultiplierStats?: ForceMultiplierTierStats[];
     },
+    runtimeEvidenceBlock = '',
   ): Promise<string> {
     // ASCII sparkline replaces verbose raw price samples (~310 token savings)
     const priceValues = recentPrices.map(p => p.price);
@@ -1364,6 +1430,7 @@ CURRENT AGGRESSIVENESS:
 
 ${strategyInfo}
 ${openPositionBlock ? `\n${openPositionBlock}` : ''}
+${runtimeEvidenceBlock ? `\n${runtimeEvidenceBlock}` : ''}
 ${macroBlock}
 ${tokenContextBlock}
 ${geckoBlock ? `\n${geckoBlock}` : ''}
@@ -1437,18 +1504,20 @@ ${formatCandleRows(m15Candles, 5)}`;
       console.log(`[OllamaAgent] Querying opencode CLI (model: ${this.config.model}) via file ${tempPromptPath}...`);
 
       return new Promise((resolve, reject) => {
-        const opencodeCmd = 'C:\\Users\\info\\AppData\\Roaming\\npm\\opencode.cmd';
+        const opencodeCmd = process.env.OPENCODE_BIN ?? (process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
         const args = [
           'run',
           'Analyze market data from the attached file. Respond ONLY with the requested JSON.',
-          '-m', this.config.model,
           '-f', tempPromptPath,
           '--format', 'json',
         ];
+        if (this.config.model !== 'opencode/default' && this.config.model.trim() !== '') {
+          args.splice(2, 0, '-m', this.config.model);
+        }
 
         console.log(`[OllamaAgent] Executing: ${opencodeCmd} ${args.join(' ')}`);
 
-        const child = spawn(opencodeCmd, args, { shell: true, timeout: 180000 });
+        const child = spawn(opencodeCmd, args, { shell: false, timeout: 180000 });
         child.stdin?.end();
 
         let stdout = '';
@@ -1467,7 +1536,22 @@ ${formatCandleRows(m15Candles, 5)}`;
           if (code !== 0) {
             console.error(`[OllamaAgent] opencode error (Code ${code})`);
             console.error(`[OllamaAgent] Stderr: ${stderr.slice(0, 500)}`);
-            return reject(new Error(`opencode error: ${code} - ${stderr.slice(0, 100)}`));
+            let detail = stderr.trim();
+            if (!detail) {
+              for (const line of stdout.split('\n')) {
+                try {
+                  const event = JSON.parse(line) as { type?: string; error?: { data?: { message?: string }; message?: string } };
+                  const message = event.error?.data?.message ?? event.error?.message;
+                  if (event.type === 'error' && message) {
+                    detail = message;
+                    break;
+                  }
+                } catch {
+                  // Ignore non-JSON status lines.
+                }
+              }
+            }
+            return reject(new Error(`opencode error: ${code} - ${detail.slice(0, 300)}`));
           }
 
           // --format json outputs newline-delimited JSON events.

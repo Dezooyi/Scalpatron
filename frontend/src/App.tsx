@@ -57,6 +57,7 @@ import { LiveClusterPricePanel } from "@/components/LiveClusterPricePanel";
 import { LastActivityCard } from "@/components/LastActivityCard";
 import { LiveFeedListCard } from "@/components/LiveFeedListCard";
 import { BotTelemetry } from "@/components/BotTelemetry";
+import { TimesFmSettingsCard } from "@/components/TimesFmSettingsCard";
 import { useTooltip } from "@/components/GlobalTooltip";
 import {
   Card,
@@ -556,6 +557,14 @@ export default function App() {
   const [agentConfig, setAgentConfig] = useState<AgentConfigType | null>(null);
   const [agentHistory, setAgentHistory] = useState<AgentHistoryEntry[]>([]);
   const [agentModels, setAgentModels] = useState<string[]>([]);
+  const [timesFmStatus, setTimesFmStatus] = useState<{
+    enabled: boolean;
+    reachable: boolean;
+    model: string | null;
+    endpoint: string;
+    contextLength: number;
+    horizon: number;
+  } | null>(null);
   const [selectedHistoryBot, setSelectedHistoryBot] = useState<string>("all");
   const [configStatus, setConfigStatus] = useState<string>("");
   const [isTriggering, setIsTriggering] = useState(false);
@@ -1242,7 +1251,6 @@ export default function App() {
     if (activeTab === "agent") {
       loadAgentHistory(selectedHistoryBot === "all" ? undefined : selectedHistoryBot);
       loadAgentStatus();
-      loadAgentModels();
       const botId = selectedHistoryBot !== "all" ? selectedHistoryBot : undefined;
       const perfUrl = botId
         ? `${getApiBase()}/api/agent/regime-performance?botId=${botId}`
@@ -1709,20 +1717,26 @@ export default function App() {
           temperature: Math.round((data.config.temperature ?? 0.3) * 100),
           minConfidence: Math.round((data.config.minConfidence ?? 0.4) * 100),
         });
+        void loadAgentModels(data.config.provider);
       }
+      const timesFmRes = await fetch(`${getApiBase()}/api/timesfm/status`);
+      if (timesFmRes.ok) setTimesFmStatus(await timesFmRes.json());
     } catch (err) {
       console.error("[Agent] Status fetch error:", err);
     }
   };
 
   // Load Agent Models
-  const loadAgentModels = async () => {
+  const loadAgentModels = async (providerOverride?: AgentConfigType["provider"]) => {
     try {
-      const res = await fetch(`${getApiBase()}/api/agent/models`);
+      const provider = providerOverride ?? agentConfig?.provider ?? 'ollama';
+      const res = await fetch(`${getApiBase()}/api/agent/${provider === 'opencode' ? 'opencode-models' : 'models'}`);
       const data = await res.json();
-      // Server gibt Array von OllamaModelInfo zurück: [{ name, size, parameter_size, family }, ...]
       if (Array.isArray(data)) {
-        setAgentModels(data.map((m: { name: string }) => m.name));
+        // OpenCode returns string[] directly; Ollama returns [{ name: string }, ...]
+        setAgentModels(data.map((m: unknown) =>
+          typeof m === 'string' ? m : (m as { name: string }).name
+        ).filter(Boolean));
       } else {
         setAgentModels([]);
       }
@@ -6037,12 +6051,24 @@ export default function App() {
                           <select
                             id="agentModel"
                             className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm disabled:opacity-50"
-                            value={agentConfig?.model || ''}
-                            disabled={agentConfig?.provider === 'opencode'}
-                            onChange={(e) => agentConfig && updateAgentConfig({ ...agentConfig, model: e.target.value })}
+                            value={agentConfig?.provider === 'opencode'
+                              ? (agentConfig.model || 'opencode/default')
+                              : (agentConfig?.model || '')}
+                            onChange={(e) => agentConfig && updateAgentConfig({
+                              ...agentConfig,
+                              model: e.target.value === 'opencode/default' ? '' : e.target.value,
+                            })}
                           >
                             {agentConfig?.provider === 'opencode' ? (
-                              <option value="">Lokal Konfiguriertes Modell (Opencode)</option>
+                              <>
+                                <option value="opencode/default">OpenCode-Standardmodell</option>
+                                {agentConfig.model && !agentModels.includes(agentConfig.model) && (
+                                  <option value={agentConfig.model}>{agentConfig.model} (aktuell)</option>
+                                )}
+                                {agentModels.map((model) => (
+                                  <option key={model} value={model}>{model}</option>
+                                ))}
+                              </>
                             ) : agentModels.length === 0 ? (
                               <option value="">Lade Modelle...</option>
                             ) : (
@@ -6051,7 +6077,7 @@ export default function App() {
                               ))
                             )}
                           </select>
-                          <Button variant="outline" size="sm" onClick={loadAgentModels} disabled={agentConfig?.provider === 'opencode'}>
+                          <Button variant="outline" size="sm" onClick={() => void loadAgentModels()}>
                             &#8635;
                           </Button>
                         </div>
@@ -6127,6 +6153,49 @@ export default function App() {
                     </div>
                   </CardContent>
                 </Card>
+
+                {/* TimesFM Forecast Layer */}
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="flex items-center gap-2">
+                      <TrendingUp className="h-5 w-5 text-cyan-400" /> TimesFM Forecast Layer
+                    </CardTitle>
+                    <CardDescription>
+                      Numerische Forecast-Evidenz für Advisor und Entscheider. TimesFM ersetzt weder das LLM noch die Trading-Gates.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                      <div className="rounded-md border border-white/10 bg-muted/20 p-3">
+                        <div className="text-xs text-muted-foreground">Status</div>
+                        <div className={`mt-1 font-semibold ${timesFmStatus?.reachable ? 'text-green-400' : timesFmStatus?.enabled ? 'text-amber-400' : 'text-muted-foreground'}`}>
+                          {timesFmStatus?.reachable ? 'Worker verbunden' : timesFmStatus?.enabled ? 'Fallback aktiv' : 'Deaktiviert'}
+                        </div>
+                      </div>
+                      <div className="rounded-md border border-white/10 bg-muted/20 p-3">
+                        <div className="text-xs text-muted-foreground">Modell</div>
+                        <div className="mt-1 font-mono text-sm truncate" title={timesFmStatus?.model ?? undefined}>
+                          {timesFmStatus?.model ?? 'timesfm-2.5-pytorch'}
+                        </div>
+                      </div>
+                      <div className="rounded-md border border-white/10 bg-muted/20 p-3">
+                        <div className="text-xs text-muted-foreground">Kontext</div>
+                        <div className="mt-1 font-mono text-sm">{timesFmStatus?.contextLength ?? 128} Punkte</div>
+                      </div>
+                      <div className="rounded-md border border-white/10 bg-muted/20 p-3">
+                        <div className="text-xs text-muted-foreground">Horizont</div>
+                        <div className="mt-1 font-mono text-sm">{timesFmStatus?.horizon ?? 12} Schritte</div>
+                      </div>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                      <span>Endpoint: <code className="text-foreground/80">{timesFmStatus?.endpoint ?? 'http://127.0.0.1:8001/forecast'}</code></span>
+                      <span>Rolle: Ranking-Signal, kein direktes Handelssignal</span>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* TimesFM & Self-Optimization Einstellungen (schreibbar) */}
+                <TimesFmSettingsCard />
 
                 {/* System Prompt (merged: per-bot manager) */}
                 <Card>

@@ -2,7 +2,7 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.j
 import bs58 from 'bs58';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { CONFIG } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -60,6 +60,9 @@ export function getWalletLock(pubkey: string): AsyncMutex {
 }
 
 function updateEnvKey(key: string, value: string): void {
+  if (!fs.existsSync(ENV_PATH)) {
+    fs.writeFileSync(ENV_PATH, '', 'utf-8');
+  }
   let content = fs.readFileSync(ENV_PATH, 'utf-8');
   const regex = new RegExp(`^${key}=.*$`, 'm');
   if (regex.test(content)) {
@@ -148,4 +151,6 @@ async function main(): Promise<void> {
   console.log('[Wallet] Hinweis: Token-Balance wird bot-spezifisch im Trader-Modul geprüft');
 }
 
-main().catch(console.error);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(console.error);
+}

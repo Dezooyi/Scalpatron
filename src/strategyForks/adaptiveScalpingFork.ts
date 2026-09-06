@@ -45,33 +45,54 @@ export const adaptiveScalpingFork: StrategyFork = {
       spikeMultiplier *= 0.95; // slightly easier entries with the trend
     }
 
+    // ── Exit threshold adaptation ────────────────────────────────────────────
+    let sellDropMultiplier = 1.0;
+    let takeProfitMultiplier = 1.0;
+
+    if (ctx.volatility > 3.0) {
+      // High volatility: take profit faster and use a tighter trailing stop.
+      sellDropMultiplier *= 0.85;
+      takeProfitMultiplier *= 0.9;
+    } else if (ctx.volatility < 0.3) {
+      // Low volatility: give trades more room, moves are smaller.
+      sellDropMultiplier *= 1.15;
+    }
+
+    // ── TimesFM-Erwartung: Vorwärtsblick in Entry-/Exit-Multiplikatoren ──────
+    // Blendet Richtung/Stärke des Kurzfrist-Forecasts ein. Wirkt nur bei
+    // frischer, qualitativ guter Evidenz; der Multiplikator-Korridor bleibt ±25 %.
+    const fc = ctx.forecast;
+    if (fc && fc.dataQuality >= 0.6) {
+      const consistency = fc.slopeConsistency;
+      if (consistency >= 0.5) {
+        if (fc.netReturnPct >= 0.3) {
+          // Positiver Forecast: Einstieg mit dem Trend erleichtern, Gewinne laufen lassen.
+          spikeMultiplier *= 1 - 0.1 * consistency;      // min ×0.90
+          sellDropMultiplier *= 1 + 0.05 * consistency;  // max ×1.05
+        } else if (fc.netReturnPct <= -0.3) {
+          // Negativer Forecast: stärkeren Spike verlangen, Gewinne früher schützen.
+          spikeMultiplier *= 1 + 0.25 * consistency;      // max ×1.25
+          sellDropMultiplier *= 1 - 0.1 * consistency;    // min ×0.90
+        }
+      }
+    }
+
     settings.spikeThreshold = clamp(
       (settings.spikeThreshold ?? 1.0) * spikeMultiplier,
       0.05,
       5.0,
     );
 
-    // ── Exit adaptation ──────────────────────────────────────────────────────
-    if (ctx.volatility > 3.0) {
-      // High volatility: take profit faster and use a tighter trailing stop.
-      settings.sellDropThreshold = clamp(
-        (settings.sellDropThreshold ?? 5.0) * 0.85,
-        0.5,
-        10.0,
-      );
-      settings.takeProfitThreshold = clamp(
-        (settings.takeProfitThreshold ?? 0.10) * 0.9,
-        0.01,
-        0.5,
-      );
-    } else if (ctx.volatility < 0.3) {
-      // Low volatility: give trades more room, moves are smaller.
-      settings.sellDropThreshold = clamp(
-        (settings.sellDropThreshold ?? 5.0) * 1.15,
-        0.5,
-        10.0,
-      );
-    }
+    settings.sellDropThreshold = clamp(
+      (settings.sellDropThreshold ?? 5.0) * sellDropMultiplier,
+      0.5,
+      10.0,
+    );
+    settings.takeProfitThreshold = clamp(
+      (settings.takeProfitThreshold ?? 0.10) * takeProfitMultiplier,
+      0.01,
+      0.5,
+    );
 
     // ── Cooldown adaptation ──────────────────────────────────────────────────
     if (ctx.session === 'overlap') {

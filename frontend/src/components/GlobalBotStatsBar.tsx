@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useMemo } from "react";
-import { Clock, Activity, TrendingUp, TrendingDown, Target, Skull, BrainCircuit, BarChart3, LineChart, Square, Play, RefreshCw, Wallet, Coins, ExternalLink, Settings as SettingsIcon } from "lucide-react";
+import { Clock, Activity, TrendingUp, TrendingDown, Target, Skull, BrainCircuit, BarChart3, LineChart, Square, Play, RefreshCw, Wallet, Coins, ExternalLink, Cpu, Settings as SettingsIcon } from "lucide-react";
 import type { BotState } from "@/App";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import gsap from "gsap";
@@ -125,6 +125,8 @@ export function GlobalBotStatsBar({
   const [onchainSol, setOnchainSol] = useState<number | null>(null);
   const [onchainNetwork, setOnchainNetwork] = useState<string>("");
   const [onchainAddress, setOnchainAddress] = useState<string>("");
+  const [timesFmEnabled, setTimesFmEnabled] = useState<boolean | null>(null);
+  const [timesFmWorkerRunning, setTimesFmWorkerRunning] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(() => setNow(Date.now()), 1000);
@@ -147,6 +149,7 @@ export function GlobalBotStatsBar({
 
   // Aggregated Stats
   const totalTrades = bots.reduce((acc, bot) => acc + (bot.stats?.totalTrades || 0), 0);
+  const totalOpenPositions = bots.reduce((acc, bot) => acc + (bot.stats?.openPositionsCount || 0), 0);
   const totalWinTrades = bots.reduce((acc, bot) => acc + (bot.stats?.wins || 0), 0);
   const totalLossTrades = bots.reduce((acc, bot) => acc + (bot.stats?.losses || 0), 0);
 
@@ -227,6 +230,24 @@ export function GlobalBotStatsBar({
 
   useEffect(() => {
     const tick = () => { void fetchWalletInfo(); };
+    tick();
+    const interval = setInterval(tick, 30_000);
+    return () => clearInterval(interval);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // TimesFM-/Self-Opt-Status (Einstellungs-Endpoint, 30s-Polling wie Wallet).
+  useEffect(() => {
+    const fetchTimesFm = async () => {
+      const base = getApiBase?.() ?? "";
+      try {
+        const res = await fetch(`${base}/api/timesfm/settings`);
+        if (!res.ok) return;
+        const data = await res.json() as { settings?: { enabled?: boolean }; workerRunning?: boolean };
+        setTimesFmEnabled(data.settings?.enabled ?? false);
+        setTimesFmWorkerRunning(Boolean(data.workerRunning));
+      } catch { /* ignore */ }
+    };
+    const tick = () => { void fetchTimesFm(); };
     tick();
     const interval = setInterval(tick, 30_000);
     return () => clearInterval(interval);
@@ -444,9 +465,16 @@ export function GlobalBotStatsBar({
 
         <StatBadge
           icon={<BarChart3 className="h-3 w-3 text-blue-400" />}
-          title="Total Trades"
+          title="Closed Trades"
           value={totalTrades.toString()}
           valueColor="text-blue-100"
+        />
+
+        <StatBadge
+          icon={<Activity className="h-3 w-3 text-amber-400" />}
+          title="Open Positions"
+          value={totalOpenPositions.toString()}
+          valueColor="text-amber-300"
         />
 
         <StatBadge
@@ -501,6 +529,18 @@ export function GlobalBotStatsBar({
               )}
               <span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500"></span></span>
             </div>
+          }
+        />
+
+        <StatBadge
+          icon={<Cpu className="h-3 w-3 text-cyan-400" />}
+          title="TimesFM"
+          value={timesFmEnabled === null ? "…" : timesFmEnabled ? (timesFmWorkerRunning ? "Worker" : "An") : "Aus"}
+          valueColor={timesFmEnabled ? "text-cyan-300" : "text-zinc-500"}
+          secondaryContent={
+            timesFmEnabled ? (
+              <span className={`rounded-full h-2 w-2 ${timesFmWorkerRunning ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+            ) : undefined
           }
         />
 

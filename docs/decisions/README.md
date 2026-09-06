@@ -34,6 +34,8 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 | [022](adr-022-sse-state-memory-footprint.md) | Langzeit-stabiler SSE/State-Memory-Footprint (Browser-OOM nach Stunden) | Akzeptiert & Implementiert | Architektur / Frontend / Backend-SSE |
 | [023](adr-023-cross-asset-synthetic-hedge.md) | Synthetische Cross-Asset-Hedge-Strategie (Perp-Replikation) | Ersetzt durch ADR-024 | Strategie / Architektur / Risk |
 | [024](adr-024-delta-neutral-funding-carry.md) | Delta-neutraler BTC Funding-Carry-Bot (Pivot nach Profitabilitäts-Validierung) | Verworfen (Phase 0: ≈ sUSDe) | Strategie / Architektur / Risk |
+| [025](adr-025-outcome-verified-self-optimization.md) | Outcome-verifizierte Self-Optimization (Nova Pulse / PAET) | Akzeptiert & Implementiert | Strategie / Runtime-Adaption |
+| [026](adr-026-timesfm-runtime-steering.md) | TimesFM-Runtime-Steering (Cache, Trade-Gate, Fork-Enrichment, LLM-Evidenz) | Akzeptiert & Implementiert | Forecast / Runtime-Adaption / LLM |
 
 > **Status-Werte:** `Vorgeschlagen` → `Akzeptiert` → `Veraltet` / `Ersetzt durch ADR-0XXX`
 > Ein `Vorgeschlagen`-ADR beschreibt einen geplanten, noch **nicht** implementierten Change.

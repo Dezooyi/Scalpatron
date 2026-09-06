@@ -1,0 +1,4 @@
+# The 3.x package exposes the TimesFM 2.5 PyTorch API used by the worker.
+# The worker explicitly loads the 2.5 checkpoint, not TimesFM 3 weights.
+timesfm[torch]==3.0.1
+numpy>=1.26

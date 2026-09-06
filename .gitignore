@@ -98,3 +98,8 @@ plans/
 
 # --- Agent Memory (lokal, umgebungsspezifisch) ---
 memory/
+
+# --- Kilo/Codegraph (lokal) ---
+.omo/
+.kilo/
+.opencode/

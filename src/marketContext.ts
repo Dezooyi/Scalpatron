@@ -1,5 +1,5 @@
 import type { PricePoint } from './priceFeed.js';
-import type { MarketContext, Timeframe } from './strategyTypes.js';
+import type { MarketContext, MarketForecastEvidence, Timeframe } from './strategyTypes.js';
 import { aggregate } from './candleAggregator.js';
 
 const DEFAULT_LOOKBACK_TICKS = 60; // ~2 minutes at 2s polling
@@ -69,6 +69,8 @@ export interface MarketContextOptions {
   lookbackTicks?: number;
   /** Higher timeframe used for confirmation signal. */
   higherTimeframe?: Timeframe;
+  /** TimesFM-Forecast-Evidenz (optional) — wird nur durchgereicht, nicht bewertet. */
+  forecast?: MarketForecastEvidence;
 }
 
 /**
@@ -106,5 +108,6 @@ export function buildMarketContext(
     avgRange,
     trendBias,
     higherTimeframeSignal,
+    ...(options.forecast ? { forecast: options.forecast } : {}),
   };
 }

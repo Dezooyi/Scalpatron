@@ -8,6 +8,8 @@
 - [Architektur](./architecture.md) — System-Design, Datenfluss, Modul-Interaktion
 - [Module](./modules.md) — Detailbeschreibung jeder Datei
 - [Konfiguration](./configuration.md) — .env, PatternSettings, Strategy Config, AI-Aggressiveness
+- [TimesFM-Integration](./timesfm-integration-plan.md) — lokaler Forecast-Worker, Advisor-Anbindung und Ausbauplan
+- [TimesFM-Runtime-Steering](./timesfm-runtime-steering-plan.md) — Forecast-Gate, Fork-/Self-Opt-Vorwärtsblick, Outcome-Loop (Status: umgesetzt)
 - [Trading-Strategie](./strategy.md) — Range Spike Scalper + Multi-Strategy Architecture
 - [Multi-Strategy](./multi-strategy.md) — JSON Strategy Schema, Templates, IndicatorEngine, Feedback-Loop
 - [Neue Strategien](./neue-strategien.md) — Detaillierter Katalog aller StrategyEngine-Templates, Forks und PAET

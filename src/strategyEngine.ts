@@ -113,9 +113,22 @@ export class StrategyEngine {
     return Math.min(1, this.warmupTicksElapsed / ADAPTIVE_WARMUP_TICKS);
   }
 
-  analyze(ticks: PricePoint[], stats?: import('./trader.js').TraderStats): PatternResult {
+  /**
+   * Scalping-Positionszustand für externe Gates (TimesFM Forecast-Gate).
+   * Liefert null für Nicht-Scalping-Strategien (diese nutzen keinen inneren
+   * PatternDetector). Rein lesend — ändert keinen State.
+   */
+  getScalpingHoldState(): { inPosition: boolean; heldTicks: number; minHoldTicks: number } | null {
+    return this.scalpingDetector?.getHoldState() ?? null;
+  }
+
+  analyze(
+    ticks: PricePoint[],
+    stats?: import('./trader.js').TraderStats,
+    forecast?: import('./strategyTypes.js').MarketForecastEvidence | null,
+  ): PatternResult {
     if (this.config.strategy_type === 'scalping-adaptive' && this.scalpingDetector) {
-      const context = buildMarketContext(ticks);
+      const context = buildMarketContext(ticks, { forecast: forecast ?? undefined });
       const adaptedConfig = this.forkRegistry.adapt(this.config, context);
       const adaptedSettings: PatternSettings = {
         ...DEFAULT_SETTINGS,

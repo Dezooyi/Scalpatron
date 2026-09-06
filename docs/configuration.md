@@ -22,6 +22,57 @@ POLL_INTERVAL_MS=2000
 
 **Wichtig:** `.env` enthält den Private Key und darf **niemals** committed werden.
 
+## TimesFM Forecasting (optional)
+
+TimesFM läuft als lokaler Python-Worker und ergänzt den Advisor um einen kleinen
+Forecast-Ranking-Faktor. Es ersetzt weder die Strategie-Gates noch Ollama.
+
+```bash
+npm run timesfm:setup
+```
+
+Der Setup-Schritt installiert TimesFM und PyTorch getrennt von den Node-
+Abhängigkeiten. Die Installation kann wegen PyTorch und des Modell-Downloads
+viel Speicherplatz benötigen.
+
+In `.env` aktivieren (Standard ist AKTIV; die Variablen dienen als Override,
+die eigentliche Steuerung läuft über die Einstellungsseite → TimesFM):
+
+```env
+TIMESFM_ENABLED=true
+TIMESFM_URL=http://127.0.0.1:8001/forecast
+TIMESFM_CONTEXT_LENGTH=128
+TIMESFM_HORIZON=12
+TIMESFM_TIMEOUT_MS=2500
+```
+
+### Runtime-Steering (optional, Paper-first)
+
+Zusätzliche Flags für Cache, Trade-Gate und Self-Opt-Outcome-Loop (Details im
+[Runtime-Steering-Plan](./timesfm-runtime-steering-plan.md)):
+
+```env
+# Forecast-Cache (ms, bis ein Forecast als veraltet gilt; Fehler-Cooldown)
+# TIMESFM_CACHE_TTL_MS=120000
+# TIMESFM_CACHE_FAIL_COOLDOWN_MS=30000
+# Trade-Gate am Hotpath (BUY-Demotion/Exit-Unterstützung)
+# TIMESFM_TRADE_GATE_ENABLED=true
+# Self-Opt-Outcome-Loop (Reward-Skalierung, Drift-Guard, Auto-Disable)
+# TIMESFM_SELFOPT_GATE_ENABLED=true
+# TIMESFM_SELFOPT_MIN_TRADES=20
+# TIMESFM_SELFOPT_MIN_WIN_RATE=0.35
+```
+
+Bei `TIMESFM_ENABLED=true` startet `npm start` den lokalen Worker automatisch
+zusammen mit dem Backend. Ein separates `npm run timesfm`-Terminal ist dann nicht
+erforderlich. Der Worker nutzt bevorzugt `.venv-timesfm/bin/python` und fällt
+auf `python3` zurück.
+
+Der erste Start lädt den TimesFM-2.5-Checkpoint von Hugging Face. TimesFM 3.0
+wird hier bewusst nicht verwendet, weil dessen vortrainierte Gewichte aktuell
+unter einer Non-Commercial-Lizenz stehen. Ohne Worker oder bei zu wenig
+historischen Punkten läuft der Advisor automatisch ohne Forecast weiter.
+
 ---
 
 ## PatternSettings — Trading-Parameter
@@ -62,7 +113,6 @@ Preis
 | Niedrige Volatilität | 25–40 | 0.2–0.3% | 0.1–0.15% |
 | Seitwärts (Range) | 20 | 0.3% | 0.15% |
 | Starker Trend | 30–50 | 1.0–2.0% | 0.3–0.5% |
-
 ---
 
 ## Trader-Optionen
@@ -86,12 +136,9 @@ const trader = new Trader({
 ### Paper/Live Mode über UI
 
 In der **Engine Status Card** kann der Mode per Klick umgeschaltet werden:
-
-- 🧪 **Paper Mode** (gelb) — Simulation ohne echte Trades
 - 🔥 **Live Mode** (rot) — Echte Trades auf der Blockchain
 
 **Warnung:** Live Mode führt echte Transaktionen aus! Stelle sicher, dass die Wallet ausreichend SOL hat und du die Risiken verstehst.
-
 ---
 
 ## Correction Agent — Automatische Optimierung (Legacy)
@@ -106,7 +153,6 @@ Der Rule-Based Agent greift **nach jedem abgeschlossenen Trade** ein und analysi
 | Win-Rate > 80% (≥5 Sells) | spikeThreshold -15% | Min 0.1% |
 
 Der Agent startet erst nach mindestens **5 Trades** und **3 Sells**.
-
 ---
 
 ## Strategy Configuration Schema (Phase 7)
@@ -141,7 +187,6 @@ interface StrategyConfig {
 ```
 
 **Strategie zuweisen:** `PUT /api/bots/:id/strategy` mit dem JSON-Body `{ config: StrategyConfig }`
-
 ---
 
 ## AI Aggressiveness System
@@ -169,10 +214,13 @@ balanceSOL × (min(aggressiveness, maxAggressiveness) / 100)
 | DEAD | Minimum (5–10%) |
 
 **Standard-Werte:** maxAggressiveness = 10%, anfängliche AI-Aggressiveness = 10%
-
 ---
 
 ## OllamaAgent Konfiguration
+
+Bei `OLLAMA_PROVIDER=opencode` bleibt `OLLAMA_MODEL` leer. Dann übergibt die App
+keine `-m`-Option und OpenCode verwendet das dort konfigurierte Standardmodell.
+Eine Modell-ID in `.env` würde die OpenCode-Auswahl überschreiben.
 
 | Parameter | Default | Beschreibung |
 |-----------|---------|-------------|

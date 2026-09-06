@@ -27,6 +27,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { db } from './db.js';
+import { forecastMint } from './timesFmForecast.js';
 
 const GECKO_BASE = 'https://api.geckoterminal.com/api/v2';
 const CACHE_TTL_MS = 5 * 60 * 1000;   // 5 min
@@ -97,6 +98,18 @@ export interface SuggestionDiagnostics {
   profitFactor: number | null;        // wins sum / |losses sum|
   regimeConfidence: number;           // 0..1
   warnings: string[];                 // human-readable risk notes
+  timesfmExpectedReturnPct?: number;
+  timesfmNetExpectedReturnPct?: number;
+  timesfmSignalVector?: {
+    directionScore: number;
+    slopeConsistency: number;
+    forecastVolatilityPct: number;
+    dataQualityScore: number;
+  };
+  timesfmContextLength?: number;
+  timesfmHorizon?: number;
+  timesfmMedianIntervalMs?: number;
+  timesfmMaxGapMs?: number;
 }
 
 // --- internal pipeline types ---
@@ -759,10 +772,16 @@ export async function runAdvisorWorkflow(): Promise<{
 
   for (const pool of pools) {
     const regime = classifyPoolRegime(pool);
+    const timesfm = await forecastMint(pool.mintAddress);
     const matches = profileStrategyFit(pool, regime, templates, histCache);
     for (const match of matches) {
       const cfg = composeBotConfig(match, pool);
-      const confidence = calibrateConfidence(match, regime);
+      // Keep the forecast as a small ranking signal; it cannot bypass the
+      // advisor's existing regime and liquidity gates.
+      const forecastAdjustment = timesfm && timesfm.signalVector.slopeConsistency >= 0.5
+        ? clamp(timesfm.netExpectedReturnPct / 20 * timesfm.signalVector.slopeConsistency, -0.08, 0.08)
+        : 0;
+      const confidence = clamp(calibrateConfidence(match, regime) + forecastAdjustment, 0, 1);
       const diagnostics: SuggestionDiagnostics = {
         baseScore: match.baseScore,
         historicalWinRate: match.historicalWinRate,
@@ -770,6 +789,15 @@ export async function runAdvisorWorkflow(): Promise<{
         profitFactor: match.profitFactor,
         regimeConfidence: regime.confidence,
         warnings: match.warnings,
+        ...(timesfm ? {
+          timesfmExpectedReturnPct: timesfm.expectedReturnPct,
+          timesfmNetExpectedReturnPct: timesfm.netExpectedReturnPct,
+          timesfmSignalVector: timesfm.signalVector,
+          timesfmContextLength: timesfm.contextLength,
+          timesfmHorizon: timesfm.horizon,
+          timesfmMedianIntervalMs: timesfm.medianIntervalMs,
+          timesfmMaxGapMs: timesfm.maxGapMs,
+        } : {}),
       };
       scored.push({ pool, match, confidence, cfg, diagnostics });
     }

@@ -169,4 +169,28 @@ export interface MarketContext {
   avgRange: number;               // average absolute return per tick, in percent
   trendBias: 'up' | 'down' | 'neutral';
   higherTimeframeSignal?: 'bullish' | 'bearish' | 'neutral';
+  /** TimesFM-Vorhersage-Evidenz (optional, nur wenn frischer Forecast vorliegt). */
+  forecast?: MarketForecastEvidence;
+}
+
+/**
+ * Kompakte TimesFM-Evidenz für Runtime-Adaption (Forks, Self-Opt-Snapshots).
+ * Wird aus `TimesFmForecast` + Alter über `forecastToEvidence()` erzeugt —
+ * bewusst strukturell getrennt vom Adapter-Typ, um Zyklen zu vermeiden.
+ */
+export interface MarketForecastEvidence {
+  /** Netto-Return über den Horizont (%, nach geschätzten Kosten). */
+  netReturnPct: number;
+  /** Normalisierte Richtung -1..1. */
+  directionScore: number;
+  /** Anteil der Forecast-Schritte in dominanter Richtung 0..1. */
+  slopeConsistency: number;
+  /** Streuung der Forecast-Schritt-Renditen (%). */
+  volatilityPct: number;
+  /** Datenqualität der Eingangsreihe 0..1. */
+  dataQuality: number;
+  /** Forecast-Alter in ms. */
+  ageMs: number;
+  /** Forecast-Horizont in Schritten. */
+  horizon: number;
 }

@@ -13,6 +13,13 @@ export interface NovaPulseMarketSnapshot {
   volatility: number;
   /** Average absolute tick return × 100 (%), from buildMarketContext(). */
   avgRange: number;
+  /**
+   * TimesFM-Vorwärtsblick (optional): Effektive Volatilität/Range wurden vom
+   * Caller bereits Richtung erwarteter Schritt-Volatilität geblendet. Liegt
+   * dieser Wert vor, werden die Blend-Raten mit der Forecast-Datenqualität
+   * skaliert (unsichere Prognose → langsamere Konvergenz).
+   */
+  forecastQuality?: number;
 }
 
 function clamp(v: number, min: number, max: number): number {
@@ -89,9 +96,15 @@ export function adaptNovaPulseSettings(
 
   const targets = computeNovaPulseTargets(snapshot);
 
+  // TimesFM-Vorwärtsblick (optional): Unsichere Prognose verlangsamt die
+  // Konvergenz aller Regeln (Skala 0.75..1.0 je Datenqualität).
+  const qualityScale = snapshot.forecastQuality !== undefined
+    ? 0.5 + 0.5 * Math.max(0, Math.min(1, snapshot.forecastQuality))
+    : 1;
+
   // ── Rule A: Floor Window from Volatility Rhythm ──────────────────────────
   if (validVol) {
-    const blended = Math.round(blend(current.floorWindow, targets.tFW, config.blendRateA));
+    const blended = Math.round(blend(current.floorWindow, targets.tFW, config.blendRateA * qualityScale));
     if (blended !== current.floorWindow) {
       adapted.floorWindow = blended;
     }
@@ -99,7 +112,8 @@ export function adaptNovaPulseSettings(
 
   // ── Rule B: Spike Threshold above Noise Floor ─────────────────────────────
   if (validRange) {
-    const blendRate = targets.tST > current.spikeThreshold ? config.blendRateB : config.blendRateB * 0.5;
+    const blendRate = (targets.tST > current.spikeThreshold ? config.blendRateB : config.blendRateB * 0.5)
+      * qualityScale;
     const blended   = blend(current.spikeThreshold, targets.tST, blendRate);
     const rounded   = Math.round(blended * 100) / 100;
     if (Math.abs(rounded - current.spikeThreshold) > 0.01) {
@@ -109,7 +123,7 @@ export function adaptNovaPulseSettings(
 
   // ── Rule C: Sell Drop from Range Rhythm ──────────────────────────────────
   if (validRange) {
-    const blended = blend(current.sellDropThreshold, targets.tSD, config.blendRateC);
+    const blended = blend(current.sellDropThreshold, targets.tSD, config.blendRateC * qualityScale);
     const rounded = Math.round(blended * 100) / 100;
     if (Math.abs(rounded - current.sellDropThreshold) > 0.05) {
       adapted.sellDropThreshold = clamp(rounded, 0.5, 10.0);
@@ -118,7 +132,7 @@ export function adaptNovaPulseSettings(
 
   // ── Rule D: Take Profit from Achievable Range ─────────────────────────────
   if (validRange) {
-    const blended = blend(current.takeProfitThreshold, targets.tTP, config.blendRateD);
+    const blended = blend(current.takeProfitThreshold, targets.tTP, config.blendRateD * qualityScale);
     const rounded = Math.round(blended * 1000) / 1000;
     if (Math.abs(rounded - current.takeProfitThreshold) > 1e-4) {
       adapted.takeProfitThreshold = clamp(rounded, 0.01, 0.50);

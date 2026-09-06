@@ -149,6 +149,53 @@ export function initDB() {
 
     CREATE INDEX IF NOT EXISTS idx_wallet_balances_wallet ON wallet_balances(walletAddress, timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_wallet_balances_mint ON wallet_balances(mintAddress, timestamp DESC);
+
+    -- TimesFM: Forecast-Log für Qualitätsmessung (Phase 0.2 des Runtime-Steering-Plans).
+    CREATE TABLE IF NOT EXISTS forecast_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mintAddress TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      contextLength INTEGER,
+      horizon INTEGER,
+      expectedReturnPct REAL,
+      netExpectedReturnPct REAL,
+      directionScore REAL,
+      slopeConsistency REAL,
+      forecastVolatilityPct REAL,
+      dataQualityScore REAL,
+      medianIntervalMs INTEGER,
+      maxGapMs INTEGER,
+      forecastPrices TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_forecast_log_mint_ts ON forecast_log(mintAddress, timestamp DESC);
+
+    -- Self-Optimization-Outcome-Loop (Phase 3b): Event-Log je programmatischer
+    -- Parameter-Anpassung (Nova Pulse / PAET) plus Epoch-Aggregate für das Gate.
+    CREATE TABLE IF NOT EXISTS selfopt_actions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      botId TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      strategyType TEXT NOT NULL,
+      ruleKey TEXT NOT NULL,
+      beforeValue REAL NOT NULL,
+      afterValue REAL NOT NULL,
+      snapshot TEXT NOT NULL,
+      FOREIGN KEY (botId) REFERENCES bots(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_selfopt_actions_bot_ts ON selfopt_actions(botId, timestamp DESC);
+
+    CREATE TABLE IF NOT EXISTS selfopt_outcomes (
+      botId TEXT NOT NULL,
+      strategyType TEXT NOT NULL,
+      tradeCount INTEGER NOT NULL DEFAULT 0,
+      wins INTEGER NOT NULL DEFAULT 0,
+      totalPnl REAL NOT NULL DEFAULT 0,
+      lastUpdated INTEGER NOT NULL,
+      PRIMARY KEY (botId, strategyType),
+      FOREIGN KEY (botId) REFERENCES bots(id) ON DELETE CASCADE
+    );
   `);
 
   // Strategies table — stores StrategyConfig JSON (templates + user-saved)
@@ -207,6 +254,12 @@ export function initDB() {
     // Config-Eintrag in der strategies-Tabelle → Self-Opt-Toggle eines Bots
     // wirkt auf alle. Per-bot-Spalte bricht das.
     `ALTER TABLE bots ADD COLUMN strategyConfig TEXT DEFAULT NULL`,
+    // TimesFM-Runtime-Steering (Phase 0.3): Forecast-Snapshot am Trade für Outcome-Zuordnung.
+    `ALTER TABLE trades ADD COLUMN forecastNetReturnPct REAL DEFAULT NULL`,
+    `ALTER TABLE trades ADD COLUMN forecastDirectionScore REAL DEFAULT NULL`,
+    `ALTER TABLE trades ADD COLUMN forecastSlopeConsistency REAL DEFAULT NULL`,
+    `ALTER TABLE trades ADD COLUMN forecastAgeMs INTEGER DEFAULT NULL`,
+    `ALTER TABLE trades ADD COLUMN gateAction TEXT DEFAULT NULL`,
   ];
 
   for (const sql of migrations) {
@@ -225,6 +278,8 @@ export function initDB() {
 
   console.log('[DB] Scalpatron Database initialized.');
 }
+
+initDB();
 
 /**
  * WAL-Checkpoint-Guard: verhindert, dass das WAL-File bei dauerhaften Reads
@@ -574,8 +629,178 @@ export function deleteSetting(key: string): void {
   stmt.run(key);
 }
 
+// --- TimesFM Forecast Log (Runtime-Steering-Plan Phase 0.2) ---
+export interface ForecastLogEntry {
+  mintAddress: string;
+  timestamp: number;
+  contextLength?: number;
+  horizon?: number;
+  expectedReturnPct?: number;
+  netExpectedReturnPct?: number;
+  directionScore?: number;
+  slopeConsistency?: number;
+  forecastVolatilityPct?: number;
+  dataQualityScore?: number;
+  medianIntervalMs?: number;
+  maxGapMs?: number;
+  forecastPrices?: number[];
+}
+
+/** Persistiert einen frischen TimesFM-Forecast für spätere Qualitäts- und Outcome-Messung. */
+export function logForecast(entry: ForecastLogEntry): void {
+  try {
+    db.prepare(`
+      INSERT INTO forecast_log (
+        mintAddress, timestamp, contextLength, horizon, expectedReturnPct,
+        netExpectedReturnPct, directionScore, slopeConsistency, forecastVolatilityPct,
+        dataQualityScore, medianIntervalMs, maxGapMs, forecastPrices
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      entry.mintAddress,
+      entry.timestamp,
+      entry.contextLength ?? null,
+      entry.horizon ?? null,
+      entry.expectedReturnPct ?? null,
+      entry.netExpectedReturnPct ?? null,
+      entry.directionScore ?? null,
+      entry.slopeConsistency ?? null,
+      entry.forecastVolatilityPct ?? null,
+      entry.dataQualityScore ?? null,
+      entry.medianIntervalMs ?? null,
+      entry.maxGapMs ?? null,
+      entry.forecastPrices ? JSON.stringify(entry.forecastPrices) : null,
+    );
+  } catch (e) {
+    console.warn(`[DB] forecast_log write failed: ${(e as Error).message}`);
+  }
+}
+
+export function getLatestForecastLogs(mintAddress: string, limit = 100): ForecastLogEntry[] {
+  const rows = db.prepare(
+    `SELECT * FROM forecast_log WHERE mintAddress = ? ORDER BY timestamp DESC LIMIT ?`
+  ).all(mintAddress, limit) as Array<Record<string, unknown>>;
+  return rows.map(row => {
+    const entry: ForecastLogEntry = {
+      mintAddress: String(row.mintAddress),
+      timestamp: Number(row.timestamp),
+    };
+    for (const key of [
+      'contextLength', 'horizon', 'expectedReturnPct', 'netExpectedReturnPct',
+      'directionScore', 'slopeConsistency', 'forecastVolatilityPct', 'dataQualityScore',
+      'medianIntervalMs', 'maxGapMs',
+    ] as const) {
+      const v = row[key];
+      if (v !== null && v !== undefined) entry[key] = Number(v);
+    }
+    if (typeof row.forecastPrices === 'string') {
+      try { entry.forecastPrices = JSON.parse(row.forecastPrices) as number[]; } catch { /* ignore */ }
+    }
+    return entry;
+  });
+}
+
+// --- Self-Optimization Outcome-Loop (Phase 3b) ---
+
+export interface SelfOptActionEntry {
+  botId: string;
+  strategyType: string;
+  ruleKey: string;
+  beforeValue: number;
+  afterValue: number;
+  snapshot: unknown;
+}
+
+/** Event-Log: eine programmatische Parameter-Anpassung (Nova Pulse / PAET). */
+export function recordSelfOptAction(entry: SelfOptActionEntry): void {
+  try {
+    db.prepare(`
+      INSERT INTO selfopt_actions (botId, timestamp, strategyType, ruleKey, beforeValue, afterValue, snapshot)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      entry.botId,
+      Date.now(),
+      entry.strategyType,
+      entry.ruleKey,
+      entry.beforeValue,
+      entry.afterValue,
+      JSON.stringify(entry.snapshot ?? {}),
+    );
+  } catch (e) {
+    console.warn(`[DB] selfopt_actions write failed: ${(e as Error).message}`);
+  }
+}
+
+/** SELL-Outcome an die aktuelle Self-Opt-Epoche des Bots attribuieren. */
+export function recordSelfOptOutcome(
+  botId: string,
+  strategyType: string,
+  pnlPercent: number,
+  isWin: boolean,
+): void {
+  if (strategyType !== 'scalping-adaptive' && strategyType !== 'paet') return;
+  try {
+    db.prepare(`
+      INSERT INTO selfopt_outcomes (botId, strategyType, tradeCount, wins, totalPnl, lastUpdated)
+      VALUES (?, ?, 0, 0, 0, ?)
+      ON CONFLICT (botId, strategyType) DO NOTHING
+    `).run(botId, strategyType, Date.now());
+    db.prepare(`
+      UPDATE selfopt_outcomes
+      SET tradeCount = tradeCount + 1,
+          wins = wins + ?,
+          totalPnl = totalPnl + ?,
+          lastUpdated = ?
+      WHERE botId = ? AND strategyType = ?
+    `).run(isWin ? 1 : 0, pnlPercent, Date.now(), botId, strategyType);
+  } catch (e) {
+    console.warn(`[DB] selfopt_outcomes update failed: ${(e as Error).message}`);
+  }
+}
+
+export interface SelfOptOutcomeState {
+  botId: string;
+  strategyType: string;
+  tradeCount: number;
+  wins: number;
+  totalPnl: number;
+  lastUpdated: number;
+}
+
+export function getSelfOptOutcomes(
+  botId: string,
+  strategyType: string,
+): SelfOptOutcomeState | null {
+  const row = db.prepare(
+    `SELECT botId, strategyType, tradeCount, wins, totalPnl, lastUpdated
+     FROM selfopt_outcomes WHERE botId = ? AND strategyType = ?`
+  ).get(botId, strategyType) as SelfOptOutcomeState | undefined;
+  return row ?? null;
+}
+
+/** Epoch zurücksetzen (nach Auto-Disable oder manuellem Reset). */
+export function clearSelfOptOutcomes(botId: string): void {
+  db.prepare(`DELETE FROM selfopt_outcomes WHERE botId = ?`).run(botId);
+}
+
+/** Aktuelle Self-Opt-Regel-Status je Regel-Key (für Analyse/Dashboard). */
+export function getRecentSelfOptActions(botId: string, limit = 100): SelfOptActionEntry[] {
+  const rows = db.prepare(
+    `SELECT botId, timestamp, strategyType, ruleKey, beforeValue, afterValue, snapshot
+     FROM selfopt_actions WHERE botId = ? ORDER BY timestamp DESC LIMIT ?`
+  ).all(botId, limit) as Array<Record<string, unknown>>;
+  return rows.map(row => ({
+    botId: String(row.botId),
+    strategyType: String(row.strategyType),
+    ruleKey: String(row.ruleKey),
+    beforeValue: Number(row.beforeValue),
+    afterValue: Number(row.afterValue),
+    snapshot: row.snapshot,
+  }));
+}
+
 // --- Agent Config Persistence ---
 const AGENT_CONFIG_KEY = 'agent_config';
+
 
 export function saveAgentConfig(config: object): void {
   setSetting(AGENT_CONFIG_KEY, JSON.stringify(config));
