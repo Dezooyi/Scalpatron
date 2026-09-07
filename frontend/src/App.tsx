@@ -43,6 +43,7 @@ import {
   PowerOff,
   RotateCcw,
 } from "lucide-react";
+import { buildTradeCycles, type CycleEvent } from "@/lib/tradeCycles";
 import { EquityCurveChart } from "@/components/performance/EquityCurveChart";
 import { PriceChart } from "@/components/performance/PriceChart";
 import Documentation from "@/components/Documentation";
@@ -3569,8 +3570,13 @@ export default function App() {
                                       </div>
                                       <div className="flex flex-wrap gap-1.5">
                                         <span className="inline-flex items-center gap-1 bg-purple-500/10 text-purple-400 border border-purple-500/30 px-2 py-0.5 rounded text-xs-custom font-mono">
-                                          {selectedBot.recentTrades?.length ?? 0} Trades
+                                          {selectedBot.stats?.totalTrades ?? 0} Trades
                                         </span>
+                                        {(selectedBot.stats?.openPositionsCount ?? 0) > 0 && (
+                                          <span className="inline-flex items-center gap-1 bg-amber-500/10 text-amber-400 border border-amber-500/30 px-2 py-0.5 rounded text-xs-custom font-mono">
+                                            OPEN {selectedBot.stats?.openPositionsCount ?? 0}
+                                          </span>
+                                        )}
                                         <span className="inline-flex items-center gap-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded text-xs-custom font-mono">
                                           W: {selectedBot.stats?.wins ?? 0}
                                         </span>
@@ -5369,24 +5375,50 @@ export default function App() {
                             <div className="flex items-center gap-2 px-4 pt-3 pb-2 border-b border-border/30">
                               <TrendingUp className="h-3.5 w-3.5 text-primary" />
                               <span className="text-xs font-semibold tracking-wide text-zinc-300">Trade History</span>
-                              <span className="ml-auto text-xs-custom font-mono text-zinc-500">{selectedBot.recentTrades?.length ?? 0} trades</span>
+                              {(() => {
+                                const { closed, openBuy } = buildTradeCycles((selectedBot.recentTrades ?? []) as CycleEvent[]);
+                                return (
+                                  <span className="ml-auto text-xs-custom font-mono text-zinc-500">
+                                    {closed.length} {closed.length === 1 ? "trade" : "trades"}{openBuy ? " · 1 open" : ""}
+                                  </span>
+                                );
+                              })()}
                             </div>
                             <div className="p-2 overflow-auto max-h-[280px] custom-scrollbar">
                               {(() => {
-                                const tradeRows: LogFeedRowData[] = (selectedBot.recentTrades || []).map((t: { timestamp: number; action: string; price: number; pnlPercent?: number }, i: number) => {
-                                  const pnlNode = t.pnlPercent != null
-                                    ? <span className={`font-mono font-bold ${t.pnlPercent >= 0 ? "text-green-400" : "text-red-400"}`}>{t.pnlPercent >= 0 ? "+" : ""}{t.pnlPercent.toFixed(2)}%</span>
+                                const { closed, openBuy } = buildTradeCycles((selectedBot.recentTrades ?? []) as CycleEvent[]);
+                                const fmtPrice = (p?: number | null): string => (p != null ? `$${p.toFixed(8)}` : "—");
+                                const tradeRows: LogFeedRowData[] = [];
+
+                                // Ein Eintrag pro geschlossenem Trade (BUY→SELL als Roundtrip).
+                                closed.forEach((c, i) => {
+                                  const pnl = typeof c.sell.pnlPercent === "number" ? c.sell.pnlPercent : null;
+                                  const pnlNode = pnl != null
+                                    ? <span className={`font-mono font-bold ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>{pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}%</span>
                                     : undefined;
-                                  return {
-                                    id: i,
-                                    timestamp: new Date(t.timestamp).toLocaleTimeString([], { hour12: false }),
-                                    badge: { text: t.action, variant: (t.action === "BUY" ? "green" : "red") as BadgeVariant },
-                                    mainContent: `$${t.price?.toFixed(8) ?? "—"}`,
+                                  tradeRows.push({
+                                    id: `trade-${c.sell.timestamp}-${i}`,
+                                    timestamp: new Date(c.sell.timestamp).toLocaleTimeString([], { hour12: false }),
+                                    badge: { text: "SELL", variant: "red" as BadgeVariant },
+                                    mainContent: <span className="font-mono">{c.buy ? `${fmtPrice(c.buy.price)} → ` : ""}{fmtPrice(c.sell.price)}</span>,
                                     rightContent: pnlNode,
-                                    accent: i === 0 ? (t.action === "BUY" ? "green" : "red") : undefined,
-                                    hoverText: `${t.action}  $${t.price?.toFixed(8)}${t.pnlPercent != null ? `  PnL: ${t.pnlPercent >= 0 ? "+" : ""}${t.pnlPercent.toFixed(2)}%` : ""}`,
-                                  };
+                                    accent: "red",
+                                    hoverText: `Roundtrip: BUY ${fmtPrice(c.buy?.price)} → SELL ${fmtPrice(c.sell.price)}${pnl != null ? `  PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%` : ""}`,
+                                  });
                                 });
+
+                                // Offene Position (letzter BUY ohne Exit) separat als offen kennzeichnen.
+                                if (openBuy) {
+                                  tradeRows.unshift({
+                                    id: `open-${openBuy.timestamp}`,
+                                    timestamp: new Date(openBuy.timestamp).toLocaleTimeString([], { hour12: false }),
+                                    badge: { text: "OPEN", variant: "yellow" as BadgeVariant },
+                                    mainContent: <span className="font-mono">{fmtPrice(openBuy.price)}</span>,
+                                    accent: "green",
+                                    hoverText: `BUY ${fmtPrice(openBuy.price)} — offene Position (noch kein Exit)`,
+                                  });
+                                }
+
                                 return <LogFeedList rows={tradeRows} emptyMessage="No trades recorded yet." showFadeGradient />;
                               })()}
                             </div>

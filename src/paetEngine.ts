@@ -3,8 +3,9 @@
 
 import type { PricePoint } from './priceFeed.js';
 import type { PatternResult } from './patternDetector.js';
-import type { StrategyConfig } from './strategyTypes.js';
+import type { StrategyConfig, MarketForecastEvidence } from './strategyTypes.js';
 import { stlDecompose, computeDerivatives, volatilityBand } from './signalProcessor.js';
+import { isUsableForecastEvidence } from './strategy/selfOptSnapshots.js';
 
 // Re-export the canonical type alias so callers don't need to reach into strategyTypes
 export type PaetSettings = NonNullable<StrategyConfig['paet_settings']>;
@@ -64,6 +65,39 @@ export function projectCollapseCandles(
   return positives.length === 0 ? Infinity : Math.min(...positives);
 }
 
+// ── ADR-027: Forecast-Gate-Helfer für PAET ──────────────────────────────────
+
+const PAET_ADVERSE_NET_RETURN_PCT = -0.5;
+const PAET_ADVERSE_DIRECTION_SCORE = -0.2;
+const PAET_OMEGA_GUARD_REDUCTION = 0.25;
+
+/** Stark negativer, konsistenter Forecast blockt PAET-Entries und senkt ω. */
+export function isPaetForecastAdverse(
+  forecast: MarketForecastEvidence | null | undefined,
+): boolean {
+  if (!isUsableForecastEvidence(forecast)) return false;
+  if (forecast.slopeConsistency < 0.5) return false;
+  return (
+    forecast.netReturnPct <= PAET_ADVERSE_NET_RETURN_PCT ||
+    forecast.directionScore <= PAET_ADVERSE_DIRECTION_SCORE
+  );
+}
+
+/**
+ * Effektive Fehlalarm-Penalty ω für das PNR-Budget (ADR-027 E4).
+ * Stark negativer Forecast reduziert ω_eff (→ schnellerer Exit), ω selbst
+ * bleibt unverändert und kalibriert weiter über `recordOutcome`.
+ */
+export function paetEffectiveOmega(
+  omega: number,
+  forecast: MarketForecastEvidence | null | undefined,
+): number {
+  if (!isPaetForecastAdverse(forecast)) return omega;
+  const quality = forecast!.slopeConsistency * forecast!.dataQuality;
+  const factor = 1 - PAET_OMEGA_GUARD_REDUCTION * Math.max(0, Math.min(1, quality));
+  return Math.max(0.5, omega * factor);
+}
+
 export class PAETEngine {
   private cfg: Required<PaetSettings>;
   private peakPrice = 0;
@@ -91,6 +125,17 @@ export class PAETEngine {
     this.omega = Math.max(0.5, Math.min(5.0, value));
   }
 
+  /**
+   * ADR-027: Extern ausgelöster SELL (manuell oder Forecast-Gate) mit
+   * Engine-Sync. Setzt den Peak auf den Exit-Preis (frischer Collapse-Bezug)
+   * und markiert den Sell-Tick, damit der Entry-Cooldown greift — verhindert
+   * den Sofort-Re-Entry nach externem Exit.
+   */
+  onExternalExit(tickCount: number, exitPrice: number): void {
+    if (exitPrice > 0) this.peakPrice = exitPrice;
+    this.lastSellTick = tickCount;
+  }
+
   // Called after a completed trade to adapt ω.
   // postExitPriceChange: fractional change in price N ticks after EXIT
   //   positive = price recovered  → false alarm
@@ -103,7 +148,11 @@ export class PAETEngine {
     this.omega = Math.max(0.5, Math.min(5.0, this.omega));
   }
 
-  analyze(ticks: PricePoint[], openPositions = 0): PatternResult {
+  analyze(
+    ticks: PricePoint[],
+    openPositions = 0,
+    forecast: MarketForecastEvidence | null = null,
+  ): PatternResult {
     const n = ticks.length;
     const currentPrice = ticks[n - 1]?.price ?? 0;
 
@@ -166,8 +215,12 @@ export class PAETEngine {
     if (currentPrice <= 0 || this.peakPrice <= 0) return base;
 
     // ── Phase 3: PNR trigger ──────────────────────────────────────────────────
+    // ADR-027: Stark negativer Forecast senkt ω_eff (Budget-Kürzung → frühere
+    // Evakuierung) und blockt unten die Entries. ω selbst bleibt unverändert.
+    const fcAdverse = isPaetForecastAdverse(forecast);
+    const omegaEff = paetEffectiveOmega(this.omega, forecast);
     const vCollapse = this.peakPrice * (1 - this.cfg.collapse_threshold_pct);
-    const budget = this.cfg.evacuation_ticks + this.cfg.safety_coefficient_k * this.omega;
+    const budget = this.cfg.evacuation_ticks + this.cfg.safety_coefficient_k * omegaEff;
 
     let tCollapse = Infinity;
     if (!isNaN(lastVel) && !isNaN(lastAcc) && lastVel < 0) {
@@ -192,7 +245,7 @@ export class PAETEngine {
       // re-entries near the old vCollapse level trigger immediate re-SELL.
       this.peakPrice = currentPrice;
       if (pnrTriggered) {
-        base.reason = `PAET: PNR t=${tCollapse.toFixed(1)} ≤ budget=${budget.toFixed(1)} (ω=${this.omega.toFixed(2)})`;
+        base.reason = `PAET: PNR t=${tCollapse.toFixed(1)} ≤ budget=${budget.toFixed(1)} (ω=${omegaEff.toFixed(2)})`;
       } else {
         base.reason = `PAET: anomaly — price below band (σ=${sigma.toFixed(4)}, period=${dominantPeriodCandles})`;
       }
@@ -201,8 +254,10 @@ export class PAETEngine {
 
     // ── Entry logic ───────────────────────────────────────────────────────────
     // Only fires when no position is open and the post-sell cooldown has elapsed.
+    // ADR-027: Ein stark negativer, konsistenter Forecast blockt Entries an der
+    // Quelle (alle Entry-Modi) — kein Re-Entry in erwartete Abwärtsbewegungen.
     const cooldownElapsed = n - this.lastSellTick >= this.cfg.entry_cooldown_ticks;
-    if (openPositions === 0 && cooldownElapsed) {
+    if (openPositions === 0 && cooldownElapsed && !fcAdverse) {
       if (this.cfg.entry_mode === 'once') {
         base.signal = 'BUY';
         base.reason = `PAET: auto-entry after warmup (${n} ticks)`;

@@ -199,7 +199,11 @@ export class StrategyEngine {
     }
 
     if (this.config.strategy_type === 'paet' && this.paetEngine) {
-      const paetResult = this.paetEngine.analyze(ticks, stats?.openPositionsCount ?? 0);
+      const paetResult = this.paetEngine.analyze(
+        ticks,
+        stats?.openPositionsCount ?? 0,
+        forecast ?? null,
+      );
       // Emergency hard stop-loss: triggered when PAET PNR/anomaly logic never fires
       // (e.g. dead market with no volatility). Default: 8% below entry price.
       const stopLossPct = this.config.paet_settings?.stop_loss_pct ?? 0.08;

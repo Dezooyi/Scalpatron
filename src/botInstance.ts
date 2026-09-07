@@ -973,8 +973,10 @@ export class BotInstance {
     
     if (action === 'BUY') {
       const trade = await this.trader.manualBuy(currentPrice, settings);
-      // Save trade to database for persistent storage and frontend display
-      if (trade) {
+      // Save trade to database for persistent storage and frontend display.
+      // Paper: botInstance ist der DB-Schreiber. Live: trader.manualBuy hat den
+      // Trade bereits persistiert (Signatur/Fee) — kein zweites INSERT (Duplikate).
+      if (trade && this.trader.paperMode) {
         db.prepare(`
           INSERT INTO trades (botId, timestamp, action, price, amount, pnlPercent)
           VALUES (?, ?, ?, ?, ?, ?)
@@ -990,19 +992,33 @@ export class BotInstance {
       return trade;
     } else if (action === 'SELL') {
       const trade = await this.trader.manualSell(currentPrice, settings);
-      // Save trade to database for persistent storage and frontend display
       if (trade) {
-        db.prepare(`
-          INSERT INTO trades (botId, timestamp, action, price, amount, pnlPercent)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(
-          this.id,
-          trade.timestamp,
-          trade.action,
-          trade.price,
-          trade.amount ?? null,
-          trade.pnlPercent ?? null
-        );
+        // Save trade to database for persistent storage and frontend display.
+        // Paper: botInstance ist der DB-Schreiber. Live: trader.manualSell hat den
+        // Trade bereits persistiert (Signatur/Fee/PnL) — kein zweites INSERT.
+        if (this.trader.paperMode) {
+          db.prepare(`
+            INSERT INTO trades (botId, timestamp, action, price, amount, pnlPercent)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            this.id,
+            trade.timestamp,
+            trade.action,
+            trade.price,
+            trade.amount ?? null,
+            trade.pnlPercent ?? null
+          );
+        }
+        // ADR-027: Externer (manueller) SELL bei PAET — Engine synchronisieren,
+        // damit kein Sofort-Re-Entry in der Folgetick entsteht.
+        if (this.activeStrategyConfig?.strategy_type === 'paet') {
+          const paetEngine = this.strategyEngine?.getPaetEngine();
+          if (paetEngine) {
+            const feed = PriceFeed.getInstance();
+            const historyLen = feed.getHistory(this.mintAddress).length;
+            paetEngine.onExternalExit(historyLen, trade.price);
+          }
+        }
         // Feedback loop: attribute SELL outcome to the active agent advice entry
         if (trade.pnlPercent !== undefined) {
           updateAgentOutcome(this.id, trade.pnlPercent, trade.pnlPercent > 0);
@@ -1242,16 +1258,30 @@ export class BotInstance {
     // ── TimesFM: Trade-Gate (Runtime-Steering-Plan Phase 2) ──────────────────
     let gateActionForTrade: string | null = null;
     if (getTimesFmSettings().tradeGate) {
-      const holdState =
-        this.strategyEngine?.getScalpingHoldState() ?? this.detector.getHoldState();
+      const stratType = this.activeStrategyConfig?.strategy_type;
+      const openCount = stats.openPositionsCount ?? 0;
+      let detectorInPosition = false;
+      let minHoldOk = false;
+      if (stratType === 'paet') {
+        // ADR-027: PAET trackt Positionen über offene Trades (kein
+        // PatternDetector-inSpike). Externe Exits werden per onExternalExit
+        // synchronisiert (kein Sofort-Re-Entry).
+        detectorInPosition = openCount > 0;
+        minHoldOk = true;
+      } else {
+        const holdState =
+          this.strategyEngine?.getScalpingHoldState() ?? this.detector.getHoldState();
+        detectorInPosition = holdState.inPosition;
+        minHoldOk = holdState.minHoldTicks <= 0 || holdState.heldTicks >= holdState.minHoldTicks;
+      }
       const gateDecision = evaluateForecastGate({
         signal: result.signal,
         forecast: forecastSnapshot?.forecast ?? null,
         ageMs: forecastSnapshot?.ageMs,
         enabled: true,
-        inPosition: (stats.openPositionsCount ?? 0) > 0,
-        detectorInPosition: holdState.inPosition,
-        minHoldOk: holdState.minHoldTicks <= 0 || holdState.heldTicks >= holdState.minHoldTicks,
+        inPosition: openCount > 0,
+        detectorInPosition,
+        minHoldOk,
         unrealizedPnlPct: unrealizedPnlPct(stats),
       });
       if (gateDecision.action === 'demote_buy' && result.signal === 'BUY') {
@@ -1304,26 +1334,46 @@ export class BotInstance {
 
        // Save trade to database for persistent storage and frontend display.
        // TimesFM-Runtime-Steering: Forecast-Snapshot am Trade für Outcome-Zuordnung.
-       db.prepare(`
-         INSERT INTO trades (
-           botId, timestamp, action, price, amount, pnlPercent,
-           forecastNetReturnPct, forecastDirectionScore, forecastSlopeConsistency,
-           forecastAgeMs, gateAction
-         )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       `).run(
-         this.id,
-         Date.now(),
-         trade.action,
-         trade.price,
-         trade.amount ?? null,
-         trade.pnlPercent ?? null,
-         forecastMeta?.forecastNetReturnPct ?? null,
-         forecastMeta?.forecastDirectionScore ?? null,
-         forecastMeta?.forecastSlopeConsistency ?? null,
-         forecastMeta?.forecastAgeMs ?? null,
-         gateActionForTrade,
-       );
+       // Paper-Modus: botInstance ist der einzige DB-Schreiber (trader.logger → JSONL).
+       // Live-Modus: trader.buy()/sell() persistiert den Trade bereits inkl. Solscan-
+       // Signatur/Fee/Slippage — hier NICHT erneut einfügen, sonst wird jeder Live-Trade
+       // doppelt erfasst und in allen Metriken (Restore, Performance, W/R) doppelt gezählt.
+       if (this.trader.paperMode) {
+         db.prepare(`
+           INSERT INTO trades (
+             botId, timestamp, action, price, amount, pnlPercent,
+             forecastNetReturnPct, forecastDirectionScore, forecastSlopeConsistency,
+             forecastAgeMs, gateAction
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         `).run(
+           this.id,
+           Date.now(),
+           trade.action,
+           trade.price,
+           trade.amount ?? null,
+           trade.pnlPercent ?? null,
+           forecastMeta?.forecastNetReturnPct ?? null,
+           forecastMeta?.forecastDirectionScore ?? null,
+           forecastMeta?.forecastSlopeConsistency ?? null,
+           forecastMeta?.forecastAgeMs ?? null,
+           gateActionForTrade,
+         );
+       }
+
+        // ADR-027: Forecast-Gate-Exit bei PAET — Engine synchronisieren
+        // (peakPrice + lastSellTick), damit kein Sofort-Re-Entry entsteht.
+        if (
+          trade.action === 'SELL' &&
+          gateActionForTrade === 'forecast_exit' &&
+          this.activeStrategyConfig?.strategy_type === 'paet'
+        ) {
+          const paetEngine = this.strategyEngine?.getPaetEngine();
+          if (paetEngine) {
+            const exitPrice = trade.price > 0 ? trade.price : (history[history.length - 1]?.price ?? 0);
+            paetEngine.onExternalExit(history.length, exitPrice);
+          }
+        }
 
        // Feedback loop: attribute SELL outcome to the active agent advice entry
        if (trade.action === 'SELL' && trade.pnlPercent !== undefined) {

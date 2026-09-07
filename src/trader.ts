@@ -9,7 +9,7 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, VersionedTransaction 
 import { createJupiterApiClient } from '@jup-ag/api';
 import { loadOrCreateKeypair, getWalletLock } from './wallet.js';
 import { CONFIG } from './config.js';
-import { insertPendingTrade, confirmTrade, failTrade, updateTradeSignature } from './db.js';
+import { insertPendingTrade, confirmTrade, failTrade, updateTradeSignature, updateTradePnL } from './db.js';
 
 export interface Position {
   entryPrice: number;
@@ -515,6 +515,7 @@ export class Trader {
     this.isSwapping = true;
     let tradeId: number | null = null;
     let sellAmount = pos.amount;
+    const pnlPercent = ((result.currentPrice - pos.entryPrice) / pos.entryPrice) * 100 - (CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT * 100);
     try {
       if (!this.paperMode) {
         const pk = this.keypair!.publicKey.toBase58();
@@ -556,10 +557,13 @@ export class Trader {
             );
           }
           confirmTrade(tradeId);
+          // Live-SELL als realisierten Trade abschließen: PnL nachtragen, damit
+          // alle DB-basierten Metriken (Performance, Restore, Self-Opt/Advisor)
+          // den Roundtrip korrekt als abgeschlossenen Trade werten.
+          updateTradePnL(tradeId, pnlPercent);
         });
       }
 
-      const pnlPercent = ((result.currentPrice - pos.entryPrice) / pos.entryPrice) * 100 - (CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT * 100);
       let solReturn = sellAmount * result.currentPrice;
       if (this.paperMode) {
         const entryCost = sellAmount * pos.entryPrice;

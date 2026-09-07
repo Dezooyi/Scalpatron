@@ -170,8 +170,7 @@ export function LiveClusterPricePanel({ selectedBot, selectedTokenInfo, indicato
             {/* Row 1: Signal + Total PnL + Win Rate + Trades */}
             <div className="grid grid-cols-4 gap-2">
               {(() => {
-                const lastTrade = selectedBot.recentTrades?.slice(-1)[0];
-                const inPosition = lastTrade?.action === "BUY" && !lastTrade?.exitPrice;
+                const inPosition = (selectedBot.stats?.openPositionsCount ?? 0) > 0;
                 const signal = selectedBot?.status !== "running" ? "HOLD" : inPosition ? "SELL" : "BUY";
                 const signalStyle = signal === "BUY"
                   ? "text-green-400 bg-green-500/15 border-green-500/30"
@@ -206,15 +205,17 @@ export function LiveClusterPricePanel({ selectedBot, selectedTokenInfo, indicato
             {/* Row 2: Last PnL */}
             <div className="grid grid-cols-1 gap-2 pt-2 border-t border-primary/10">
               {selectedBot.recentTrades && selectedBot.recentTrades.length > 0 && (() => {
-                const lastClosed = selectedBot.recentTrades.findLast((t) => t.pnl !== undefined);
-                return lastClosed && lastClosed.pnl !== undefined ? (
+                const lastClosed = selectedBot.recentTrades.find((t) => typeof t.pnlPercent === "number");
+                if (!lastClosed) return null;
+                const lastPnl = lastClosed.pnlPercent as number;
+                return (
                   <div className="flex flex-col gap-0.5">
                     <span className="text-[10px] font-bold uppercase text-muted-foreground">Last PnL</span>
-                    <span className={`text-sm font-bold font-mono ${lastClosed.pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
-                      {lastClosed.pnl >= 0 ? "+" : ""}{lastClosed.pnl.toFixed(4)}
+                    <span className={`text-sm font-bold font-mono ${lastPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                      {lastPnl >= 0 ? "+" : ""}{lastPnl.toFixed(4)}
                     </span>
                   </div>
-                ) : null;
+                );
               })()}
             </div>
 
