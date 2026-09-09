@@ -50,12 +50,22 @@ Kopieren, Forken oder Weiterverwenden (auch in veränderter Form) ist **nur mit 
 npm install
 cd frontend && npm install && cd ..
 
-# Backend starten (Paper-Trading, keine .env erforderlich)
+# Empfohlener Ein-Befehl-Start: Backend + Frontend + Browser (ADR-030)
+npm run up
+# Alternativ ohne Browser:  npm run up -- --no-open
+
+# Getrennt starten (Backend, Paper-Trading, keine .env erforderlich)
 npm run dev
 
 # Frontend in einem zweiten Terminal
 cd frontend && npm run dev
 ```
+
+`npm run up` (`scripts/start.mjs`) ist idempotent: bereits laufende Dienste
+werden erkannt und nicht doppelt gestartet; der Browser öffnet sich erst,
+wenn beide Dienste bereit sind; Logs liegen unter `logs/dev-backend.log` und
+`logs/dev-frontend.log`. Der Backend-API-Port kommt aus `PORT` in der `.env`
+(Default `3000`); Backend und Vite-Proxy lesen dieselbe Variable.
 
 ### Optional: TimesFM für Advisor-Optimierung
 
@@ -449,7 +459,8 @@ AI_MIN_SWITCH_CONFIDENCE=0.85
 | Ollama nicht erreichbar         | `ollama serve` starten                           |
 | Bot tradet nicht                | `floorWindow` / Warmup-Candles abwarten          |
 | Keine Preisdaten                | GeckoTerminal Import im Dashboard                  |
-| Port belegt                     | Backend erhöht automatisch (3000→3001→...)      |
+| Frontend: „Server nicht gefunden" | `PORT` in `.env` setzen (Backend + Vite-Proxy lesen dieselbe Variable, ADR-030); `npm run up` nutzen |
+| Port belegt                     | `PORT` in `.env` auf freien Port setzen (Backend weicht nur noch mit Warnung aus) |
 | Strategie-Änderung wirkt nicht | Bot neu starten oder`PUT /api/bots/:id/strategy` |
 
 ## Dokumentation

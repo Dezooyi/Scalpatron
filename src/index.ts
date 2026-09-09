@@ -65,7 +65,12 @@ priceFeed.setPriceRecorder(recorder);
 // History wird beim Bot-Start aus live_feed rehydriert (seedFromDatabaseIfEmpty).
 
 const botManager = new BotManager();
-const server = new BotServer(botManager, recorder, 3000);
+// Backend-Port ist konfigurierbar (PORT in .env / Shell), Default 3000.
+// Wichtig: Der Vite-Dev-Server liest dieselbe Quelle (siehe frontend/vite.config.ts),
+// damit Proxy und Backend nie auseinanderlaufen (Port-Kollisions-Fallback 3000→3001
+// hat sonst den API-Proxy lautlos auf den falschen Port zeigen lassen).
+const PORT = Number(process.env.PORT ?? 3000);
+const server = new BotServer(botManager, recorder, PORT);
 
 // Wallet-Reload-Bridge: nach jedem Wallet-Import/Generate/Clear das Keypair
 // aller laufenden Live-Trader neu laden, damit keine Tx mehr mit altem Key signiert wird.

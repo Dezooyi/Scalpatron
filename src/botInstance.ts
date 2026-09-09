@@ -77,6 +77,12 @@ export class BotInstance {
   public status: 'running' | 'paused' | 'stopped' = 'stopped';
   public customSystemPrompt: string | null = null;
   private cumulativeTicks = 0;
+  // ADR: Subscriptions sind idempotent gebunden. start()/stop() dürfen mehrfach
+  // aufgerufen werden (pause→running, UI-Toggles, Server-Restart-Hotpaths); ohne
+  // dieses Flag würde jeder start() einen weiteren feed.on()-Listener + botRef
+  // registrieren und jeden Tick N-fach verarbeiten (unbegrenztes Wachstum).
+  private feedBound = false;
+  private lastTickLogAt = 0;
   private startTime?: number;
   private initialSOL: number;
   private killSwitch: KillSwitchEngine;
@@ -243,8 +249,13 @@ export class BotInstance {
     // PriceFeed verwaltet History + Persistenz zentral pro Token.
     // subscribe() erhöht nur den Bot-Refcount; ein vorheriges activate() (TokenService)
     // hält den Feed bereits warm. DB-Seeding läuft automatisch beim ersten Subscriber.
-    feed.subscribe(this.mintAddress);
-    feed.on(`price:${this.mintAddress}`, this.onPriceTick);
+    // Das Binden ist idempotent: pause→start oder wiederholte start()-Aufrufe
+    // registrieren niemals doppelte Listener/Refcounts (siehe feedBound).
+    if (!this.feedBound) {
+      feed.subscribe(this.mintAddress);
+      feed.on(`price:${this.mintAddress}`, this.onPriceTick);
+      this.feedBound = true;
+    }
 
     console.log(`[BotInstance] ${this.name} abonniert Preis-Updates fuer ${this.mintAddress}`);
     logger.info(this.id, 'SYSTEM', `Agent ${this.name} gestartet fuer Token ${this.mintAddress.slice(0, 8)}...`);
@@ -255,8 +266,11 @@ export class BotInstance {
     this.status = 'stopped';
 
     const feed = PriceFeed.getInstance();
-    feed.unsubscribe(this.mintAddress);
-    feed.off(`price:${this.mintAddress}`, this.onPriceTick);
+    if (this.feedBound) {
+      feed.unsubscribe(this.mintAddress);
+      feed.off(`price:${this.mintAddress}`, this.onPriceTick);
+      this.feedBound = false;
+    }
 
     logger.warn(this.id, 'SYSTEM', `Agent ${this.name} gestoppt.`);
   }
@@ -1179,9 +1193,15 @@ export class BotInstance {
     // Update last price in trader for stats
     this.trader.updatePrice(point.price);
 
-    // Heartbeat every 5 ticks to keep terminal alive
-    if (history.length % 5 === 0) {
-      logger.info(this.id, 'FEED', `Tick #${history.length} empfangen: $${point.price.toFixed(8)} | Buffer: ${history.length}/${this.getEffectiveScalpingSettings().floorWindow}`);
+    // Heartbeat zum Terminal-Alive-Halten — zeitbasiert gedrosselt (max. 1 Zeile
+    // pro 60s pro Bot). history.length ist auf 1000 gedeckelt (PriceFeed-Cap);
+    // ein Modulo auf history.length würde dadurch NACH dem Warmup bei JEDEM Tick
+    // loggen (1800 Zeilen/h/Bot → Log-Datei + SSE-Flood). cumulativeTicks/Timestamps
+    // sind der verlässliche Zähler.
+    const now = Date.now();
+    if (now - this.lastTickLogAt >= 60_000) {
+      this.lastTickLogAt = now;
+      logger.info(this.id, 'FEED', `Tick #${this.cumulativeTicks} empfangen: $${point.price.toFixed(8)} | Buffer: ${history.length}/${this.getEffectiveScalpingSettings().floorWindow}`);
     }
 
     // ADR-010: Trading-Circuit-Breaker. Bei veraltetem Feed keine Entscheidungen

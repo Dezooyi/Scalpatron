@@ -20,10 +20,31 @@ export class AppLogger {
   private static instance: AppLogger;
   private logFilePath: string;
   private sseCallback: ((entry: LogEntry) => void) | null = null;
+  // Rotation: app_system.log wächst sonst unbegrenzt (hier bereits 30+ MB nach
+  // wenigen Tagen). Ab 50 MB wird auf app_system.log.1 rotiert (ein Backup).
+  private static readonly MAX_FILE_BYTES = 50 * 1024 * 1024;
+  private writesSinceSizeCheck = 0;
 
   private constructor() {
     if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
     this.logFilePath = path.join(LOG_DIR, 'app_system.log');
+  }
+
+  private rotateIfNeeded(): void {
+    this.writesSinceSizeCheck++;
+    if (this.writesSinceSizeCheck < 500) return; // stat nur alle 500 Writes
+    this.writesSinceSizeCheck = 0;
+    try {
+      const stat = fs.statSync(this.logFilePath);
+      if (stat.size > AppLogger.MAX_FILE_BYTES) {
+        const backup = `${this.logFilePath}.1`;
+        try { fs.unlinkSync(backup); } catch { /* kein Backup vorhanden */ }
+        fs.renameSync(this.logFilePath, backup);
+        console.warn(`[Logger] Log-Rotation: ${this.logFilePath} → ${backup}`);
+      }
+    } catch {
+      /* Datei existiert noch nicht — kein Rotationsbedarf */
+    }
   }
 
   public static getInstance(): AppLogger {
@@ -53,6 +74,7 @@ export class AppLogger {
 
     // Write to file (append)
     try {
+      this.rotateIfNeeded();
       fs.appendFileSync(this.logFilePath, JSON.stringify(entry) + '\n', 'utf-8');
     } catch (e) {
       console.error('[Logger] Failed to write to log file:', e);

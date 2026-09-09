@@ -9,16 +9,31 @@ const DATA_DIR = path.resolve(__dirname, '..', 'data');
 const PRICE_FILE = path.join(DATA_DIR, 'prices.jsonl');
 
 export class PriceRecorder {
+  // Legacy-Flat-File prices.jsonl: mischt alle Mints ohne mintAddress-Feld und
+  // dupliziert jeden Tick, der bereits strukturiert in SQLite (live_feed)
+  // persistiert wird. SQLite ist die einzige Source of Truth; das Flat-File ist
+  // deshalb OPTIONAL (PRICE_JSONL_ENABLED=1), damit keine redundante,
+  // unbegrenzt wachsende Datei auf dem Hotpath mitgeschrieben wird.
+  private jsonlEnabled = false;
+
   constructor() {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    const raw = (process.env.PRICE_JSONL_ENABLED ?? '').toLowerCase();
+    this.jsonlEnabled = raw === '1' || raw === 'true';
+    if (this.jsonlEnabled) {
+      console.warn('[PriceRecorder] PRICE_JSONL_ENABLED=1 — Legacy-Flat-File wird mitgeschrieben (redundant zu live_feed).');
+    }
   }
 
   /**
-   * Record a price point to both JSONL file and SQLite database
+   * Record a price point into SQLite live_feed (single source of truth).
+   * The legacy JSONL file is only written when PRICE_JSONL_ENABLED=1.
    */
   record(point: PricePoint, mintAddress?: string): void {
-    // Write to JSONl file (legacy)
-    fs.appendFileSync(PRICE_FILE, JSON.stringify(point) + '\n', 'utf-8');
+    // Write to JSONl file (legacy, optional)
+    if (this.jsonlEnabled) {
+      fs.appendFileSync(PRICE_FILE, JSON.stringify(point) + '\n', 'utf-8');
+    }
 
     // Write to SQLite database for persistent storage and bot access
     if (mintAddress) {

@@ -7,7 +7,7 @@ import { PriceRecorder } from './priceRecorder.js';
 import { logger } from './appLogger.js';
 import { getAdvisorSuggestions } from './advisorEngine.js';
 import { TokenService, isValidMintAddress, saveTokenToDb } from './tokenService.js';
-import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder, getTradesForPerformance, getTimeWindowPerformance, detectTimeWindowDrift, getLessonsForBot, saveUiSettings, loadUiSettings, getLatestForecastLogs, type UiSettings } from './db.js';
+import { getSetting, setSetting, getRegimePerformance, listStrategies, saveStrategy, getStrategy, deleteStrategy, getDetailedLiveFeedStats, wipeLiveFeed, setBotStrategy, saveBotOrder, getBotOrder, deleteBotOrder, getTradesForPerformance, getTimeWindowPerformance, detectTimeWindowDrift, getLessonsForBot, saveUiSettings, loadUiSettings, getLatestForecastLogs, getRecentLiveFeedEntries, type UiSettings } from './db.js';
 import { timesFmCache } from './timesFmCache.js';
 import { getTimesFmSettings, updateTimesFmSettings, type TimesFmRuntimeSettings } from './timesFmSettings.js';
 import { isTimesFmInstalled, isTimesFmWorkerRunning, startTimesFmWorker, stopTimesFmWorker } from './timesFmWorker.js';
@@ -112,6 +112,13 @@ async function parseBody(req: http.IncomingMessage): Promise<any> {
 }
 
 export class BotServer {
+  // ADR: SSE-Backpressure — ein Client, der nicht mehr liest (Laptop im
+  // Standby, Netz-Wechsel, toter Peer ohne FIN), lässt sonst den internen
+  // Socket-Write-Buffer unbegrenzt wachsen und bläht den Heap auf. Sobald der
+  // Puffer eine Schwelle überschreitet oder der Socket tot ist, wird der Client
+  // verworfen; der Browser verbindet sich über EventSource automatisch neu.
+  private static readonly MAX_SSE_BUFFER_BYTES = 1024 * 1024; // 1 MB je Client
+
   private sseClients: Set<http.ServerResponse> = new Set();
   private botManager: BotManager;
   private recorder: PriceRecorder;
@@ -239,6 +246,8 @@ export class BotServer {
       const srv = http.createServer((req, res) => this.handleRequest(req, res));
       srv.once('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE' && port < startPort + 10) {
+          console.error(`[Server] ⚠️  Port ${port} ist belegt — weiche auf Port ${port + 1} aus.`);
+          console.error(`[Server] ⚠️  WICHTIG: Vite-Proxy-Ziel muss zum tatsächlichen Port passen (PORT in .env setzen), sonst ist das Frontend nicht erreichbar.`);
           port++;
           tryNext();
         } else {
@@ -257,22 +266,37 @@ export class BotServer {
   public broadcast(eventName: string, data: any): void {
     const payload = JSON.stringify(data);
     const message = `event: ${eventName}\ndata: ${payload}\n\n`;
-    
+
     // Performance: Batch write to all clients
     const clientsToRemove: http.ServerResponse[] = [];
-    
+
     for (const client of this.sseClients) {
       try {
+        // Backpressure: nicht-lesende/tote Clients verwerfen, statt unbegrenzt
+        // in den Socket-Write-Buffer zu puffern (unbounded Heap-Wachstum).
+        if (
+          client.destroyed ||
+          client.writableEnded ||
+          client.writableLength > BotServer.MAX_SSE_BUFFER_BYTES
+        ) {
+          clientsToRemove.push(client);
+          continue;
+        }
         client.write(message);
       } catch (e) {
         // Client disconnected, mark for removal
         clientsToRemove.push(client);
       }
     }
-    
-    // Cleanup disconnected clients
+
+    // Cleanup disconnected / überlaufene Clients
     for (const client of clientsToRemove) {
       this.sseClients.delete(client);
+      try {
+        if (!client.destroyed) client.destroy();
+      } catch {
+        /* bereits geschlossen */
+      }
     }
   }
 
@@ -317,10 +341,16 @@ export class BotServer {
       // Baseline für künftige Deltas setzen.
       this.lastSentStateById = new Map(initialState.map((b: any) => [b.id, b]));
 
-      req.on('close', () => {
+      const dropClient = (): void => {
         this.sseClients.delete(res);
-        res.end();
-      });
+        try {
+          if (!res.destroyed) res.end();
+        } catch {
+          /* bereits geschlossen */
+        }
+      };
+      res.on('error', dropClient);
+      req.on('close', dropClient);
       return;
     }
 
@@ -875,10 +905,16 @@ export class BotServer {
 
     // ==================== PRICE HISTORY API ====================
     
-    // GET /api/prices/history - Alle historischen Preisdaten (JSONL)
-    if (url === '/api/prices/history' && req.method === 'GET') {
+    // GET /api/prices/history[?limit=N] - Historische Preisdaten.
+    // DB-gestützt (live_feed, Single Source of Truth) mit hartem Limit-Clamp.
+    // Früher: loadAll() parste die komplette prices.jsonl (multi-mint ohne
+    // Zuordnung, mehrere MB) bei jedem Request in den Heap.
+    if (pathname === '/api/prices/history' && req.method === 'GET') {
       try {
-        const allPrices = this.recorder.loadAll();
+        const limitRaw = urlObj.searchParams.get('limit');
+        const limit = Math.min(Math.max(parseInt(limitRaw ?? '50000', 10) || 50_000, 1), 200_000);
+        const entries = getRecentLiveFeedEntries(limit);
+        const allPrices = entries.map(e => ({ timestamp: e.timestamp, price: e.price }));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(allPrices));
       } catch (e: any) {
@@ -893,7 +929,8 @@ export class BotServer {
     if (liveFeedMatch && req.method === 'GET') {
       try {
         const mintAddress = liveFeedMatch[1];
-        const limit = parseInt(liveFeedMatch[3] || '1000');
+        // Limit hart begrenzen (unbounded Limit = Millionen-Zeilen pro Request).
+        const limit = Math.min(Math.max(parseInt(liveFeedMatch[3] || '1000', 10) || 1000, 1), 50_000);
         const prices = this.recorder.loadFromDatabase(mintAddress, limit);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(prices));

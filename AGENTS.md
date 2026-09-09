@@ -20,6 +20,15 @@ npx tsc --noEmit              # Type-Check ohne Ausgabe
 npx tsc -b                    # Bauen (Output in dist/)
 ```
 
+## Commands (Gesamter Dev-Stack)
+
+```bash
+npm run up                    # Backend + Frontend starten, Browser öffnen (idempotent, siehe scripts/start.mjs)
+npm run up -- --no-open       # Ohne Browser-Öffnen
+# Backend-API-Port: PORT in .env (Default 3000) — Backend UND Vite-Proxy lesen dieselbe Variable (ADR-030).
+# Logs: logs/dev-backend.log, logs/dev-frontend.log
+```
+
 ## Commands (Frontend)
 
 ```bash

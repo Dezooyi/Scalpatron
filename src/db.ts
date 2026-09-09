@@ -438,6 +438,23 @@ export function getLiveFeedEntries(mintAddress: string, limit = 1000): LiveFeedE
   return stmt.all(mintAddress, limit) as LiveFeedEntry[];
 }
 
+/**
+ * Die letzten `limit` live_feed-Zeilen über alle Mints, aufsteigend nach
+ * timestamp (identisch zur Reihenfolge des früheren prices.jsonl-Appends).
+ * Begrenzte, DB-gestützte Alternative zu loadAll() (das die komplette
+ * Flat-File in den Heap parse), für /api/prices/history.
+ */
+export function getRecentLiveFeedEntries(limit = 50_000): LiveFeedEntry[] {
+  const stmt = db.prepare(`
+    SELECT * FROM (
+      SELECT * FROM live_feed
+      ORDER BY timestamp DESC
+      LIMIT ?
+    ) ORDER BY timestamp ASC
+  `);
+  return stmt.all(limit) as LiveFeedEntry[];
+}
+
 export function getLiveFeedRange(mintAddress: string, fromTs: number, toTs: number): LiveFeedEntry[] {
   const stmt = db.prepare(`
     SELECT * FROM live_feed

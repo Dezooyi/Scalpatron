@@ -20,6 +20,8 @@ export interface ForecastCacheOptions {
   ttlMs?: number;
   /** Nach einem Fehlversuch wird so lange nicht erneut gefragt (ms). */
   failCooldownMs?: number;
+  /** Max. Anzahl an Mints im Cache; älteste werden bei Überschreitung evictet. */
+  maxEntries?: number;
 }
 
 export type ForecastFetcher = (mintAddress: string) => Promise<TimesFmForecast | null>;
@@ -42,8 +44,10 @@ export class ForecastCacheService {
   private readonly entries = new Map<string, CacheEntry>();
   private readonly ttlMs: number;
   private readonly failCooldownMs: number;
+  private readonly maxEntries: number;
   private readonly fetcher: ForecastFetcher;
   private readonly persist: (mintAddress: string, forecast: TimesFmForecast) => void;
+  private lastSweepAtMs = 0;
 
   constructor(
     fetcher: ForecastFetcher,
@@ -69,11 +73,43 @@ export class ForecastCacheService {
     this.fetcher = fetcher;
     this.ttlMs = options.ttlMs ?? parseEnvInt('TIMESFM_CACHE_TTL_MS', 120_000);
     this.failCooldownMs = options.failCooldownMs ?? parseEnvInt('TIMESFM_CACHE_FAIL_COOLDOWN_MS', 30_000);
+    this.maxEntries = options.maxEntries ?? parseEnvInt('TIMESFM_CACHE_MAX_ENTRIES', 128);
     this.persist = persist;
+  }
+
+  /**
+   * Verwirft nicht mehr benötigte Einträge: (a) gelöschte/rotierte Mints, deren
+   * Eintrag älter als max(8×TTL, 10 min) ist, (b) reine Fehlversuchs-Einträge
+   * ohne Forecast nach Ablauf des Cooldowns ×8, (c) bei Überschreitung von
+   * maxEntries die ältesten Einträge. Ohne diese Räumung wächst die Map für die
+   * gesamte Prozess-Lebensdauer monoton mit jedem jemals angefragten Mint.
+   */
+  private sweep(nowMs = Date.now()): void {
+    const maxRetainMs = Math.max(this.ttlMs * 8, 10 * 60_000);
+    for (const [mint, entry] of this.entries) {
+      if (entry.inFlight) continue;
+      if (entry.forecast) {
+        if (entry.fetchedAtMs > 0 && nowMs - entry.fetchedAtMs > maxRetainMs) {
+          this.entries.delete(mint);
+        }
+      } else if (entry.lastFailureAtMs > 0 && nowMs - entry.lastFailureAtMs > this.failCooldownMs * 8) {
+        this.entries.delete(mint);
+      }
+    }
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.entries.delete(oldest);
+    }
   }
 
   /** Aktueller Forecast, nur wenn er jünger als die TTL ist. Kein HTTP, kein Blocking. */
   getSnapshot(mintAddress: string, nowMs = Date.now()): ForecastSnapshot | null {
+    // Räumung höchstens 1×/Minute — Map-iteration über ≤ maxEntries ist billig.
+    if (nowMs - this.lastSweepAtMs > 60_000) {
+      this.lastSweepAtMs = nowMs;
+      this.sweep(nowMs);
+    }
     const entry = this.entries.get(mintAddress);
     if (!entry?.forecast || entry.fetchedAtMs <= 0) return null;
     const ageMs = nowMs - entry.fetchedAtMs;
