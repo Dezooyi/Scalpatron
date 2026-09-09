@@ -37,6 +37,9 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 | [025](adr-025-outcome-verified-self-optimization.md) | Outcome-verifizierte Self-Optimization (Nova Pulse / PAET) | Akzeptiert & Implementiert | Strategie / Runtime-Adaption |
 | [026](adr-026-timesfm-runtime-steering.md) | TimesFM-Runtime-Steering (Cache, Trade-Gate, Fork-Enrichment, LLM-Evidenz) | Akzeptiert & Implementiert | Forecast / Runtime-Adaption / LLM |
 | [027](adr-027-paet-forecast-integration-exit-sync.md) | PAET-Forecast-Integration & Exit-Sync (Engine-Gate, ω-Guard, Re-Entry-Sperre) | Akzeptiert & Implementiert | Strategie (PAET) / Forecast / Risk |
+| [028](adr-028-forecast-pulse-strategy.md) | Forecast Pulse — TimesFM-Fenster-Strategie (aktive Forecast-Entries, variabler Rhythmus, Meta-Labeling-Lern-Loop) | Vorgeschlagen | Strategie (Forecast) / Risk / Runtime-Adaption |
+| [029](adr-029-backend-long-run-stability.md) | Backend-Langzeit-Stabilität — Memory-Wachstumsvektoren & Datenhaltung (live_feed als Single Source of Truth) | Akzeptiert & Implementiert | Architektur / Backend / Datenhaltung / Logging |
+| [030](adr-030-dev-stack-port-start.md) | Ein-Befehl-Dev-Stack & konfigurierbarer Backend-Port | Akzeptiert & Implementiert | Entwicklung / Betrieb / Konfiguration |
 
 > **Status-Werte:** `Vorgeschlagen` → `Akzeptiert` → `Veraltet` / `Ersetzt durch ADR-0XXX`
 > Ein `Vorgeschlagen`-ADR beschreibt einen geplanten, noch **nicht** implementierten Change.
@@ -139,6 +142,37 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
   (−2,8…−7,3 %); nur naive always-on verdient ~9,1 % ≈ sUSDe → **MARGINAL**
 - Beschluss: passiv sUSDe halten statt bauen. Tooling: `src/strategy/fundingCarry.ts`,
   `src/backtest/fundingDataLoader.ts`, `src/__tests__/fundingCarry.*`
+
+### ADR-028 — Forecast Pulse: TimesFM-Fenster-Strategie (Vorgeschlagen)
+- Aktiver TimesFM-Entry-Pfad: Kauf nur in frischen, hochwertigen, positiv-konsistenten
+  Forecast-Fenstern; variabler, marktabhängiger Trade-Rhythmus
+- Fenster-Exit (Window-Close mit Hysterese, kosten-bewusst) + TP/Trailing/SL/Max-Hold,
+  Exit-Sync-Muster aus ADR-027
+- Maximal konfigurierbar über `pulse_settings` (Entry-/Exit-/Rhythmus-/Sizing-/Lern-Block),
+  durchgehend geklemmt (`pulseSafetyBounds`)
+- Meta-Labeling-Lern-Loop (Toggle, Default aus): Online-Forecast-Kalibrierung je Mint,
+  Barrier-Labels (Triple-Barrier), Zeitfenster-Gate und Walk-forward-Expectancy-Tuning
+  (statt WR-Maximierung), outcome-verifiziert via `selfopt_outcomes` + SelfOpt-Gate (ADR-025)
+- Checkpoint-Fixierung: TimesFM 2.5 (Apache-2.0; 3.0-Weights nicht-kommerziell)
+
+### ADR-029 — Backend-Langzeit-Stabilität ✅
+- Idempotentes Feed-Binding (`feedBound`) in `botInstance` → kein Doppel-
+  Listener/Refcount-Leck bei `pause → start`
+- Tick-Heartbeat zeitgedrosselt (60 s statt pro Tick) → Log/SSE-Volumen −~2 Größenordnungen
+- SSE-Backpressure: Client-Eviction ab 1 MB Socket-Buffer + `error`-Handler
+- Begrenzte Strukturen: Trader-Logger (20k + Tail-Parse), TimesFM-Cache
+  (`maxEntries`/Eviction), `app_system.log`-Rotation ab 50 MB
+- Datenhaltung: SQLite `live_feed` = Single Source of Truth; `prices.jsonl`
+  optional (`PRICE_JSONL_ENABLED`); History-REST DB-gestützt + Limit-Clamps
+
+### ADR-030 — Ein-Befehl-Dev-Stack & Backend-Port ✅
+- `PORT` als Single Source of Truth: Backend (`src/index.ts`) und Vite-Proxy
+  (`frontend/vite.config.ts`) lesen dieselbe Variable; Default 3000
+- Vite bindet `0.0.0.0` und targetet explizit `127.0.0.1:<port>` (kein
+  IPv4/IPv6-`localhost`-Split, keine stille Proxy-Divergenz)
+- `npm run up` (`scripts/start.mjs`): idempotenter Start (erkennt laufende
+  Instanzen), Bereitschafts-Gate, Browser-Open, Cleanup bei Ctrl+C,
+  Logs unter `logs/dev-*.log`
 
 ---
 
