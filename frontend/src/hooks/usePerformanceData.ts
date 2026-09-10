@@ -7,7 +7,7 @@ import {
   type PerBotMetrics,
   TIMEFRAME_MS,
   computeMetrics,
-  computePerBotMetrics,
+  groupByBot,
 } from "@/lib/performanceMetrics";
 
 const POLL_INTERVAL_MS = 15_000;
@@ -145,7 +145,34 @@ export function usePerformanceData(
   }, [rawTrades, botMeta, filters.status, filters.strategy, filters.outcome]);
 
   const metrics = useMemo(() => computeMetrics(filteredTrades), [filteredTrades]);
-  const perBot = useMemo(() => computePerBotMetrics(filteredTrades), [filteredTrades]);
+
+  // Alle Bots auflisten (auch ohne realisierte Trades -> Nullwerte), damit die
+  // "Performance pro Bot"-Tabelle nicht nur Bots mit geschlossenen Trades zeigt.
+  // Bot-Auswahl sowie Status-/Strategie-Filter werden dabei auf die Bot-Metadaten
+  // angewendet; Trades gelöschter Bots bleiben weiterhin sichtbar.
+  const perBot = useMemo(() => {
+    const byBot = groupByBot(filteredTrades);
+    const result: PerBotMetrics[] = [];
+    const seen = new Set<string>();
+
+    for (const b of bots) {
+      if (filters.botIds.length > 0 && !filters.botIds.includes(b.id)) continue;
+      if (filters.status !== "all" && b.status !== filters.status) continue;
+      if (filters.strategy !== "all" && (b.strategyType ?? "scalping") !== filters.strategy) continue;
+      result.push({ botId: b.id, ...computeMetrics(byBot.get(b.id) ?? []) });
+      seen.add(b.id);
+    }
+
+    for (const [botId, botTrades] of byBot.entries()) {
+      if (seen.has(botId)) continue;
+      if (filters.botIds.length > 0 && !filters.botIds.includes(botId)) continue;
+      const closed = botTrades.filter((t) => t.action === "SELL" && typeof t.pnlPercent === "number");
+      if (closed.length === 0) continue;
+      result.push({ botId, ...computeMetrics(botTrades) });
+    }
+
+    return result;
+  }, [filteredTrades, bots, filters.botIds, filters.status, filters.strategy]);
 
   return { trades: filteredTrades, metrics, perBot, loading, error };
 }

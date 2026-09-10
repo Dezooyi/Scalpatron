@@ -40,6 +40,14 @@ type JupiterPriceResponse = {
 const SAFE_RPM = 55;
 export const SLOT_MS = Math.ceil(60_000 / SAFE_RPM); // 1091 ms pro Request-Slot
 
+// Maximal vorgehaltene PricePoints pro Mint. Der Generic-Strategiepfad
+// (StrategyEngine.analyzeGeneric) aggregiert diese Ticks zu Candles und verlangt
+// 60 % der größten Indikator-Periode. Mit nur 1000 Ticks (~18 min @1.1s) waren
+// 1m-Strategien mit Periode > ~26 (z. B. EMA_40/EMA_50) dauerhaft im Warmup und
+// handelten nie. 5000 Ticks (~90 min) erlauben >= 80 1m-Candles und decken auch
+// 5m-Strategien mit kurzen Perioden (z. B. DCA-Template EMA_20) ab.
+export const MAX_HISTORY_POINTS = 5000;
+
 // Ein „langer Ausfall" (ADR-010) muss relativ zur tatsächlich erreichbaren Poll-Kadenz
 // definiert werden: bei N aktiven Mints wird jeder Mint nur alle N*SLOT_MS gepollt.
 // Ein fixes 60s-Fenster (CONFIG.PRICE_FEED_LONG_OUTAGE_MS) ist kleiner als dieses
@@ -260,7 +268,7 @@ export class PriceFeed extends EventEmitter {
     if (!this.priceRecorder) return;
     const history = this.historyMap.get(mintAddress);
     if (!history || history.length > 0) return;
-    const persisted = this.priceRecorder.loadFromDatabase(mintAddress, 1000);
+    const persisted = this.priceRecorder.loadFromDatabase(mintAddress, MAX_HISTORY_POINTS);
     if (persisted.length > 0) {
       this.seedHistory(mintAddress, persisted);
     }
@@ -339,7 +347,7 @@ export class PriceFeed extends EventEmitter {
         index === 0 || point.timestamp !== self[index - 1].timestamp
       );
 
-    this.historyMap.set(mintAddress, uniquePoints.slice(-1000));
+    this.historyMap.set(mintAddress, uniquePoints.slice(-MAX_HISTORY_POINTS));
     // Deliberately NOT setting lastFreshAtMap here. Historical timestamps from
     // the DB would make getFeedStaleMs() return a huge value, causing the
     // ADR-010 outage-recovery path in poll() to wipe the just-seeded history
@@ -412,7 +420,7 @@ export class PriceFeed extends EventEmitter {
       const history = this.historyMap.get(mintAddress) || [];
       history.push(point);
 
-      if (history.length > 1000) history.shift();
+      if (history.length > MAX_HISTORY_POINTS) history.shift();
       this.historyMap.set(mintAddress, history);
 
       // Persistenz zentral im Feed (einmal pro Tick) statt in jedem BotListener.

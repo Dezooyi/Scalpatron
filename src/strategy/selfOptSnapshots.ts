@@ -18,7 +18,7 @@ export function forecastToEvidence(
   forecast: TimesFmForecast,
   ageMs = 0,
 ): MarketForecastEvidence {
-  return {
+  const evidence: MarketForecastEvidence = {
     netReturnPct: forecast.netExpectedReturnPct,
     directionScore: forecast.signalVector.directionScore,
     slopeConsistency: forecast.signalVector.slopeConsistency,
@@ -27,6 +27,26 @@ export function forecastToEvidence(
     ageMs,
     horizon: forecast.horizon,
   };
+  // Kumulierte Rendite der ersten Forecast-Hälfte — Early-Path-Check (ADR-028).
+  // Basis ist der letzte Kontextpreis (`referencePrice`); Endpunkt ist der
+  // letzte Punkt der ersten Hälfte des Forecast-Pfads. Fehlt die Basis
+  // (Alt-Forecasts), bleibt das Feld leer → Engine behandelt das als
+  // nicht verifizierbar (konservativ, kein Entry ohne Bestätigung).
+  const prices = Array.isArray(forecast.forecastPrices) ? forecast.forecastPrices : [];
+  const horizon = prices.length;
+  const halfSteps = Math.floor(horizon / 2);
+  if (
+    halfSteps >= 1 &&
+    typeof forecast.referencePrice === 'number' &&
+    forecast.referencePrice > 0 &&
+    prices.length >= halfSteps
+  ) {
+    const end = prices[halfSteps - 1];
+    if (Number.isFinite(end) && end > 0) {
+      evidence.firstHalfNetReturnPct = ((end / forecast.referencePrice) - 1) * 100;
+    }
+  }
+  return evidence;
 }
 
 /** Nur verwenden, wenn die Evidenz frisch und konsistent genug ist. */

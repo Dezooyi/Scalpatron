@@ -296,6 +296,43 @@ Gegenüber der Erstfassung geändert, mit Begründung:
 Financial Machine Learning" (Meta-Labeling, Triple-Barrier-Methode); Hudson &
 Thames, „Does Meta Labeling Add to Signal Efficacy?" (2019).
 
+## Umsetzungsstand (09.09.2026 — Backend-Kern)
+
+Status bleibt **Vorgeschlagen**; Backend-Kern (Phase A–C, ohne Frontend/
+Quantil-Head/A-B-Programm) ist implementiert:
+
+- `src/strategyTypes.ts`: `StrategyType 'forecast_pulse'`, `PulseSettings` +
+  `PulseLearningSettings`, `MarketForecastEvidence.firstHalfNetReturnPct`.
+- `src/strategy/pulseSafetyBounds.ts`: Defaults, `normalizePulseSettings`,
+  `clampPulseSettings` (inkl. Hysterese-Invariante close < entry).
+- `src/forecastPulseEngine.ts`: Entry-Fenster (net/dir/consistency/quality/
+  age/early-path/vol-band/trend-consent), variable Cooldown-Rhythmik
+  (`spacingAdaptive`), Exits (window-close fee-geschützt, TP, Trailing, SL,
+  Max-Hold), Sizing-Skala, Streak-Pause, Drawdown-Halt, `onExternalExit`,
+  `recordOutcome`, `evaluateForecastReliability` (Kalibrierungs-Gate).
+- `src/pulseLearning.ts`: Kalibrierung, Walk-forward-Schwellen-Justierung
+  (Expectancy/PF-Ziel), Zeitfenster-Gate.
+- `src/strategyEngine.ts`: forecast_pulse-Branch + `getPulseEngine()`.
+- `src/botInstance.ts`: pulse_settings-Clamp in `updateStrategy`, Meta-Ebene
+  (Kalibrierung/Zeitfenster/Liquidität) + Risk-Budget-Sizing am BUY,
+  Entry-Snapshot/Exit-Finalisierung via `pulse_outcomes`, Engine-Sync bei
+  externen Exits, Self-Opt-Anbindung (`forecast_pulse`) inkl. Auto-Disable.
+- `src/db.ts`: Tabellen `pulse_outcomes`, Funktionen `getMaturedForecastSamples`
+  (Kalibrierung), `recordPulseEntry`/`finalizePulseExit`/
+  `getPulseOutcomes`/`getPulseBucketStats`; `recordSelfOptOutcome` kennt
+  `forecast_pulse`; `getTokenInfo` liefert `volume24h`/`liquidity`.
+- `src/timesFmForecast.ts`: `referencePrice` am Forecast (Early-Path-Basis);
+  `src/strategy/selfOptSnapshots.ts` berechnet `firstHalfNetReturnPct`.
+- Template `src/strategyTemplates/forecast_pulse.json` + System-Prompt.
+
+Tests: `forecastPulseEngine.test.ts`, `pulseSafetyBounds.test.ts`,
+`pulseLearning.test.ts` (grün); Regression TimesFM-/PAET-/Gate-/Detector-Suiten
+grün; Backend `npx tsc --noEmit` sauber.
+
+**Offen (Folgephasen):** Frontend-Settings-Karte (Phase D), Worker-Quantile
+`TIMESFM_QUANTILES`, A/B-Paper-Programm, KI-Kooperation, `resetBotAdaptations`
+für `forecast_pulse`.
+
 ## Beziehungen
 
 - **Erweitert:** ADR-026 (Runtime-Steering) und ADR-027 (PAET-Forecast) um den

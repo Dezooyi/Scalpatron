@@ -10,6 +10,8 @@ export interface TimesFmForecast {
   horizon: number;
   medianIntervalMs: number;
   maxGapMs: number;
+  /** Letzter Kontextpreis (Basis der Forecast-Pfade) — ADR-028 Early-Path. */
+  referencePrice?: number;
 }
 
 export interface TimesFmSignalVector {
@@ -115,6 +117,7 @@ export async function forecastMint(mintAddress: string): Promise<TimesFmForecast
       horizon: forecastPrices.length,
       medianIntervalMs,
       maxGapMs,
+      referencePrice: lastPrice,
     };
   } catch {
     return null;

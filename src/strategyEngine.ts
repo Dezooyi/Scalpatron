@@ -12,6 +12,8 @@ import { ForkRegistry } from './strategyForks/types.js';
 import { adaptiveScalpingFork } from './strategyForks/adaptiveScalpingFork.js';
 import { buildMarketContext } from './marketContext.js';
 import { PAETEngine } from './paetEngine.js';
+import { ForecastPulseEngine } from './forecastPulseEngine.js';
+import { normalizePulseSettings } from './strategy/pulseSafetyBounds.js';
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -29,6 +31,7 @@ export class StrategyEngine {
   private config: StrategyConfig;
   private scalpingDetector?: PatternDetector;
   private paetEngine?: PAETEngine;
+  private pulseEngine?: ForecastPulseEngine;
   private forkRegistry: ForkRegistry;
 
   // State for non-scalping strategies
@@ -62,6 +65,12 @@ export class StrategyEngine {
     if (config.strategy_type === 'paet') {
       this.paetEngine = new PAETEngine(config.paet_settings ?? {});
     }
+
+    if (config.strategy_type === 'forecast_pulse') {
+      // ADR-028: Clamp/Defaults zentral — die Engine arbeitet nur mit
+      // normalisierten Werten (unabhängig davon, ob der Caller clampte).
+      this.pulseEngine = new ForecastPulseEngine(normalizePulseSettings(config.pulse_settings));
+    }
   }
 
   updateConfig(config: StrategyConfig): void {
@@ -83,11 +92,21 @@ export class StrategyEngine {
         this.paetEngine = new PAETEngine(config.paet_settings ?? {});
       }
     }
+
+    if (config.strategy_type === 'forecast_pulse') {
+      if (this.pulseEngine) {
+        // Runtime-Zustand (peak, Strähne, Equity) bleibt erhalten — nur cfg.
+        this.pulseEngine.updateSettings(config.pulse_settings ?? {});
+      } else {
+        this.pulseEngine = new ForecastPulseEngine(config.pulse_settings ?? {});
+      }
+    }
   }
 
   reset(): void {
     this.scalpingDetector?.reset();
     this.paetEngine?.reset();
+    this.pulseEngine?.reset();
     this.inPosition = false;
     this.entryPrice = 0;
     this.peakPrice = 0;
@@ -222,6 +241,25 @@ export class StrategyEngine {
       }
       this.latestValues = { ...paetResult.indicatorValues };
       return paetResult;
+    }
+
+    if (this.config.strategy_type === 'forecast_pulse' && this.pulseEngine) {
+      // ADR-028: Evidenz kommt vom Bot-Hotpath (timesFmCache); die Engine
+      // bewertet das Fenster, Position kommt aus den Trader-Stats.
+      const openCount = stats?.openPositionsCount ?? 0;
+      const currentPosition = stats?.currentPosition;
+      const position = (currentPosition && currentPosition.entryPrice > 0 && currentPosition.entryTime > 0)
+        ? { entryPrice: currentPosition.entryPrice, entryTimeMs: currentPosition.entryTime }
+        : null;
+      const pulseResult = this.pulseEngine.analyze(
+        ticks,
+        openCount,
+        forecast ?? null,
+        openCount > 0 ? position : null,
+        Date.now(),
+      );
+      this.latestValues = { ...pulseResult.indicatorValues };
+      return pulseResult;
     }
 
     // Fallback to analyzeGeneric for grid and dca to allow basic entry/exit logic
@@ -575,6 +613,11 @@ export class StrategyEngine {
   /** Returns the PAETEngine instance if this is a PAET strategy, otherwise undefined. */
   getPaetEngine(): PAETEngine | undefined {
     return this.paetEngine;
+  }
+
+  /** Returns the ForecastPulseEngine instance if this is a forecast_pulse strategy. */
+  getPulseEngine(): ForecastPulseEngine | undefined {
+    return this.pulseEngine;
   }
 }
 

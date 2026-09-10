@@ -417,6 +417,9 @@ export type BotState = {
   strategyId?: string;
   strategyType?: string;
   strategyConfig?: StrategyConfig;
+  /** Unveränderter User-Preset-Snapshot (ohne live Self-Opt-Adaptionen),
+   *  für den Live-vs-Preset-Vergleich in den Self-Opt-Panels. */
+  strategyConfigPreset?: Pick<StrategyConfig, 'paet_settings' | 'scalping_settings'>;
   warmupProgress?: number;
   killSwitch?: KillSwitchRuntime;
 };
@@ -642,6 +645,12 @@ export default function App() {
   const [novaPulseDirty, setNovaPulseDirty] = useState(false);
   // ADR-021: dirty-flag für paetConfig-Änderungen im Self-Opt-Panel.
   const [paetDirty, setPaetDirty] = useState(false);
+  // Welche Bot-ID gehört aktuell zum botSettingsDraft? Verhindert, dass die
+  // Self-Opt-Panels (Nova Pulse / PAET) in einen stale Draft eines anderen Bots
+  // schreiben, wenn das Settings-Panel nie (oder für einen anderen Bot) geöffnet
+  // wurde. Ohne Draft waren die Slider vorher nicht bedienbar (updatePc/updateNpc
+  // sind bei `strategyConfigDraft === null` früh ausgestiegen).
+  const settingsDraftBotIdRef = useRef<string | null>(null);
   // ADR-021 (Bug-Fix Cross-Bot-Leak): Wenn der User per Bot-Chip einen
   // anderen Bot waehlt, ohne das Settings-Panel zu schliessen und neu zu
   // oeffnen, bleibt der Draft-State des vorherigen Bots aktiv und kann
@@ -1421,11 +1430,10 @@ export default function App() {
     }
   }, []);
 
-  const openBotSettingsPanel = (bot: BotState) => {
-    if (botSettingsPanelId === bot.id) {
-      setBotSettingsPanelId(null);
-      return;
-    }
+  // Baut den vollständigen Settings-Draft aus dem übergebenen Bot. Wird sowohl
+  // beim Öffnen des Settings-Panels als auch lazy von den Self-Opt-Panels genutzt,
+  // damit Nova Pulse / PAET auch ohne geöffnetes Settings-Panel editierbar sind.
+  const createBotSettingsDraft = (bot: BotState) => {
     const isScalping = !bot.strategyConfig || bot.strategyConfig.strategy_type === 'scalping' || bot.strategyConfig.strategy_type === 'scalping-adaptive';
     const isPaet = bot.strategyConfig?.strategy_type === 'paet';
 
@@ -1442,7 +1450,7 @@ export default function App() {
       : isPaet
         ? Math.round(Math.max(0, Math.min(1, (3.0 - (bot.strategyConfig?.paet_settings?.volatility_sigma_multiplier ?? 2.0)) / 2.0)) * 99 + 1)
         : 50;
-    setBotSettingsDraft({
+    return {
       floorWindow:          baseCfg?.floorWindow          ?? bot.settings?.floorWindow          ?? 20,
       // ADR-020 (B10): Draft-Defaults innerhalb ADR-019-Floors.
       // spikeThreshold MIN = 1.0 (MIN_SPIKE_THRESHOLD_PCT).
@@ -1463,7 +1471,16 @@ export default function App() {
       killSwitchDraft: bot.killSwitch?.config
         ? JSON.parse(JSON.stringify(bot.killSwitch.config))
         : defaultKillSwitchConfig(bot.strategyConfig?.strategy_type ?? bot.strategyType),
-    });
+    };
+  };
+
+  const openBotSettingsPanel = (bot: BotState) => {
+    if (botSettingsPanelId === bot.id) {
+      setBotSettingsPanelId(null);
+      return;
+    }
+    settingsDraftBotIdRef.current = bot.id;
+    setBotSettingsDraft(createBotSettingsDraft(bot));
     setBotSettingsPanelId(bot.id);
     setBotSettingsSaveStatus("idle");
     setNovaPulseDirty(false);
@@ -3694,7 +3711,7 @@ export default function App() {
                                   const trendBias = indVals['adaptive_trendBias'];
                                   const htfSignal = indVals['adaptive_higherTimeframeSignal'];
 
-                                  const baseSettings = selectedBot.strategyConfig?.scalping_settings;
+                                  const baseSettings = selectedBot.strategyConfigPreset?.scalping_settings ?? selectedBot.strategyConfig?.scalping_settings;
                                   // ADR-020: Priorität auf selectedBot.settings (live Detector),
                                   // denn das ist der Wert, den Nova Pulse alle 30 Ticks per
                                   // detector.updateSettings(adapted) überschreibt. baseSettings
@@ -3802,11 +3819,16 @@ export default function App() {
                                   // via settings-Endpoint (Body erweitert um novaPulseConfig).
                                   const updateNpc = (patch: Partial<NovaPulseConfig>) => {
                                     const next: NovaPulseConfig = { ...npc, ...patch };
+                                    const draftForBot = settingsDraftBotIdRef.current === selectedBot.id;
+                                    settingsDraftBotIdRef.current = selectedBot.id;
                                     setBotSettingsDraft(p => {
-                                      const scd = p.strategyConfigDraft;
+                                      // Ohne (passenden) Draft lazy aus dem Bot initialisieren,
+                                      // damit die Slider auch ohne geöffnetes Settings-Panel funktionieren.
+                                      const base = p.strategyConfigDraft && draftForBot ? p : createBotSettingsDraft(selectedBot);
+                                      const scd = base.strategyConfigDraft;
                                       if (!scd) return p;
                                       return {
-                                        ...p,
+                                        ...base,
                                         strategyConfigDraft: {
                                           ...scd,
                                           scalping_settings: {
@@ -4157,10 +4179,10 @@ export default function App() {
                                   const velocity = indVals['paet_velocity'];
                                   const acceleration = indVals['paet_acceleration'];
 
-                                  const baseSettings = selectedBot.strategyConfig?.paet_settings;
+                                  const baseSettings = selectedBot.strategyConfigPreset?.paet_settings ?? selectedBot.strategyConfig?.paet_settings;
                                   // Live-Werte aus activeStrategyConfig.paet_settings (Detector hat Priorität,
                                   // da PAET-Adaptation alle 30 Ticks darauf schreibt).
-                                  const liveSettings = (selectedBot as any).strategyConfig?.paet_settings ?? {};
+                                  const liveSettings = selectedBot.strategyConfig?.paet_settings ?? {};
                                   const cSTW = liveSettings.stl_trend_window          ?? baseSettings?.stl_trend_window          ?? 60;
                                   const cCT  = liveSettings.collapse_threshold_pct    ?? baseSettings?.collapse_threshold_pct    ?? 0.25;
                                   const cEVT = liveSettings.evacuation_ticks          ?? baseSettings?.evacuation_ticks          ?? 3;
@@ -4199,11 +4221,16 @@ export default function App() {
                                   // markiert als dirty. Persistenz via /strategy-Endpoint (s. saveBotSettings).
                                   const updatePc = (patch: Partial<PaetSelfOptConfig>) => {
                                     const next: PaetSelfOptConfig = { ...pc, ...patch };
+                                    const draftForBot = settingsDraftBotIdRef.current === selectedBot.id;
+                                    settingsDraftBotIdRef.current = selectedBot.id;
                                     setBotSettingsDraft(p => {
-                                      const scd = p.strategyConfigDraft;
+                                      // Ohne (passenden) Draft lazy aus dem Bot initialisieren,
+                                      // damit die Slider auch ohne geöffnetes Settings-Panel funktionieren.
+                                      const base = p.strategyConfigDraft && draftForBot ? p : createBotSettingsDraft(selectedBot);
+                                      const scd = base.strategyConfigDraft;
                                       if (!scd) return p;
                                       return {
-                                        ...p,
+                                        ...base,
                                         strategyConfigDraft: {
                                           ...scd,
                                           paet_settings: {

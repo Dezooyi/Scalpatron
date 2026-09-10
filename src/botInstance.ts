@@ -2,7 +2,7 @@ import { PriceFeed, PricePoint } from './priceFeed.js';
 import { PatternDetector, PatternSettings, DEFAULT_SETTINGS } from './patternDetector.js';
 import { Trader, TraderStats, type TradeLogEntry } from './trader.js';
 import { logger } from './appLogger.js';
-import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, listStrategies, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt, getBotKillSwitch, setBotKillSwitch, getSetting, setSetting, deleteSetting, insertLesson, setBotStrategyConfig, getBotStrategyConfig, recordSelfOptAction, recordSelfOptOutcome, getSelfOptOutcomes, clearSelfOptOutcomes } from './db.js';
+import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, listStrategies, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt, getBotKillSwitch, setBotKillSwitch, getSetting, setSetting, deleteSetting, insertLesson, setBotStrategyConfig, getBotStrategyConfig, recordSelfOptAction, recordSelfOptOutcome, getSelfOptOutcomes, clearSelfOptOutcomes, getMaturedForecastSamples, recordPulseEntry, finalizePulseExit, getPulseOutcomes, getPulseBucketStats } from './db.js';
 import { StrategyEngine, isScalpingType } from './strategyEngine.js';
 import type { StrategyConfig, IndicatorConfig, MarketForecastEvidence } from './strategyTypes.js';
 import { TIMEFRAME_MS } from './candleAggregator.js';
@@ -19,6 +19,9 @@ import { getTimesFmSettings } from './timesFmSettings.js';
 import { evaluateForecastGate } from './forecastGate.js';
 import { forecastToEvidence, enrichNovaPulseSnapshot } from './strategy/selfOptSnapshots.js';
 import { evaluateSelfOptGate, selfOptRewardBoost, evaluateDriftGuard } from './selfOptGate.js';
+import { evaluateForecastReliability, type PulseCalibration } from './forecastPulseEngine.js';
+import { normalizePulseSettings, type NormalizedPulseSettings } from './strategy/pulseSafetyBounds.js';
+import { computeCalibration, isPulseBucketBlocked, suggestThresholdRaise } from './pulseLearning.js';
 
 const PRICE_FEED_TICKRATE_MS = process.env.PRICE_FEED_TICKRATE_MS
   ? parseInt(process.env.PRICE_FEED_TICKRATE_MS, 10)
@@ -55,6 +58,10 @@ export interface BotState {
   strategyId?: string;
   strategyType?: string;
   strategyConfig?: StrategyConfig;
+  /** Unveränderter User-Preset-Snapshot (ohne live Self-Opt-Adaptionen).
+   *  Nur die Felder, die die Self-Opt-Panels für den Live-vs-Preset-Vergleich
+   *  brauchen, um den SSE-Payload klein zu halten. */
+  strategyConfigPreset?: Pick<StrategyConfig, 'paet_settings' | 'scalping_settings'>;
   warmupProgress?: number; // 0.0 to 1.0
   killSwitch?: KillSwitchRuntime;
 }
@@ -73,6 +80,10 @@ export class BotInstance {
   private detector: PatternDetector;
   private strategyEngine?: StrategyEngine;
   private activeStrategyConfig?: StrategyConfig;
+  // ADR-021: Snapshot des User-Presets vor Live-Self-Opt-Adaptionen, damit das
+  // Frontend "live vs. Preset" anzeigen kann (activeStrategyConfig wird von der
+  // Adaption mutiert, dieser Snapshot nicht).
+  private baseStrategyConfig?: StrategyConfig;
   private trader: Trader;
   public status: 'running' | 'paused' | 'stopped' = 'stopped';
   public customSystemPrompt: string | null = null;
@@ -92,6 +103,14 @@ export class BotInstance {
     checkAtTick: number;
     indicatorSnapshot?: Record<string, number>;
   };
+  // Forecast Pulse (ADR-028): kalibrierte Kopie der pulse_settings + gecachte
+  // Meta-Ebene (Kalibrierung, Zeitfenster, Liquidität) — wird nur alle 30 Ticks
+  // bzw. bei config-Änderungen aktualisiert (keine DB-Arbeit im Tick-Hotpath).
+  private pulseCfg?: NormalizedPulseSettings;
+  private pulseCalib: PulseCalibration | null = null;
+  private pulseHourBlocked = false;
+  private pulseTokenQuality: { volume24h?: number; liquidityUsd?: number } | null = null;
+  private pulseRuntimeRefreshedAtMs = 0;
 
   constructor(
     id: string,
@@ -357,8 +376,17 @@ export class BotInstance {
 
   /** Assign a strategy config to this bot */
   public updateStrategy(config: StrategyConfig): void {
+    // Snapshot des Presets VOR jeder Mutation (Deep-Clone, da activeStrategyConfig
+    // im Folgenden in-place adaptiert wird).
+    this.baseStrategyConfig = config ? JSON.parse(JSON.stringify(config)) : undefined;
     this.activeStrategyConfig = config;
-    this.strategyEngine = new StrategyEngine(config);
+    // ADR-028: pulse_settings zentral klemmen/normalisieren, damit jeder
+    // Schreibpfad (Template, API, KI, Lern-Loop) nur geklemmte Werte sieht.
+    if (config.strategy_type === 'forecast_pulse') {
+      this.activeStrategyConfig.pulse_settings = normalizePulseSettings(config.pulse_settings);
+    }
+    this.syncPulseConfig();
+    this.strategyEngine = new StrategyEngine(this.activeStrategyConfig);
     // ADR-021 (Bug-Fix Cross-Bot-Leak): Per-Bot-Persistierung. Vorher schrieb
     // updateStrategy nichts → Self-Opt-Tweaks waren nach Restart weg und
     // mehrten sich zudem via strategies-Template auf andere Bots. Jetzt:
@@ -424,7 +452,179 @@ export class BotInstance {
     if (strategyType === 'paet') {
       return normalizePaetSelfOptConfig(this.activeStrategyConfig?.paet_settings?.paetConfig).enabled;
     }
+    if (strategyType === 'forecast_pulse') {
+      return this.pulseCfg?.learning.enabled ?? false;
+    }
     return false;
+  }
+
+  // ── Forecast Pulse (ADR-028): Meta-Ebene & Lern-Loop ───────────────────────
+
+  private isPulse(): boolean {
+    return this.activeStrategyConfig?.strategy_type === 'forecast_pulse';
+  }
+
+  /** pulse_settings nach updateStrategy/Adaptation neu kalibrieren. */
+  private syncPulseConfig(): void {
+    this.pulseCfg = this.isPulse()
+      ? normalizePulseSettings(this.activeStrategyConfig?.pulse_settings)
+      : undefined;
+  }
+
+  private sessionLabel(date: Date): string {
+    const h = date.getUTCHours();
+    if (h >= 1 && h < 9) return 'asia';
+    if (h >= 8 && h < 13) return 'overlap';
+    if (h >= 9 && h < 17) return 'london';
+    if (h >= 13 && h < 21) return 'ny';
+    return 'other';
+  }
+
+  /**
+   * Meta-Ebene auffrischen (alle 30 Ticks): per-Mint-Kalibrierung aus reifen
+   * forecast_log-Stichproben, gelerntes Zeitfenster-Gate und Liquiditäts-Daten.
+   * Nur DB-Zugriffe, kein HTTP.
+   */
+  private refreshPulseMeta(nowMs: number): void {
+    if (!this.isPulse() || !this.pulseCfg) return;
+    const cfg = this.pulseCfg;
+    if (nowMs - this.pulseRuntimeRefreshedAtMs < 60_000 && this.pulseCalib !== null) {
+      this.pulseRuntimeRefreshedAtMs = nowMs;
+      return;
+    }
+    this.pulseRuntimeRefreshedAtMs = nowMs;
+
+    // Kalibrierung (nur relevant, wenn der Kalibrierungs-Teil aktiv ist)
+    if (cfg.minForecastSamples > 0) {
+      const samples = getMaturedForecastSamples(this.mintAddress, nowMs, 80);
+      this.pulseCalib = computeCalibration(samples);
+    } else {
+      this.pulseCalib = null;
+    }
+
+    // Zeitfenster-Gate: heutige UTC-Stunde aus gelernter Historie
+    this.pulseHourBlocked = false;
+    if (cfg.learning.enabled) {
+      const since = nowMs - 7 * 24 * 60 * 60 * 1000;
+      const stats = getPulseBucketStats(this.id, 'hour', since);
+      const totalMatured = stats.reduce((s, b) => s + b.tradeCount, 0);
+      const hour = new Date(nowMs).getUTCHours();
+      const bucket = stats.find(b => b.bucketKey === String(hour));
+      if (bucket) {
+        const decision = isPulseBucketBlocked({
+          n: bucket.tradeCount,
+          wins: bucket.wins,
+          totalMatured,
+          minTradesPerBucket: cfg.learning.minTradesPerBucket,
+          minLearnedSamples: cfg.learning.minLearnedSamples,
+          minLearnedHitRate: cfg.learning.minLearnedHitRate,
+        });
+        this.pulseHourBlocked = decision.block;
+      }
+    }
+
+    // Liquiditäts-Guards (falls konfiguriert): Token-Metadaten lesen
+    if (cfg.minVolume24h > 0 || cfg.minLiquidityUsd > 0) {
+      try {
+        const token = getTokenInfo(this.mintAddress);
+        this.pulseTokenQuality = token
+          ? { volume24h: token.volume24h ?? undefined, liquidityUsd: token.liquidity ?? undefined }
+          : null;
+      } catch {
+        this.pulseTokenQuality = null;
+      }
+    }
+  }
+
+  /**
+   * ADR-028 Lern-Loop (alle 30 Ticks, nur wenn learning.enabled): Self-Opt-
+   * Outcome-Gate → Walk-forward-Schwellen-Justierung der minNetReturnPct.
+   */
+  private applyPulseLearning(nowMs: number): void {
+    if (!this.isPulse() || !this.pulseCfg) return;
+    const cfg = this.pulseCfg;
+    if (!cfg.learning.enabled) return;
+
+    // Outcome-Gate: schlechte WR unter Lernen → Auto-Disable (ADR-025-Muster)
+    if (getTimesFmSettings().selfOptGate) {
+      const gate = evaluateSelfOptGate(getSelfOptOutcomes(this.id, 'forecast_pulse'), {
+        minTrades: getTimesFmSettings().minTrades,
+        minWinRate: getTimesFmSettings().minWinRate,
+      });
+      if (gate.disable) {
+        this.disablePulseSelfOpt(gate.reason ?? 'unbekannter Grund');
+        return;
+      }
+    }
+
+    // Aktivitäts-Untergrenze: Trades der letzten 7 Tage
+    const weekAgo = nowMs - 7 * 24 * 60 * 60 * 1000;
+    const outcomes = getPulseOutcomes(this.id, 120);
+    const recent = outcomes.filter(o => o.exitTimestamp !== null && o.exitTimestamp >= weekAgo);
+    if (recent.length < cfg.learning.minTradesPerWeek) return;
+
+    // Walk-forward-Vorschlag: nur Anheben ist sauber evaluierbar.
+    const trades = [...outcomes]
+      .filter(o => o.pnlPercent !== null && o.forecastNetReturnPct !== null)
+      .reverse()
+      .map(o => ({ pnlPercent: o.pnlPercent as number, forecastNetReturnPct: o.forecastNetReturnPct as number }));
+    const suggestion = suggestThresholdRaise(trades, {
+      current: cfg.minNetReturnPct,
+      min: cfg.learning.tuneRange[0],
+      max: cfg.learning.tuneRange[1],
+      step: cfg.learning.tuneStep,
+      acceptMinImprovement: cfg.learning.tuneAcceptMinImprovementPct,
+      profitFactorTarget: cfg.learning.learnProfitFactorTarget,
+      validationRatio: cfg.learning.walkForwardRatio,
+      minSamples: cfg.learning.minLearnedSamples,
+    });
+    if (suggestion.proposed === null || suggestion.proposed <= cfg.minNetReturnPct + 1e-9) return;
+
+    const before = cfg.minNetReturnPct;
+    if (!this.activeStrategyConfig) return;
+    this.activeStrategyConfig.pulse_settings = {
+      ...(this.activeStrategyConfig.pulse_settings ?? {}),
+      minNetReturnPct: suggestion.proposed,
+    };
+    this.syncPulseConfig();
+    this.strategyEngine?.updateConfig(this.activeStrategyConfig);
+    try { setBotStrategyConfig(this.id, this.activeStrategyConfig); } catch { /* best effort */ }
+    try {
+      recordSelfOptAction({
+        botId: this.id,
+        strategyType: 'forecast_pulse',
+        ruleKey: 'pulse_min_net_return',
+        beforeValue: before,
+        afterValue: suggestion.proposed,
+        snapshot: {
+          reason: suggestion.reason ?? 'walk-forward',
+          keptNow: suggestion.keptNow,
+          keptRaised: suggestion.keptRaised,
+          expectancyNow: suggestion.expectancyNow,
+          expectancyRaised: suggestion.expectancyRaised,
+          profitFactor: suggestion.profitFactorRaised,
+        },
+      });
+    } catch { /* best effort */ }
+    console.log(`[BotInstance] ${this.name} pulse tuning: minNetReturnPct ${before} → ${suggestion.proposed} (expectancy ${suggestion.expectancyNow.toFixed(2)} → ${suggestion.expectancyRaised.toFixed(2)}%)`);
+  }
+
+  /** ADR-028: Lern-Loop deaktivieren (Outcome-Gate) + Baseline-Konvergenz löschen. */
+  private disablePulseSelfOpt(reason: string): void {
+    if (!this.activeStrategyConfig?.pulse_settings) return;
+    const learning = this.pulseCfg?.learning;
+    if (!learning) return;
+    this.activeStrategyConfig.pulse_settings = {
+      ...this.activeStrategyConfig.pulse_settings,
+      learning: { ...learning, enabled: false },
+    };
+    this.syncPulseConfig();
+    this.strategyEngine?.updateConfig(this.activeStrategyConfig);
+    try { setBotStrategyConfig(this.id, this.activeStrategyConfig); } catch { /* best effort */ }
+    try { db.prepare('DELETE FROM pulse_outcomes WHERE botId = ?').run(this.id); } catch { /* best effort */ }
+    clearSelfOptOutcomes(this.id);
+    insertLesson(this.id, 'param_drift', `pulse learning disabled: ${reason}`, { source: 'selfopt_gate' }, 0.8);
+    logger.warn(this.id, 'TIMESFM', `Forecast-Pulse-Lernen deaktiviert (Outcome-Gate): ${reason}`);
   }
 
   /** Programmatic PAET adaptation — derives optimal settings from live STL/FFT output. */
@@ -1033,6 +1233,21 @@ export class BotInstance {
             paetEngine.onExternalExit(historyLen, trade.price);
           }
         }
+        // ADR-028: Manueller SELL bei Forecast Pulse → Engine sync (Cooldown).
+        if (this.isPulse()) {
+          const pulseEngine = this.strategyEngine?.getPulseEngine();
+          if (pulseEngine) {
+            const kind = pulseEngine.takePendingExitKind();
+            pulseEngine.onExternalExit(Date.now());
+            pulseEngine.recordOutcome(trade.pnlPercent ?? 0);
+            finalizePulseExit(this.id, {
+              exitPrice: trade.price,
+              pnlPercent: trade.pnlPercent ?? 0,
+              exitKind: kind ?? 'manual',
+              win: (trade.pnlPercent ?? 0) > 0,
+            });
+          }
+        }
         // Feedback loop: attribute SELL outcome to the active agent advice entry
         if (trade.pnlPercent !== undefined) {
           updateAgentOutcome(this.id, trade.pnlPercent, trade.pnlPercent > 0);
@@ -1089,6 +1304,12 @@ export class BotInstance {
       strategyId: this.activeStrategyConfig?.id,
       strategyType: this.activeStrategyConfig?.strategy_type,
       strategyConfig: this.activeStrategyConfig,
+      strategyConfigPreset: this.baseStrategyConfig
+        ? {
+            paet_settings: this.baseStrategyConfig.paet_settings,
+            scalping_settings: this.baseStrategyConfig.scalping_settings,
+          }
+        : undefined,
       warmupProgress: this.getWarmupProgress(),
       killSwitch: this.killSwitch.getRuntime(),
     };
@@ -1275,6 +1496,12 @@ export class BotInstance {
       this.applyNovaPulseAdaptation(result.indicatorValues, forecastEvidence);
     }
 
+    // Forecast Pulse (ADR-028): Meta-Ebene + Lern-Loop alle 30 Ticks
+    if (this.isPulse() && this.cumulativeTicks % 30 === 0) {
+      this.refreshPulseMeta(Date.now());
+      this.applyPulseLearning(Date.now());
+    }
+
     // ── TimesFM: Trade-Gate (Runtime-Steering-Plan Phase 2) ──────────────────
     let gateActionForTrade: string | null = null;
     if (getTimesFmSettings().tradeGate) {
@@ -1320,6 +1547,40 @@ export class BotInstance {
       }
     }
 
+    // ── Forecast Pulse (ADR-028): Meta-Gates am BUY (Kalibrierung, Zeitfenster,
+    // Liquidität) + Confidence-/Cold-Start-Sizing-Skala. Nur für forecast_pulse.
+    if (result.signal === 'BUY' && this.isPulse() && this.pulseCfg) {
+      const pulseCfg = this.pulseCfg;
+      const reliability = evaluateForecastReliability(this.pulseCalib, pulseCfg);
+      if (reliability.block) {
+        result.signal = 'HOLD';
+        result.reason = `${result.reason ?? 'BUY'}; pulse_kalibrierung_block`;
+        logger.action(this.id, 'TIMESFM', `Pulse-BUY geblockt (Kalibrierung): ${reliability.reason}`);
+      } else {
+        let scale = reliability.scale;
+        // Liquiditäts-Guards (0 = aus). Fehlt die Info, wird konservativ geblockt.
+        if ((pulseCfg.minVolume24h > 0 || pulseCfg.minLiquidityUsd > 0) && this.pulseTokenQuality) {
+          const q = this.pulseTokenQuality;
+          if (
+            (pulseCfg.minVolume24h > 0 && (q.volume24h ?? 0) < pulseCfg.minVolume24h) ||
+            (pulseCfg.minLiquidityUsd > 0 && (q.liquidityUsd ?? 0) < pulseCfg.minLiquidityUsd)
+          ) {
+            result.signal = 'HOLD';
+            result.reason = `${result.reason ?? 'BUY'}; pulse_liquiditaet_block`;
+            logger.action(this.id, 'TRADER', `Pulse-BUY geblockt (Liquidität): vol=${q.volume24h}, liq=${q.liquidityUsd}`);
+          }
+        }
+        if (result.signal === 'BUY' && this.pulseHourBlocked) {
+          result.signal = 'HOLD';
+          result.reason = `${result.reason ?? 'BUY'}; pulse_zeitfenster_block`;
+          logger.action(this.id, 'TIMESFM', `Pulse-BUY geblockt (gelerntes Zeitfenster, UTC ${new Date().getUTCHours()}h)`);
+        }
+        if (result.signal === 'BUY') {
+          result.positionScale = Math.max(0.05, Math.min(1, (result.positionScale ?? 1) * scale));
+        }
+      }
+    }
+
     if (result.signal === 'BUY') {
       logger.action(this.id, 'DETECTOR', `Kauf-Signal erkannt! Spike: ${result.spikePercent.toFixed(2)}% | Strategie: ${this.activeStrategyConfig?.strategy_type ?? 'scalping'}`);
     }
@@ -1337,7 +1598,18 @@ export class BotInstance {
     }
 
     const maxPositions = this.activeStrategyConfig?.risk_management?.max_positions ?? 1;
-    const positionSizePct = this.activeStrategyConfig?.risk_management?.position_size ?? null;
+    let positionSizePct = this.activeStrategyConfig?.risk_management?.position_size ?? null;
+    // ADR-028 Forecast Pulse: Risk-Budget-Cap + Confidence-Skala auf die
+    // Basis-Positionsgröße (beides in Balance-Anteilen, also direkt vergleichbar).
+    if (this.isPulse() && this.pulseCfg && positionSizePct !== null) {
+      const pulseCfg = this.pulseCfg;
+      const riskFraction = pulseCfg.stopLossPct > 0
+        ? Math.min(1, pulseCfg.maxRiskPerTradePct / pulseCfg.stopLossPct)
+        : 1;
+      const cappedBase = Math.min(positionSizePct, riskFraction);
+      const scale = Math.max(0.05, Math.min(1, result.positionScale ?? 1));
+      positionSizePct = Math.min(positionSizePct, cappedBase * scale);
+    }
     const trade = await this.trader.handleSignal(
       result, 
       { ...this.detector.settings } as unknown as Record<string, number>,
@@ -1379,7 +1651,46 @@ export class BotInstance {
            forecastMeta?.forecastAgeMs ?? null,
            gateActionForTrade,
          );
-       }
+        }
+
+        // ADR-028 Forecast Pulse: Entry-Snapshot + Exit-Finalisierung + Sync.
+        // Erfasst jeden geschlossenen Pulse-Trade mit Entry-Forecast-Evidenz und
+        // Exit-Label (Triple-Barrier-Metapher) → Lern-Basis für Zeitfenster-Gate
+        // und Walk-forward-Threshold-Tuning.
+        if (this.isPulse()) {
+          const pulseEngine = this.strategyEngine?.getPulseEngine();
+          const now = Date.now();
+          if (trade.action === 'BUY') {
+            const d = new Date(now);
+            recordPulseEntry({
+              botId: this.id,
+              mintAddress: this.mintAddress,
+              entryPrice: trade.price,
+              forecastNetReturnPct: forecastMeta?.forecastNetReturnPct ?? undefined,
+              directionScore: forecastMeta?.forecastDirectionScore ?? undefined,
+              slopeConsistency: forecastMeta?.forecastSlopeConsistency ?? undefined,
+              forecastAgeMs: forecastMeta?.forecastAgeMs ?? undefined,
+              hour: d.getUTCHours(),
+              weekday: d.getUTCDay(),
+              session: this.sessionLabel(d),
+            });
+          } else {
+            const engineKind = pulseEngine?.takePendingExitKind();
+            if (!engineKind) {
+              // Externer Exit (Gate/UI/Kill-Switch-Exits, die die Engine nicht
+              // selbst ausgelöst hat) → Engine synchronisieren (Cooldown).
+              pulseEngine?.onExternalExit(now);
+            }
+            const kind = engineKind ?? (gateActionForTrade === 'forecast_exit' ? 'forecast_gate' : null);
+            pulseEngine?.recordOutcome(trade.pnlPercent ?? 0, now);
+            finalizePulseExit(this.id, {
+              exitPrice: trade.price,
+              pnlPercent: trade.pnlPercent ?? 0,
+              exitKind: kind ?? 'manual',
+              win: (trade.pnlPercent ?? 0) > 0,
+            });
+          }
+        }
 
         // ADR-027: Forecast-Gate-Exit bei PAET — Engine synchronisieren
         // (peakPrice + lastSellTick), damit kein Sofort-Re-Entry entsteht.
@@ -1401,7 +1712,7 @@ export class BotInstance {
          // Phase 3b: SELL-Outcome an die Self-Opt-Epoche attribuieren (nur solange aktiv).
          const selfOptType = this.activeStrategyConfig?.strategy_type;
          if (this.isSelfOptActive(selfOptType)) {
-           recordSelfOptOutcome(this.id, selfOptType as 'scalping-adaptive' | 'paet', trade.pnlPercent, trade.pnlPercent > 0);
+           recordSelfOptOutcome(this.id, selfOptType as 'scalping-adaptive' | 'paet' | 'forecast_pulse', trade.pnlPercent, trade.pnlPercent > 0);
          }
          this.killSwitch.recordTradeClosed(trade.pnlPercent);
 

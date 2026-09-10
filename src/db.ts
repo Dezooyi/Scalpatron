@@ -196,6 +196,33 @@ export function initDB() {
       PRIMARY KEY (botId, strategyType),
       FOREIGN KEY (botId) REFERENCES bots(id) ON DELETE CASCADE
     );
+
+    -- ADR-028 Forecast Pulse: per-Trade-Outcome-Log (Entry-Snapshot + Exit-Label).
+    -- Lern-Basis für Meta-Labeling (Zeitfenster-Gate, Walk-forward-Threshold-Tuning).
+    CREATE TABLE IF NOT EXISTS pulse_outcomes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      botId TEXT NOT NULL,
+      mintAddress TEXT NOT NULL,
+      entryTimestamp INTEGER NOT NULL,
+      entryPrice REAL NOT NULL,
+      forecastNetReturnPct REAL,
+      directionScore REAL,
+      slopeConsistency REAL,
+      dataQuality REAL,
+      forecastAgeMs INTEGER,
+      exitTimestamp INTEGER,
+      exitPrice REAL,
+      pnlPercent REAL,
+      exitKind TEXT,
+      win INTEGER,
+      hour INTEGER NOT NULL,
+      weekday INTEGER NOT NULL,
+      session TEXT,
+      FOREIGN KEY (botId) REFERENCES bots(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pulse_outcomes_bot_ts ON pulse_outcomes(botId, entryTimestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_pulse_outcomes_open ON pulse_outcomes(botId, exitKind);
   `);
 
   // Strategies table — stores StrategyConfig JSON (templates + user-saved)
@@ -754,7 +781,11 @@ export function recordSelfOptOutcome(
   pnlPercent: number,
   isWin: boolean,
 ): void {
-  if (strategyType !== 'scalping-adaptive' && strategyType !== 'paet') return;
+  if (
+    strategyType !== 'scalping-adaptive' &&
+    strategyType !== 'paet' &&
+    strategyType !== 'forecast_pulse'
+  ) return;
   try {
     db.prepare(`
       INSERT INTO selfopt_outcomes (botId, strategyType, tradeCount, wins, totalPnl, lastUpdated)
@@ -815,7 +846,214 @@ export function getRecentSelfOptActions(botId: string, limit = 100): SelfOptActi
   }));
 }
 
-// --- Agent Config Persistence ---
+// ── Forecast-Pulse: Kalibrierung (ADR-028) ──────────────────────────────────
+
+export interface MaturedForecastSample {
+  timestamp: number;
+  expectedReturnPct: number;
+  horizon: number;
+  medianIntervalMs: number;
+  /** Realisierte Rendite vom Forecast-Bezugszeitpunkt bis zum aktuellen Preis. */
+  realizedReturnPct: number;
+}
+
+/**
+ * Reife Forecast-Log-Einträge (Horizont-Zeit verstrichen) mit realisierter
+ * Rendite — Basis der per-Mint-Hit-Rate (Online-Kalibrierung, ADR-028 R3).
+ */
+export function getMaturedForecastSamples(
+  mintAddress: string,
+  nowMs: number,
+  limit = 80,
+): MaturedForecastSample[] {
+  try {
+    const rows = db.prepare(`
+      SELECT f.timestamp, f.expectedReturnPct, f.horizon, f.medianIntervalMs,
+        (SELECT price FROM live_feed l
+          WHERE l.mintAddress = f.mintAddress AND l.timestamp <= f.timestamp
+          ORDER BY l.timestamp DESC LIMIT 1) AS startPrice,
+        (SELECT price FROM live_feed l
+          WHERE l.mintAddress = f.mintAddress
+          ORDER BY l.timestamp DESC LIMIT 1) AS lastPrice
+      FROM forecast_log f
+      WHERE f.mintAddress = ?
+      ORDER BY f.timestamp DESC
+      LIMIT ?
+    `).all(mintAddress, limit) as Array<Record<string, unknown>>;
+    const out: MaturedForecastSample[] = [];
+    for (const row of rows) {
+      const ts = Number(row.timestamp);
+      const horizon = Number(row.horizon);
+      const median = Number(row.medianIntervalMs);
+      const expected = Number(row.expectedReturnPct);
+      const start = Number(row.startPrice);
+      const last = Number(row.lastPrice);
+      if (!Number.isFinite(ts) || !Number.isFinite(horizon) || !Number.isFinite(median)) continue;
+      if (horizon <= 0 || median <= 0 || !Number.isFinite(expected) || !Number.isFinite(start) || !Number.isFinite(last)) continue;
+      if (start <= 0 || last <= 0) continue;
+      const elapsedMs = nowMs - ts;
+      if (elapsedMs < horizon * median) continue; // noch nicht reif
+      out.push({
+        timestamp: ts,
+        expectedReturnPct: expected,
+        horizon,
+        medianIntervalMs: median,
+        realizedReturnPct: ((last / start) - 1) * 100,
+      });
+      if (out.length >= limit) break;
+    }
+    return out;
+  } catch (e) {
+    console.warn(`[DB] matured forecast samples failed: ${(e as Error).message}`);
+    return [];
+  }
+}
+
+// ── Forecast-Pulse: Outcome-Log (ADR-028 Phase C) ────────────────────────────
+
+export interface PulseOutcomeRow {
+  id: number;
+  botId: string;
+  mintAddress: string;
+  entryTimestamp: number;
+  entryPrice: number;
+  forecastNetReturnPct: number | null;
+  directionScore: number | null;
+  slopeConsistency: number | null;
+  dataQuality: number | null;
+  forecastAgeMs: number | null;
+  exitTimestamp: number | null;
+  exitPrice: number | null;
+  pnlPercent: number | null;
+  exitKind: string | null;
+  win: number | null;
+  hour: number;
+  weekday: number;
+  session: string | null;
+}
+
+/** Offene BUY-Evidenz persistieren (Entry-Snapshot für spätere Outcome-Zuordnung). */
+export function recordPulseEntry(entry: {
+  botId: string;
+  mintAddress: string;
+  entryPrice: number;
+  forecastNetReturnPct?: number;
+  directionScore?: number;
+  slopeConsistency?: number;
+  dataQuality?: number;
+  forecastAgeMs?: number;
+  hour: number;
+  weekday: number;
+  session: string;
+}): void {
+  try {
+    db.prepare(`
+      INSERT INTO pulse_outcomes (
+        botId, mintAddress, entryTimestamp, entryPrice, forecastNetReturnPct,
+        directionScore, slopeConsistency, dataQuality, forecastAgeMs,
+        hour, weekday, session
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      entry.botId,
+      entry.mintAddress,
+      Date.now(),
+      entry.entryPrice,
+      entry.forecastNetReturnPct ?? null,
+      entry.directionScore ?? null,
+      entry.slopeConsistency ?? null,
+      entry.dataQuality ?? null,
+      entry.forecastAgeMs ?? null,
+      entry.hour,
+      entry.weekday,
+      entry.session,
+    );
+  } catch (e) {
+    console.warn(`[DB] pulse_outcomes entry write failed: ${(e as Error).message}`);
+  }
+}
+
+/** Jüngste offene BUY-Zeile mit Exit-Daten finalisieren (SELL-Outcome). */
+export function finalizePulseExit(botId: string, exit: {
+  exitPrice: number;
+  pnlPercent: number;
+  exitKind: string;
+  win: boolean;
+}): void {
+  try {
+    const result = db.prepare(
+      `SELECT id FROM pulse_outcomes
+       WHERE botId = ? AND exitKind IS NULL
+       ORDER BY entryTimestamp DESC LIMIT 1`
+    ).get(botId) as { id: number } | undefined;
+    if (!result) return;
+    db.prepare(`
+      UPDATE pulse_outcomes
+      SET exitTimestamp = ?, exitPrice = ?, pnlPercent = ?, exitKind = ?, win = ?
+      WHERE id = ?
+    `).run(Date.now(), exit.exitPrice, exit.pnlPercent, exit.exitKind, exit.win ? 1 : 0, result.id);
+  } catch (e) {
+    console.warn(`[DB] pulse_outcomes exit write failed: ${(e as Error).message}`);
+  }
+}
+
+/** Abgeschlossene Pulse-Trades (Lern-Basis). */
+export function getPulseOutcomes(botId: string, limit = 100): PulseOutcomeRow[] {
+  const rows = db.prepare(
+    `SELECT * FROM pulse_outcomes WHERE botId = ? AND exitKind IS NOT NULL
+     ORDER BY entryTimestamp DESC LIMIT ?`
+  ).all(botId, limit) as Array<Record<string, unknown>>;
+  return rows.map(row => ({
+    id: Number(row.id),
+    botId: String(row.botId),
+    mintAddress: String(row.mintAddress),
+    entryTimestamp: Number(row.entryTimestamp),
+    entryPrice: Number(row.entryPrice),
+    forecastNetReturnPct: row.forecastNetReturnPct === null ? null : Number(row.forecastNetReturnPct),
+    directionScore: row.directionScore === null ? null : Number(row.directionScore),
+    slopeConsistency: row.slopeConsistency === null ? null : Number(row.slopeConsistency),
+    dataQuality: row.dataQuality === null ? null : Number(row.dataQuality),
+    forecastAgeMs: row.forecastAgeMs === null ? null : Number(row.forecastAgeMs),
+    exitTimestamp: row.exitTimestamp === null ? null : Number(row.exitTimestamp),
+    exitPrice: row.exitPrice === null ? null : Number(row.exitPrice),
+    pnlPercent: row.pnlPercent === null ? null : Number(row.pnlPercent),
+    exitKind: row.exitKind === null ? null : String(row.exitKind),
+    win: row.win === null ? null : Number(row.win),
+    hour: Number(row.hour),
+    weekday: Number(row.weekday),
+    session: row.session === null ? null : String(row.session),
+  }));
+}
+
+/** Aggregierte Win-Rate je Zeit-Bucket (Zeitfenster-Gate, ADR-028/ADR-011). */
+export function getPulseBucketStats(
+  botId: string,
+  bucketColumn: 'hour' | 'weekday' | 'session',
+  sinceMs: number,
+): Array<{ bucketKey: string; tradeCount: number; wins: number; totalPnl: number }> {
+  const col = bucketColumn === 'session' ? 'session' : bucketColumn;
+  try {
+    const rows = db.prepare(`
+      SELECT ${col} AS bucketKey,
+             COUNT(*) AS tradeCount,
+             COALESCE(SUM(win), 0) AS wins,
+             COALESCE(SUM(pnlPercent), 0) AS totalPnl
+      FROM pulse_outcomes
+      WHERE botId = ? AND exitKind IS NOT NULL AND entryTimestamp >= ?
+      GROUP BY ${col}
+    `).all(botId, sinceMs) as Array<{ bucketKey: string | number; tradeCount: number; wins: number; totalPnl: number }>;
+    return rows.map(r => ({
+      bucketKey: String(r.bucketKey),
+      tradeCount: Number(r.tradeCount),
+      wins: Number(r.wins),
+      totalPnl: Number(r.totalPnl),
+    }));
+  } catch (e) {
+    console.warn(`[DB] pulse bucket stats failed: ${(e as Error).message}`);
+    return [];
+  }
+}
+
+// ── Agent Config Persistence ──
 const AGENT_CONFIG_KEY = 'agent_config';
 
 
@@ -1325,8 +1563,8 @@ export function deleteBotOrder(botId: string): void {
 /**
  * Ruft Informationen eines Tokens ab.
  */
-export function getTokenInfo(mintAddress: string): { symbol: string; name: string; decimals: number; priceUsd?: number } | null {
-  const row = db.prepare('SELECT symbol, name, decimals, priceUsd FROM tokens WHERE mintAddress = ?').get(mintAddress) as any;
+export function getTokenInfo(mintAddress: string): { symbol: string; name: string; decimals: number; priceUsd?: number; volume24h?: number; liquidity?: number } | null {
+  const row = db.prepare('SELECT symbol, name, decimals, priceUsd, volume24h, liquidity FROM tokens WHERE mintAddress = ?').get(mintAddress) as any;
   return row || null;
 }
 

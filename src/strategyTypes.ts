@@ -11,7 +11,8 @@ export type StrategyType =
   | 'grid'
   | 'dca'
   | 'ml'
-  | 'paet';
+  | 'paet'
+  | 'forecast_pulse';
 
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d';
 
@@ -54,6 +55,95 @@ export interface ExitCondition {
   value?: number;             // for take_profit / stop_loss (0.05 = 5%)
   trailing_pct?: number;      // for trailing_stop
   condition?: Condition;      // for indicator-based exit
+}
+
+// ── Forecast Pulse (ADR-028) ─────────────────────────────────────────────────
+// Event-getriebene TimesFM-Fenster-Strategie. Alle Schwellen sind optional und
+// werden über normalizePulseSettings() (pulseSafetyBounds.ts) geklemmt.
+
+export type TrendConsentMode = 'off' | 'non_contrary' | 'aligned';
+export type QuantileMode = 'off' | 'p10_floor' | 'width';
+export type PulseSizeMode = 'fixed' | 'confidence_scaled';
+
+export interface PulseLearningSettings {
+  /** Optionaler Meta-Labeling-Lern-Loop (ADR-028). Default: false. */
+  enabled: boolean;
+  /** Optimierungsziel: Erwartungswert/Profit-Factor statt blanker Win-Rate. */
+  objective: 'expectancy' | 'winrate';
+  /** Stichproben, bevor das Zeitfenster-Gate / Tuning eingreift. */
+  minLearnedSamples: number;
+  /** Mindest-Trades je Zeit-Bucket, bevor dessen Hit-Rate als Gate wirkt. */
+  minTradesPerBucket: number;
+  /** Mindest-Hit-Rate eines Zeit-Buckets (0..1), sonst wird er geblockt. */
+  minLearnedHitRate: number;
+  /** Profit-Factor-Untergrenze, die ein Tuning erreichen muss. */
+  learnProfitFactorTarget: number;
+  /** Suchraum für die minNetReturnPct-Justierung [min, max]. */
+  tuneRange: [number, number];
+  /** Schrittweite der minNetReturnPct-Justierung. */
+  tuneStep: number;
+  /** Mindest-Verbesserung (rel. Erwartungswert-Delta), damit ein Schritt gilt. */
+  tuneAcceptMinImprovementPct: number;
+  /** Anteil der Outcome-Stichprobe, der als Walk-forward-Validierung dient. */
+  walkForwardRatio: number;
+  /** Aktivitäts-Untergrenze: unter dieser Trade-Frequenz wird nicht getunt. */
+  minTradesPerWeek: number;
+}
+
+export interface PulseSettings {
+  // Entry-Fenster (alle Schwellen optional, Defaults in pulseSafetyBounds.ts)
+  minNetReturnPct?: number;
+  minDirectionScore?: number;
+  minSlopeConsistency?: number;
+  minDataQuality?: number;
+  maxForecastAgeMs?: number;
+  /** Kumulierte Rendite der ersten Forecast-Hälfte muss ≥ diesem Wert sein. */
+  earlyPathNetPct?: number;
+  /** Realisierte Volatilitäts-Bandbreite (%); 0/0 = aus. */
+  volBandMinPct?: number;
+  volBandMaxPct?: number;
+  trendConsent?: TrendConsentMode;
+  /** Liquiditäts-Guards (0 = aus) — werden auf Bot-Ebene ausgewertet. */
+  minVolume24h?: number;
+  minLiquidityUsd?: number;
+  /** Quantil-Filter (p10/p90) hinter TIMESFM_QUANTILES. */
+  quantileMode?: QuantileMode;
+  p10FloorNetPct?: number;
+  maxQuantileWidthPct?: number;
+  /** Mindest-Ticks an History vor dem ersten Entry-Versuch. */
+  warmupTicks?: number;
+  // Online-Kalibrierung (Bot-Ebene wertet rolling Hit-Rate aus forecast_log aus)
+  minForecastSamples?: number;
+  minForecastHitRate?: number;
+  hitRatePrior?: number;
+  coldStartScalePct?: number;
+  // Rhythmus (variable, marktabhängige Zeitabstände)
+  entryCooldownTicks?: number;
+  spacingAdaptive?: boolean;
+  spacingMinTicks?: number;
+  spacingMaxTicks?: number;
+  tickRateMs?: number;
+  // Exit
+  minHoldTicks?: number;
+  windowCloseNetReturnPct?: number;
+  windowCloseDirectionScore?: number;
+  /** Fenster-Exit nur bei realisiertem PnL ≥ Wert (Default = Roundtrip-Kosten). */
+  minExitPnlPct?: number;
+  takeProfitPct?: number;
+  trailingStopPct?: number;
+  trailActivationPct?: number;
+  stopLossPct?: number;
+  maxHoldTicks?: number;
+  // Sizing (ADR-028: Risk-Budget + Confidence-Scaling)
+  sizeMode?: PulseSizeMode;
+  confidenceScaleMinPct?: number;
+  maxRiskPerTradePct?: number;
+  // Guards (Strategie-Ebene, unabhängig vom globalen Kill-Switch)
+  maxConsecutiveLosses?: number;
+  lossPauseTicks?: number;
+  maxStrategyDrawdownPct?: number;
+  // Meta-Labeling-Lern-Loop (optional)
+  learning?: PulseLearningSettings;
 }
 
 export interface RiskManagement {
@@ -130,6 +220,8 @@ export interface StrategyConfig {
   // Custom system prompt for the Ollama Strategy Assistant
   // If set, overrides the auto-generated prompt for this strategy
   system_prompt?: string;
+  /** Forecast-Pulse-spezifisch (strategy_type === 'forecast_pulse', ADR-028). */
+  pulse_settings?: PulseSettings;
   createdAt?: number;
   isTemplate?: boolean;
 }
@@ -193,4 +285,6 @@ export interface MarketForecastEvidence {
   ageMs: number;
   /** Forecast-Horizont in Schritten. */
   horizon: number;
+  /** Kumulierte Rendite der ersten Forecast-Hälfte (%) — Early-Path-Check (ADR-028). */
+  firstHalfNetReturnPct?: number;
 }

@@ -45,6 +45,7 @@ interface Row {
   avgHoldMs: number;
   expectancy: number;
   streakLabel: string;
+  hasTrades: boolean;
 }
 
 const COLUMNS: { key: SortKey; label: string; align: "left" | "right" }[] = [
@@ -87,6 +88,7 @@ function PerformanceTableBase({ bots, perBot, tokenSymbol, onSelectBot, selected
         avgHoldMs: m.avgHoldMs,
         expectancy: m.expectancy,
         streakLabel: streakLabel(m),
+        hasTrades: m.closedTrades > 0,
       };
     });
   }, [perBot, botMap, tokenSymbol]);
@@ -116,7 +118,7 @@ function PerformanceTableBase({ bots, perBot, tokenSymbol, onSelectBot, selected
   if (rows.length === 0) {
     return (
       <div className="flex items-center justify-center h-24 text-[11px] text-zinc-600 dark:text-zinc-500">
-        Keine Bots mit realisierten Trades im Zeitraum
+        Keine Bots vorhanden
       </div>
     );
   }
@@ -151,7 +153,6 @@ function PerformanceTableBase({ bots, perBot, tokenSymbol, onSelectBot, selected
         </TableHeader>
         <TableBody>
           {sortedRows.map((row) => {
-            const pnlPositive = row.netPnlPercent >= 0;
             const isSelected = row.botId === selectedBotId;
             return (
               <TableRow
@@ -187,20 +188,22 @@ function PerformanceTableBase({ bots, perBot, tokenSymbol, onSelectBot, selected
                     )}
                   </div>
                 </TableCell>
-                <TableCell className={`text-right font-black ${pnlPositive ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
-                  {formatPct(row.netPnlPercent)}
+                <TableCell className={`text-right font-black ${!row.hasTrades ? "text-zinc-500 dark:text-zinc-600" : row.netPnlPercent >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                  {row.hasTrades ? formatPct(row.netPnlPercent) : "—"}
                 </TableCell>
-                <TableCell className={`text-right ${row.winRate >= 50 ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-700 dark:text-zinc-300"}`}>
-                  {row.winRate.toFixed(0)}%
+                <TableCell className={`text-right ${!row.hasTrades ? "text-zinc-500 dark:text-zinc-600" : row.winRate >= 50 ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-700 dark:text-zinc-300"}`}>
+                  {row.hasTrades ? `${row.winRate.toFixed(0)}%` : "—"}
                 </TableCell>
-                <TableCell className={`text-right ${row.profitFactor >= 1 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
-                  {formatRatio(row.profitFactor)}
+                <TableCell className={`text-right ${!row.hasTrades ? "text-zinc-500 dark:text-zinc-600" : row.profitFactor >= 1 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                  {row.hasTrades ? formatRatio(row.profitFactor) : "—"}
                 </TableCell>
                 <TableCell className="text-right text-zinc-700 dark:text-zinc-300">{row.closedTrades}</TableCell>
-                <TableCell className="text-right text-red-600 dark:text-red-400">-{row.maxDrawdown.toFixed(1)}%</TableCell>
+                <TableCell className="text-right text-red-600 dark:text-red-400">
+                  {row.hasTrades ? `-${row.maxDrawdown.toFixed(1)}%` : "—"}
+                </TableCell>
                 <TableCell className="text-right text-zinc-600 dark:text-zinc-400 whitespace-nowrap">{formatDuration(row.avgHoldMs)}</TableCell>
-                <TableCell className={`text-right ${row.expectancy >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
-                  {formatPct(row.expectancy)}
+                <TableCell className={`text-right ${!row.hasTrades ? "text-zinc-500 dark:text-zinc-600" : row.expectancy >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                  {row.hasTrades ? formatPct(row.expectancy) : "—"}
                 </TableCell>
               </TableRow>
             );

@@ -15,6 +15,7 @@ export interface PatternResult {
   reason?: string;                  // human-readable trigger description
   indicatorValues?: Record<string, number>;  // latest indicator snapshot
   minHoldRejected?: boolean;        // ADR-019: SELL rejected because min hold time not reached
+  positionScale?: number;           // ADR-028: 0..1 sizing factor on BUY (Forecast Pulse)
 }
 
 export interface PatternSettings {
