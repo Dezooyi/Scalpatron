@@ -1,5 +1,6 @@
 import { db } from './db.js';
 import { getTimesFmSettings } from './timesFmSettings.js';
+import { CONFIG } from './config.js';
 
 export interface TimesFmForecast {
   expectedReturnPct: number;
@@ -88,7 +89,9 @@ export async function forecastMint(mintAddress: string): Promise<TimesFmForecast
 
     const finalPrice = forecastPrices.at(-1) ?? lastPrice;
     const expectedReturnPct = ((finalPrice / lastPrice) - 1) * 100;
-    const estimatedRoundtripCostPct = 2;
+    // ADR-031 Kostenwahrheit: eine Quelle für die Roundtrip-Kosten nutzen
+    // (vorher hier hart 2, sonst überall CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT).
+    const estimatedRoundtripCostPct = CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT * 100;
     const forecastReturns = forecastPrices.map((price, index) => {
       const previous = index === 0 ? lastPrice : forecastPrices[index - 1];
       return previous > 0 ? ((price / previous) - 1) * 100 : 0;

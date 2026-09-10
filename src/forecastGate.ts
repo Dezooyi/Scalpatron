@@ -15,12 +15,12 @@ export type GateSignal = 'BUY' | 'SELL' | 'HOLD';
 export interface ForecastGateOptions {
   /** Mindest-Konsistenz der Forecast-Schritte, ab der das Signal zählt. */
   minSlopeConsistency?: number;
-  /** Netto-Return (%, nach Kosten), ab dem ein BUY herabgestuft wird. */
-  demoteBuyNetReturnPct?: number;
+  /** Roher Forecast-Return (%, vor Kosten), ab dem ein BUY herabgestuft wird. */
+  demoteBuyReturnPct?: number;
   /** Direction-Score, ab dem ein BUY herabgestuft wird. */
   demoteBuyDirectionScore?: number;
-  /** Netto-Return (%), ab dem ein Exit zugelassen wird. */
-  allowExitNetReturnPct?: number;
+  /** Roher Forecast-Return (%, vor Kosten), ab dem ein Exit zugelassen wird. */
+  allowExitReturnPct?: number;
   /** Direction-Score, ab dem ein Exit zugelassen wird. */
   allowExitDirectionScore?: number;
   /** Maximales Forecast-Alter (ms); ältere Signale wirken nicht. */
@@ -31,9 +31,9 @@ export interface ForecastGateOptions {
 
 export const FORECAST_GATE_DEFAULTS: Required<ForecastGateOptions> = {
   minSlopeConsistency: 0.5,
-  demoteBuyNetReturnPct: -0.5,
+  demoteBuyReturnPct: -0.5,
   demoteBuyDirectionScore: -0.2,
-  allowExitNetReturnPct: -1.0,
+  allowExitReturnPct: -1.0,
   allowExitDirectionScore: -0.4,
   maxAgeMs: 120_000,
   requirePositivePnl: true,
@@ -81,26 +81,35 @@ function mergeOptions(options?: ForecastGateOptions): Required<ForecastGateOptio
   return { ...FORECAST_GATE_DEFAULTS, ...options };
 }
 
-/** Stark negativ genug für eine BUY-Demotion (mit Richtungs-Konsistenz). */
+/**
+ * Stark negativ genug für eine BUY-Demotion (mit Richtungs-Konsistenz).
+ * ADR-029/031: Bewertet den ROHEN Forecast-Return (expectedReturnPct), nicht
+ * den kostenbereinigten netExpectedReturnPct. Letzterer wird vom pauschalen
+ * 2-%-Kostenabzug dominiert und demotierte in flachen Märkten ~98 % aller BUYs
+ * (neutraler Forecast ~0 % → netto −2 % → immer "stark negativ").
+ */
 export function isAdverseForBuy(
   forecast: TimesFmForecast,
   opts: Required<ForecastGateOptions>,
 ): boolean {
   if (forecast.signalVector.slopeConsistency < opts.minSlopeConsistency) return false;
   return (
-    forecast.netExpectedReturnPct <= opts.demoteBuyNetReturnPct ||
+    forecast.expectedReturnPct <= opts.demoteBuyReturnPct ||
     forecast.signalVector.directionScore <= opts.demoteBuyDirectionScore
   );
 }
 
-/** So stark negativ, dass ein Exit in Betracht kommt. */
+/**
+ * So stark negativ, dass ein Exit in Betracht kommt. Gleiche Semantik wie
+ * isAdverseForBuy: roher Forecast-Return statt Netto-Return.
+ */
 export function isSevereForExit(
   forecast: TimesFmForecast,
   opts: Required<ForecastGateOptions>,
 ): boolean {
   if (forecast.signalVector.slopeConsistency < opts.minSlopeConsistency) return false;
   return (
-    forecast.netExpectedReturnPct <= opts.allowExitNetReturnPct ||
+    forecast.expectedReturnPct <= opts.allowExitReturnPct ||
     forecast.signalVector.directionScore <= opts.allowExitDirectionScore
   );
 }
@@ -123,11 +132,11 @@ export function evaluateForecastGate(input: ForecastGateInput): ForecastGateDeci
 
   if (input.signal === 'BUY') {
     if (isAdverseForBuy(input.forecast, opts)) {
-      const net = input.forecast.netExpectedReturnPct.toFixed(2);
+      const ret = input.forecast.expectedReturnPct.toFixed(2);
       return {
         action: 'demote_buy',
         code: 'demote_buy',
-        reason: `forecast net ${net}% with consistency ${input.forecast.signalVector.slopeConsistency.toFixed(2)}`,
+        reason: `forecast return ${ret}% with consistency ${input.forecast.signalVector.slopeConsistency.toFixed(2)}`,
       };
     }
     return { action: 'none', code: 'not_adverse' };
@@ -144,11 +153,11 @@ export function evaluateForecastGate(input: ForecastGateInput): ForecastGateDeci
       if (input.unrealizedPnlPct < 0) return { action: 'none', code: 'negative_pnl' };
     }
     if (isSevereForExit(input.forecast, opts)) {
-      const net = input.forecast.netExpectedReturnPct.toFixed(2);
+      const ret = input.forecast.expectedReturnPct.toFixed(2);
       return {
         action: 'allow_exit',
         code: 'allow_exit',
-        reason: `forecast net ${net}% over next ${input.forecast.horizon} steps`,
+        reason: `forecast return ${ret}% over next ${input.forecast.horizon} steps`,
       };
     }
     return { action: 'none', code: 'not_adverse' };

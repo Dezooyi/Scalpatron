@@ -11,7 +11,7 @@ function check(name: string, condition: boolean): void {
 function makeForecast(partial?: Partial<TimesFmForecast>): TimesFmForecast {
   return {
     expectedReturnPct: 1,
-    netExpectedReturnPct: -0.8,
+    netExpectedReturnPct: -1,
     signalVector: {
       directionScore: -0.5,
       slopeConsistency: 0.8,
@@ -49,10 +49,15 @@ check(
   evaluateForecastGate(baseInput({ ageMs: FORECAST_GATE_DEFAULTS.maxAgeMs + 1 })).code === 'stale',
 );
 
-// ── 2. BUY-Demotion ─────────────────────────────────────────────────────────
+// ── 2. BUY-Demotion (roher Forecast-Return / Direction, NICHT Netto) ────────
 let decision = evaluateForecastGate(baseInput());
-check('adverse BUY → demote_buy', decision.action === 'demote_buy' && decision.code === 'demote_buy');
-check('demote reason mentions net', (decision.reason ?? '').includes('net'));
+check('adverse BUY (direction) → demote_buy', decision.action === 'demote_buy' && decision.code === 'demote_buy');
+check('demote reason mentions return', (decision.reason ?? '').includes('return'));
+
+decision = evaluateForecastGate(baseInput({
+  forecast: makeForecast({ expectedReturnPct: -0.8, signalVector: { ...makeForecast().signalVector, directionScore: 0 } }),
+}));
+check('adverse BUY (negative raw return) → demote_buy', decision.code === 'demote_buy');
 
 decision = evaluateForecastGate(baseInput({
   forecast: makeForecast({ signalVector: { ...makeForecast().signalVector, slopeConsistency: 0.3 } }),
@@ -60,16 +65,23 @@ decision = evaluateForecastGate(baseInput({
 check('BUY low consistency → none', decision.code === 'not_adverse');
 
 decision = evaluateForecastGate(baseInput({
-  forecast: makeForecast({ netExpectedReturnPct: 0.5, signalVector: { ...makeForecast().signalVector, directionScore: 0.4 } }),
+  forecast: makeForecast({ expectedReturnPct: 1.5, signalVector: { ...makeForecast().signalVector, directionScore: 0.4 } }),
 }));
 check('BUY positive forecast → none', decision.code === 'not_adverse');
+
+// ADR-029/031: neutraler Forecast (roh ~0 %, netto -2 % durch Kosten) darf den
+// BUY NICHT demoten — der pauschale Kostenabzug darf nicht alles blockieren.
+decision = evaluateForecastGate(baseInput({
+  forecast: makeForecast({ expectedReturnPct: 0, netExpectedReturnPct: -2, signalVector: { ...makeForecast().signalVector, directionScore: 0 } }),
+}));
+check('BUY neutral forecast (raw 0%, net -2%) → none', decision.code === 'not_adverse');
 
 // ── 3. SELL wird nie blockiert ──────────────────────────────────────────────
 decision = evaluateForecastGate(baseInput({ signal: 'SELL' }));
 check('SELL always passes gate', decision.action === 'none' && decision.code === 'no_signal');
 
 // ── 4. Exit-Unterstützung (allow_exit) ──────────────────────────────────────
-const severe = makeForecast({ netExpectedReturnPct: -1.5 });
+const severe = makeForecast({ expectedReturnPct: -1.5 });
 decision = evaluateForecastGate(baseInput({
   signal: 'HOLD',
   forecast: severe,
@@ -110,7 +122,7 @@ check('min-hold not reached → no exit', decision.code === 'min_hold');
 decision = evaluateForecastGate(baseInput({
   signal: 'HOLD',
   forecast: makeForecast({
-    netExpectedReturnPct: -0.6,
+    expectedReturnPct: -0.6,
     signalVector: { ...makeForecast().signalVector, directionScore: 0.1 },
   }),
   inPosition: true,
