@@ -40,6 +40,7 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 | [028](adr-028-forecast-pulse-strategy.md) | Forecast Pulse — TimesFM-Fenster-Strategie (aktive Forecast-Entries, variabler Rhythmus, Meta-Labeling-Lern-Loop) | Vorgeschlagen | Strategie (Forecast) / Risk / Runtime-Adaption |
 | [029](adr-029-backend-long-run-stability.md) | Backend-Langzeit-Stabilität — Memory-Wachstumsvektoren & Datenhaltung (live_feed als Single Source of Truth) | Akzeptiert & Implementiert | Architektur / Backend / Datenhaltung / Logging |
 | [030](adr-030-dev-stack-port-start.md) | Ein-Befehl-Dev-Stack & konfigurierbarer Backend-Port | Akzeptiert & Implementiert | Entwicklung / Betrieb / Konfiguration |
+| [031](adr-031-timesfm-quality-strategy-coverage.md) | TimesFM-Ausbau für alle Strategien — Qualitätsnachweis, Unsicherheit (Quantile) & universelle Forecast-Policy | Vorgeschlagen | Forecast / Strategie / Runtime-Adaption / Risk |
 
 > **Status-Werte:** `Vorgeschlagen` → `Akzeptiert` → `Veraltet` / `Ersetzt durch ADR-0XXX`
 > Ein `Vorgeschlagen`-ADR beschreibt einen geplanten, noch **nicht** implementierten Change.
@@ -173,6 +174,19 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 - `npm run up` (`scripts/start.mjs`): idempotenter Start (erkennt laufende
   Instanzen), Bereitschafts-Gate, Browser-Open, Cleanup bei Ctrl+C,
   Logs unter `logs/dev-*.log`
+
+### ADR-031 — TimesFM-Ausbau für alle Strategien (Vorgeschlagen)
+- **Kritischer Befund (empirisch verifiziert):** Der pauschale 2-%-Kostenabzug
+  (`timesFmForecast.ts:91`) dominiert alle Forecast-Entscheidungen — 1.979 von
+  2.167 Forecasts (91,3 %) erfüllen das BUY-Demote-Kriterium; bei aktivem
+  Trade-Gate wird fast jeder Einstieg blockiert, PAET sensiert dauerhaft ω
+- Stufenplan: **Phase 0** Messbasis (Kostenwahrheit, Label-Fix am Horizont-Ende,
+  Walk-forward-Qualitätsreport, `npm test`) → **Phase 1** Quantile p10/p90 +
+  Unsicherheits-Sizing → **Phase 2** universelle Forecast-Policy für alle
+  Strategietypen + Attribution → **Phase 3** PAET E5–E7 + Multi-Horizont →
+  **Phase 4** LLM-Evidenz v2, Dashboard-Karten, Worker-Service
+- Keine Verhaltensänderung ohne Phase-0-Report und Paper-A/B; Kill-Switch und
+  ADR-019-Bounds bleiben oberste Instanz
 
 ---
 
