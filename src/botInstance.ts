@@ -3,9 +3,9 @@ import { PatternDetector, PatternSettings, DEFAULT_SETTINGS } from './patternDet
 import { Trader, TraderStats, type TradeLogEntry } from './trader.js';
 import { logger } from './appLogger.js';
 import { db, getTokenInfo, updateAgentOutcome, getBotStrategyId, getStrategy, listStrategies, getBotCustomSystemPrompt, setBotCustomSystemPrompt, clearBotCustomSystemPrompt, getBotKillSwitch, setBotKillSwitch, getSetting, setSetting, deleteSetting, insertLesson, setBotStrategyConfig, getBotStrategyConfig, recordSelfOptAction, recordSelfOptOutcome, getSelfOptOutcomes, clearSelfOptOutcomes, getMaturedForecastSamples, recordPulseEntry, finalizePulseExit, getPulseOutcomes, getPulseBucketStats } from './db.js';
-import { StrategyEngine, isScalpingType } from './strategyEngine.js';
+import { StrategyEngine, isScalpingType, computeRequiredCandles } from './strategyEngine.js';
 import type { StrategyConfig, IndicatorConfig, MarketForecastEvidence } from './strategyTypes.js';
-import { TIMEFRAME_MS } from './candleAggregator.js';
+import { aggregate, TIMEFRAME_MS } from './candleAggregator.js';
 import { CONFIG } from './config.js';
 import { clampScalpingSettings, MIN_FLOOR_WINDOW, MAX_FLOOR_WINDOW, MIN_SPIKE_THRESHOLD_PCT, MAX_SPIKE_THRESHOLD_PCT, MIN_SELL_DROP_THRESHOLD_PCT, MAX_SELL_DROP_THRESHOLD_PCT, MIN_TAKE_PROFIT, MAX_TAKE_PROFIT } from './strategy/scalpingSafetyBounds.js';
 import { KillSwitchEngine } from './killSwitch.js';
@@ -23,18 +23,22 @@ import { evaluateForecastReliability, type PulseCalibration } from './forecastPu
 import { normalizePulseSettings, type NormalizedPulseSettings } from './strategy/pulseSafetyBounds.js';
 import { computeCalibration, isPulseBucketBlocked, suggestThresholdRaise } from './pulseLearning.js';
 
-const PRICE_FEED_TICKRATE_MS = process.env.PRICE_FEED_TICKRATE_MS
-  ? parseInt(process.env.PRICE_FEED_TICKRATE_MS, 10)
-  : 2000;
-
 // TimesFM-Gates & Self-Opt-Loop werden zentral in `timesFmSettings.ts` gehalten
 // (Default: aktiv, DB-persistiert, über die Einstellungsseite steuerbar).
 
+// Netto-PnL (nach geschätzten Roundtrip-Kosten) für das Forecast-Gate.
+// ADR-029: Brutto-Breakeven darf KEIN Exit-Grund sein — ein Exit bei 0 % brutto
+// realisiert −2 % netto (Roundtrip-Gebühren) und lässt PAET/andere Bots churnten.
 function unrealizedPnlPct(stats: TraderStats): number | null {
   const position = stats.currentPosition;
   if (!position || !(position.entryPrice > 0) || !(stats.lastPrice > 0)) return null;
-  return (stats.lastPrice - position.entryPrice) / position.entryPrice;
+  const gross = (stats.lastPrice - position.entryPrice) / position.entryPrice;
+  return gross - CONFIG.ESTIMATED_ROUNDTRIP_COST_PCT;
 }
+
+// ADR-029: PAET hat keinen PatternDetector-Min-Hold. Ohne eine echte Mindest-
+// Haltezeit dürfte das Forecast-Gate direkt nach dem Entry wieder aussteigen.
+const PAET_GATE_MIN_HOLD_MS = 30_000;
 
 export interface BotState {
   id: string;
@@ -376,6 +380,9 @@ export class BotInstance {
 
   /** Assign a strategy config to this bot */
   public updateStrategy(config: StrategyConfig): void {
+    // ADR-029: Konsistenz sicherstellen (position_size als Bruch, Indikator-
+    // Referenzen an Perioden angeglichen) — repariert auch alte/verwaiste Configs.
+    this.normalizeStrategyConfig(config);
     // Snapshot des Presets VOR jeder Mutation (Deep-Clone, da activeStrategyConfig
     // im Folgenden in-place adaptiert wird).
     this.baseStrategyConfig = config ? JSON.parse(JSON.stringify(config)) : undefined;
@@ -1016,6 +1023,9 @@ export class BotInstance {
     if (adjustments.risk_management) {
       Object.assign(this.activeStrategyConfig.risk_management, adjustments.risk_management);
     }
+    // ADR-029: position_size (Prozent vs. Bruch) und Indikator-Referenzen
+    // konsistent halten, bevor der Rest der Pipeline die Config sieht.
+    this.normalizeStrategyConfig(this.activeStrategyConfig);
     if (adjustments.scalping_settings) {
       this.activeStrategyConfig.scalping_settings = {
         ...(this.activeStrategyConfig.scalping_settings ?? {}),
@@ -1347,20 +1357,94 @@ export class BotInstance {
 
     // Strategy Warmup
     const timeframe = this.activeStrategyConfig.market.timeframe || '1m';
-    const ms = TIMEFRAME_MS[timeframe as keyof typeof TIMEFRAME_MS] ?? 60_000;
-    const ticksPerCandle = ms / PRICE_FEED_TICKRATE_MS;
-    
-    // Find max indicator period
-    let maxPd = 0;
-    for (const ind of this.activeStrategyConfig.indicators) {
-      const p = Math.max(ind.period || 0, ind.fast_period || 0, ind.slow_period || 0, ind.k_period || 0, ind.d_period || 0);
-      if (p > maxPd) maxPd = p;
+
+    // ADR-029: Warmup exakt wie analyzeGeneric() über die tatsächliche
+    // Candle-Anzahl bestimmen. Die frühere Tick-Rechnung nutzte
+    // PRICE_FEED_TICKRATE_MS (2 s/Tick), obwohl der Scheduler real ~1,1 s
+    // (SLOT_MS) pollt → Anzeige sprang zu früh auf 1.0, obwohl der Bot noch
+    // nicht genug Candles hatte („bereit, aber tradet nicht").
+    const requiredCandles = computeRequiredCandles(this.activeStrategyConfig.indicators ?? []);
+    const candles = aggregate(history, timeframe as keyof typeof TIMEFRAME_MS);
+    return Math.min(1, candles.length / requiredCandles);
+  }
+
+  /**
+   * ADR-029: Konsistenz-Helfer. (1) position_size > 1 wird als Prozent gelesen
+   * und in einen Bruch normalisiert (das LLM liefert mal 0.12, mal 12).
+   * (2) Indikator-Referenzen in den Conditions an die tatsächlich konfigurierten
+   * Perioden angleichen (EMA_26 → EMA_50, RSI_14 → RSI_16).
+   */
+  private normalizeStrategyConfig(cfg: StrategyConfig): void {
+    if (!cfg) return;
+    if (cfg.risk_management && typeof cfg.risk_management.position_size === 'number' && cfg.risk_management.position_size > 1) {
+      cfg.risk_management.position_size = cfg.risk_management.position_size / 100;
     }
-    
-    const requiredCandles = maxPd > 0 ? maxPd : 10;
-    const requiredTicks = Math.ceil(requiredCandles * ticksPerCandle);
-    
-    return Math.min(1, currentTicks / requiredTicks);
+    this.remapIndicatorRefsInConditions(cfg);
+  }
+
+  /**
+   * ADR-029: Referenzen in Entry-/Exit-Conditions an die (vom AI-Agent
+   * geänderten) Indikator-Perioden angleichen. Bsp.: Indikatoren werden zu
+   * EMA:50, RSI:16 → Conditions "EMA_26"/"RSI_14" werden zu "EMA_50"/"RSI_16".
+   * Nur periodenbehaftete Namen (TYPE_NUMBER) werden gemappt; Reihefolge/Rank
+   * bleibt erhalten (fast→kleinste, slow→größte). BB_upper/STOCH_K/MACD_* etc.
+   * haben keine Periodensuffixe und bleiben unberührt.
+   */
+  private remapIndicatorRefsInConditions(cfg: StrategyConfig): void {
+    // Neue Perioden je Basistyp (z. B. "EMA_" → [50]).
+    const newPeriodsByType = new Map<string, number[]>();
+    for (const ind of cfg.indicators ?? []) {
+      const p = ind.period;
+      if (p === undefined || typeof ind.type !== 'string') continue;
+      const base = ind.type + '_';
+      const arr = newPeriodsByType.get(base) ?? [];
+      arr.push(p);
+      newPeriodsByType.set(base, arr);
+    }
+
+    const refPattern = /^([A-Z]+)_(\d+)$/;
+    const collectRefs = (c: { left: string; right: string | number }, into: Map<string, number[]>) => {
+      for (const side of [c.left, c.right]) {
+        if (typeof side !== 'string') continue;
+        const m = side.match(refPattern);
+        if (m) {
+          const base = m[1] + '_';
+          const arr = into.get(base) ?? [];
+          arr.push(parseInt(m[2], 10));
+          into.set(base, arr);
+        }
+      }
+    };
+
+    const refPeriodsByType = new Map<string, number[]>();
+    for (const c of cfg.entry_conditions) collectRefs(c, refPeriodsByType);
+    for (const c of cfg.exit_conditions) {
+      if (c.type === 'indicator' && c.condition) collectRefs(c.condition, refPeriodsByType);
+    }
+
+    // Mapping alter Perioden-Name → neuer Perioden-Name (rank-basiert).
+    const mapping = new Map<string, string>();
+    for (const [base, refPeriods] of refPeriodsByType) {
+      const newPeriods = newPeriodsByType.get(base);
+      if (!newPeriods || newPeriods.length === 0) continue;
+      const sortedRefs = [...new Set(refPeriods)].sort((a, b) => a - b);
+      const sortedNew = [...new Set(newPeriods)].sort((a, b) => a - b);
+      const type = base.slice(0, -1); // "EMA_", "RSI_"
+      sortedRefs.forEach((refPeriod, i) => {
+        const newPeriod = sortedNew[Math.min(i, sortedNew.length - 1)];
+        mapping.set(`${type}_${refPeriod}`, `${type}_${newPeriod}`);
+      });
+    }
+
+    if (mapping.size === 0) return;
+    const apply = (c: { left: string; right: string | number }) => {
+      if (typeof c.left === 'string' && mapping.has(c.left)) c.left = mapping.get(c.left)!;
+      if (typeof c.right === 'string' && mapping.has(c.right)) c.right = mapping.get(c.right)!;
+    };
+    for (const c of cfg.entry_conditions) apply(c);
+    for (const c of cfg.exit_conditions) {
+      if (c.type === 'indicator' && c.condition) apply(c.condition);
+    }
   }
 
   private onPriceTick = async (point: PricePoint) => {
@@ -1514,7 +1598,11 @@ export class BotInstance {
         // PatternDetector-inSpike). Externe Exits werden per onExternalExit
         // synchronisiert (kein Sofort-Re-Entry).
         detectorInPosition = openCount > 0;
-        minHoldOk = true;
+        // ADR-029: Mindest-Haltezeit, sonst churnt das Gate jeden Entry sofort
+        // wieder heraus (Brutto-~0 % → Netto −2 % Roundtrip).
+        const entryTime = stats.currentPosition?.entryTime ?? 0;
+        const heldMs = entryTime > 0 ? Date.now() - entryTime : 0;
+        minHoldOk = openCount === 0 || heldMs >= PAET_GATE_MIN_HOLD_MS;
       } else {
         const holdState =
           this.strategyEngine?.getScalpingHoldState() ?? this.detector.getHoldState();
@@ -1536,6 +1624,10 @@ export class BotInstance {
         result.reason = result.reason
           ? `${result.reason}; forecast_gate_buy_demote`
           : 'forecast_gate_buy_demote';
+        // ADR-029: Der Detector/Engine hat beim BUY bereits inSpike/inPosition
+        // gesetzt. Ohne Reset bliebe eine Phantom-Position bestehen (nur noch
+        // Exit-Prüfung, nie wieder Entry). Nur ohne echte offene Position.
+        if (openCount === 0) this.strategyEngine?.cancelPendingEntry();
         logger.action(this.id, 'TIMESFM', `BUY demoted → HOLD (${gateDecision.reason})`);
       } else if (gateDecision.action === 'allow_exit' && result.signal === 'HOLD') {
         result.signal = 'SELL';
@@ -1591,6 +1683,8 @@ export class BotInstance {
     if (ks.stop) {
       if (result.signal === 'BUY') {
         logger.warn(this.id, 'TRADER', `Trading blockiert (Kill-Switch): ${ks.reason} — Reset im UI erforderlich.`);
+        // ADR-029: Geblockten Entry-State zurücksetzen (Phantom-Position vermeiden).
+        if ((stats.openPositionsCount ?? 0) === 0) this.strategyEngine?.cancelPendingEntry();
         return;
       } else if (result.signal === 'SELL') {
         logger.warn(this.id, 'TRADER', `Kill-Switch aktiv (${ks.reason}) — nur Ausstieg (SELL) erlaubt.`);
@@ -1728,6 +1822,9 @@ export class BotInstance {
     } else if (result.signal === 'BUY') {
       // BUY signal fired but no trade executed — log the reason
       const currentStats = this.trader.getStats();
+      // ADR-029: Entry wurde nicht ausgeführt und es gibt keine offene Position
+      // → Phantom-Position im Detector/Engine zurücksetzen.
+      if (currentStats.openPositionsCount === 0) this.strategyEngine?.cancelPendingEntry();
       if (currentStats.openPositionsCount >= maxPositions) {
         logger.info(this.id, 'TRADER', `BUY uebersprungen: Maximale Positionsanzahl (${maxPositions}) erreicht.`);
       } else if (!this.trader.paperMode) {

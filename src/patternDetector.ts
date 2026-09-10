@@ -210,6 +210,21 @@ export class PatternDetector {
   }
 
   /**
+   * ADR-029: Ein von analyze() erzeugtes BUY wurde downstream verworfen
+   * (z. B. TimesFM-Forecast-Gate demoted zu HOLD). Dann darf der Detector nicht
+   * weiter glauben, er halte eine Position — sonst prüft er nur noch Exits und
+   * erzeugt nie wieder ein Entry (Phantom-Position). Setzt daher nur den
+   * Entry-/Positionszustand zurück, lässt tickCounter und cooldown unangetastet.
+   */
+  public cancelPendingEntry(): void {
+    this.inSpike = false;
+    this.peakPrice = 0;
+    this.entryPrice = 0;
+    this.entryTick = -1;
+    this.breakevenRatcheted = false;
+  }
+
+  /**
    * Position-Lifecycle für externe Gates (TimesFM Forecast-Gate): ob der
    * Detector eine Position trackt (inSpike), wie viele Ticks gehalten wurden
    * und welche Min-Hold-Zeit gilt. Rein lesend — ändert keinen State.

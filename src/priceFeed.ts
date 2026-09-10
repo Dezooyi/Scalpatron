@@ -42,11 +42,11 @@ export const SLOT_MS = Math.ceil(60_000 / SAFE_RPM); // 1091 ms pro Request-Slot
 
 // Maximal vorgehaltene PricePoints pro Mint. Der Generic-Strategiepfad
 // (StrategyEngine.analyzeGeneric) aggregiert diese Ticks zu Candles und verlangt
-// 60 % der größten Indikator-Periode. Mit nur 1000 Ticks (~18 min @1.1s) waren
-// 1m-Strategien mit Periode > ~26 (z. B. EMA_40/EMA_50) dauerhaft im Warmup und
-// handelten nie. 5000 Ticks (~90 min) erlauben >= 80 1m-Candles und decken auch
-// 5m-Strategien mit kurzen Perioden (z. B. DCA-Template EMA_20) ab.
-export const MAX_HISTORY_POINTS = 5000;
+// inzwischen die volle Indikator-Periode (ADR-029). Der AI-Agent darf 1m-Perioden
+// bis ~100 setzen (trend EMA_slow 20–100) → dafür sind ~100 Candles ≈ 6000 Ticks
+// nötig. 8000 Ticks (~2,5 h @1.1s) geben Headroom; 5m-Strategien mit langen
+// Perioden bleiben dennoch langsam (Design).
+export const MAX_HISTORY_POINTS = 8000;
 
 // Ein „langer Ausfall" (ADR-010) muss relativ zur tatsächlich erreichbaren Poll-Kadenz
 // definiert werden: bei N aktiven Mints wird jeder Mint nur alle N*SLOT_MS gepollt.

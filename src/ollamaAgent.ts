@@ -278,7 +278,7 @@ Optimizable parameters (in "strategyAdjustments" field):
 EXAMPLE RESPONSE FOR DCA:
 {
   "strategyAdjustments": {
-    "indicators": [ { "type": "EMA", "period": 110 } ],
+    "indicators": [ { "type": "EMA", "period": 20 } ],
     "risk_management": { "position_size": 0.03, "max_positions": 4 },
     "entry_condition_hints": "RSI threshold to 35 for better entries"
   }

@@ -4,7 +4,7 @@
 import type { PricePoint } from './priceFeed.js';
 import type { PatternResult, PatternSettings } from './patternDetector.js';
 import { PatternDetector, DEFAULT_SETTINGS } from './patternDetector.js';
-import type { StrategyConfig, Condition, ExitCondition } from './strategyTypes.js';
+import type { StrategyConfig, Condition, ExitCondition, IndicatorConfig } from './strategyTypes.js';
 import { aggregate } from './candleAggregator.js';
 import { computeAll, lastValue, hasCrossover, hasCrossunder } from './indicatorEngine.js';
 import type { IndicatorValues } from './strategyTypes.js';
@@ -112,6 +112,18 @@ export class StrategyEngine {
     this.peakPrice = 0;
     this.latestValues = {};
     this.warmupTicksElapsed = 0;
+  }
+
+  /**
+   * ADR-029: Ein von analyze() erzeugtes BUY wurde downstream verworfen (z. B.
+   * TimesFM-Forecast-Gate demoted zu HOLD). Entry-/Positionszustand verwerfen,
+   * damit die Strategie weiter neue Signale erzeugen kann (keine Phantom-Position).
+   */
+  cancelPendingEntry(): void {
+    this.scalpingDetector?.cancelPendingEntry();
+    this.inPosition = false;
+    this.entryPrice = 0;
+    this.peakPrice = 0;
   }
 
   /** Activate the post-start BUY delay for scalping strategies. */
@@ -282,16 +294,14 @@ export class StrategyEngine {
     const candles = aggregate(ticks, this.config.market.timeframe);
     if (candles.length < 2) return base;
 
-    // --- Warmup guard: require at least 60% of maxPeriod candles ---
-    // EMA/RSI/BB produce reasonable values well before a full period is complete.
-    // Using 60% threshold allows trading to start sooner without sacrificing accuracy.
-    const maxPeriod = this.config.indicators.reduce((max, ind) => {
-      const p = ind.slow_period ?? ind.period ?? 1;
-      return Math.max(max, p);
-    }, 1);
-    const minCandlesNeeded = Math.max(2, Math.ceil(maxPeriod * 0.6));
+    // --- Warmup guard: require the FULL period of the longest indicator ---
+    // ADR-029: EMA/SMA/RSI/BB liefern erst ab voller Periode Werte (davor
+    // NaN/leer). Die frühere 60 %-Schwelle ließ Bots "bereit" erscheinen,
+    // obwohl die längste Serie noch leer war → Bedingungen immer false, keine
+    // Trades. MACD braucht slow+signal Kerzen.
+    const minCandlesNeeded = computeRequiredCandles(this.config.indicators);
     if (candles.length < minCandlesNeeded) {
-      base.reason = `warming up (${candles.length}/${minCandlesNeeded} candles needed, max period: ${maxPeriod})`;
+      base.reason = `warming up (${candles.length}/${minCandlesNeeded} candles needed)`;
       return base;
     }
 
@@ -509,6 +519,10 @@ export class StrategyEngine {
     // Handle crossover/crossunder operators (need full series)
     if (cond.operator === 'crossover' || cond.operator === 'crossunder') {
       const getSeries = (ref: string) => {
+        // ADR-029: 'price' ist kein berechneter Indikator, sondern die
+        // Candle-Close-Reihe. Ohne diesen Fall lieferten price crossover/-
+        // crossunder-Bedingungen immer false (z. B. solana_runner-Template).
+        if (ref === 'price') return candles.map(c => c.close);
         if (indicators[ref]) return indicators[ref];
         const base = ref.split('_')[0] + '_';
         const fallbackKeys = Object.keys(indicators).filter(k => k.startsWith(base));
@@ -619,6 +633,29 @@ export class StrategyEngine {
   getPulseEngine(): ForecastPulseEngine | undefined {
     return this.pulseEngine;
   }
+}
+
+/**
+ * Anzahl Candles, die der Generic-Pfad für die konfigurierten Indikatoren
+ * mindestens braucht (volle Periode; MACD = slow+signal). Zentrale Quelle für
+ * analyzeGeneric() UND botInstance.getWarmupProgress(), damit Warmup-Anzeige
+ * und tatsächlicher Signal-Start konsistent sind (ADR-029).
+ */
+export function computeRequiredCandles(indicators: IndicatorConfig[]): number {
+  const required = indicators.reduce((max, ind) => {
+    let p: number;
+    switch (ind.type) {
+      case 'MACD': p = (ind.slow_period ?? 26) + (ind.signal_period ?? 9); break;
+      case 'EMA': case 'SMA': p = ind.period ?? 20; break;
+      case 'RSI': p = ind.period ?? 14; break;
+      case 'BB': p = ind.period ?? 20; break;
+      case 'STOCH': p = ind.period ?? 14; break;
+      case 'ATR': p = ind.period ?? 14; break;
+      default: p = ind.period ?? 1;
+    }
+    return Math.max(max, p);
+  }, 1);
+  return Math.max(2, required);
 }
 
 /**
