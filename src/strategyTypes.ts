@@ -259,6 +259,14 @@ export interface MarketContext {
   lookbackMinutes: number;        // approx. minutes covered by the lookback window
   volatility: number;             // std-dev of returns over lookback, in percent
   avgRange: number;               // average absolute return per tick, in percent
+  /**
+   * true, wenn die gemessene Volatilität 0 ist, die Preisquantisierung aber so
+   * grob ist, dass reale Bewegungen unsichtbar bleiben (z. B. DexScreener liefert
+   * nur 4 Dezimalstellen). `volatility` enthält dann die Quantum-Untergrenze
+   * statt 0 — Konsumenten sollen den Wert als „nicht messbar", nicht als
+   * „toter Markt" interpretieren.
+   */
+  volatilityCensored?: boolean;
   trendBias: 'up' | 'down' | 'neutral';
   higherTimeframeSignal?: 'bullish' | 'bearish' | 'neutral';
   /** TimesFM-Vorhersage-Evidenz (optional, nur wenn frischer Forecast vorliegt). */

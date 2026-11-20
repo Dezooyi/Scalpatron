@@ -234,14 +234,16 @@ const computeForkMultipliers = (ctx: {
   volatility?: number;
   trendBias?: string;
   higherTimeframeSignal?: string;
+  volatilityCensored?: boolean;
 }): { spike: number; sellDrop: number; takeProfit: number; cooldown: number; triggers: string[] } => {
   let spike = 1.0;
   let cooldown = 1.0;
   const triggers: string[] = [];
-  if (ctx.session === 'asia' || (typeof ctx.volatility === 'number' && ctx.volatility < 0.5)) {
+  const volCensored = ctx.volatilityCensored === true;
+  if (ctx.session === 'asia' || (typeof ctx.volatility === 'number' && ctx.volatility < 0.5 && !volCensored)) {
     spike *= 1.3;
     if (ctx.session === 'asia') triggers.push('Asia');
-    if (typeof ctx.volatility === 'number' && ctx.volatility < 0.5) triggers.push('LowVol');
+    if (typeof ctx.volatility === 'number' && ctx.volatility < 0.5 && !volCensored) triggers.push('LowVol');
   }
   if (ctx.session === 'overlap' && typeof ctx.volatility === 'number' && ctx.volatility > 1.5) {
     spike *= 0.9;
@@ -260,7 +262,7 @@ const computeForkMultipliers = (ctx: {
     sellDrop *= 0.85;
     takeProfit *= 0.9;
     triggers.push('HighVol');
-  } else if (typeof ctx.volatility === 'number' && ctx.volatility < 0.3) {
+  } else if (typeof ctx.volatility === 'number' && ctx.volatility < 0.3 && !volCensored) {
     sellDrop *= 1.15;
     triggers.push('DeadVol');
   }
@@ -3710,6 +3712,7 @@ export default function App() {
                                   const sessionCode = indVals['adaptive_session'];
                                   const trendBias = indVals['adaptive_trendBias'];
                                   const htfSignal = indVals['adaptive_higherTimeframeSignal'];
+                                  const volCensored = indVals['adaptive_volatilityCensored'] === 1;
 
                                   const baseSettings = selectedBot.strategyConfigPreset?.scalping_settings ?? selectedBot.strategyConfig?.scalping_settings;
                                   // ADR-020: Priorität auf selectedBot.settings (live Detector),
@@ -3760,6 +3763,7 @@ export default function App() {
                                   const fm = computeForkMultipliers({
                                     session: sessionName === '—' ? undefined : sessionName.toLowerCase(),
                                     volatility: vol,
+                                    volatilityCensored: volCensored,
                                     // Indikator-Werte sind Record<string, number>; die Felder
                                     // trendBias/htfSignal sind im Backend als string-codierte
                                     // Enums (z.B. "up"/"bearish") gespeichert, deshalb der

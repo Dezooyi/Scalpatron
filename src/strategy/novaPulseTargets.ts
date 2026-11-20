@@ -100,6 +100,8 @@ export interface ForkContext {
   volatility?: number;
   trendBias?: 'up' | 'down' | string;
   higherTimeframeSignal?: 'bullish' | 'bearish' | string;
+  /** true = Volatilität nicht messbar (Preisquantisierung), nicht „toter Markt". */
+  volatilityCensored?: boolean;
 }
 
 export interface ForkMultipliers {
@@ -115,12 +117,13 @@ export function computeForkMultipliers(ctx: ForkContext): ForkMultipliers {
   let spike = 1.0;
   let cooldown = 1.0;
   const triggers: string[] = [];
+  const volCensored = ctx.volatilityCensored === true;
 
   // Session/Vol-basiert für spike
-  if (ctx.session === 'asia' || (typeof ctx.volatility === 'number' && ctx.volatility < 0.5)) {
+  if (ctx.session === 'asia' || (typeof ctx.volatility === 'number' && ctx.volatility < 0.5 && !volCensored)) {
     spike *= 1.3;
     if (ctx.session === 'asia') triggers.push('Asia');
-    if (typeof ctx.volatility === 'number' && ctx.volatility < 0.5) triggers.push('LowVol');
+    if (typeof ctx.volatility === 'number' && ctx.volatility < 0.5 && !volCensored) triggers.push('LowVol');
   }
   if (ctx.session === 'overlap' && typeof ctx.volatility === 'number' && ctx.volatility > 1.5) {
     spike *= 0.9;
@@ -141,7 +144,7 @@ export function computeForkMultipliers(ctx: ForkContext): ForkMultipliers {
     sellDrop *= 0.85;
     takeProfit *= 0.9;
     triggers.push('HighVol');
-  } else if (typeof ctx.volatility === 'number' && ctx.volatility < 0.3) {
+  } else if (typeof ctx.volatility === 'number' && ctx.volatility < 0.3 && !volCensored) {
     sellDrop *= 1.15;
     triggers.push('DeadVol');
   }

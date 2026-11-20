@@ -215,6 +215,7 @@ export class StrategyEngine {
       result.indicatorValues = {
         ...result.indicatorValues,
         adaptive_volatility: parseFloat(context.volatility.toFixed(2)),
+        adaptive_volatilityCensored: context.volatilityCensored ? 1 : 0,
         adaptive_avgRange: parseFloat(context.avgRange.toFixed(2)),
         adaptive_session: sessionCode,
         adaptive_trendBias: trendCode,

@@ -41,6 +41,7 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 | [029](adr-029-backend-long-run-stability.md) | Backend-Langzeit-Stabilität — Memory-Wachstumsvektoren & Datenhaltung (live_feed als Single Source of Truth) | Akzeptiert & Implementiert | Architektur / Backend / Datenhaltung / Logging |
 | [030](adr-030-dev-stack-port-start.md) | Ein-Befehl-Dev-Stack & konfigurierbarer Backend-Port | Akzeptiert & Implementiert | Entwicklung / Betrieb / Konfiguration |
 | [031](adr-031-timesfm-quality-strategy-coverage.md) | TimesFM-Ausbau für alle Strategien — Qualitätsnachweis, Unsicherheit (Quantile) & universelle Forecast-Policy | Vorgeschlagen | Forecast / Strategie / Runtime-Adaption / Risk |
+| [032](adr-032-volatility-quantization-censoring.md) | Quantisierungs-Censoring für Volatilität — grobe Feed-Auflösung ≠ toter Markt | Akzeptiert & Implementiert | Strategie / Runtime-Adaption / Datenqualität |
 
 > **Status-Werte:** `Vorgeschlagen` → `Akzeptiert` → `Veraltet` / `Ersetzt durch ADR-0XXX`
 > Ein `Vorgeschlagen`-ADR beschreibt einen geplanten, noch **nicht** implementierten Change.

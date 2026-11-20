@@ -28,8 +28,13 @@ export const adaptiveScalpingFork: StrategyFork = {
     // ── Entry threshold adaptation ───────────────────────────────────────────
     let spikeMultiplier = 1.0;
 
+    // Bei zensierter Volatilität (grobe Preisquantisierung) ist „flach" nicht
+    // „tot" — die LowVol-/DeadVol-Verstärkungen würden den Bot sonst dauerhaft
+    // lähmen, obwohl die Bewegung nur unterhalb der Feed-Auflösung liegt.
+    const volCensored = ctx.volatilityCensored === true;
+
     // Quiet sessions need a higher threshold to filter noise.
-    if (ctx.session === 'asia' || ctx.volatility < 0.5) {
+    if (ctx.session === 'asia' || (ctx.volatility < 0.5 && !volCensored)) {
       spikeMultiplier *= 1.3;
     }
 
@@ -53,7 +58,7 @@ export const adaptiveScalpingFork: StrategyFork = {
       // High volatility: take profit faster and use a tighter trailing stop.
       sellDropMultiplier *= 0.85;
       takeProfitMultiplier *= 0.9;
-    } else if (ctx.volatility < 0.3) {
+    } else if (ctx.volatility < 0.3 && !volCensored) {
       // Low volatility: give trades more room, moves are smaller.
       sellDropMultiplier *= 1.15;
     }
