@@ -1,37 +1,36 @@
 # Project Tasks & Progress
 
-## Current Focus: Enhancement of Bot Dashboard & Terminal View (Phase 4 Continuation)
+## Current Focus: Forecast-Gate-Wirksamkeit & TimesFM-Ausbau (Session 20.11.2026)
 
-### Progress Summary
-- [x] **Prestige Terminal v2.0**: Implemented in Bot Details with Live Pulse, State Vector, and Health indicators.
-- [x] **Market Scanner**: Added a high-density bar-chart visualization for real-time price analysis.
-- [x] **Sync Progress Hub**: Added a visual progress bar for the ticker buffer (Sync status).
-- [x] **Performance Metrics Row**: Added Live PnL, Win Rate, Agent Oracle, and Active Schema cards.
-- [x] **Data Source Hub**: Detailed engine status card with polling intervals and buffer scale.
-- [x] **Recent Executions Hub**: Integrated trade history directly into the terminal view.
-- [x] **JSX Fixes**: Resolved all parsing errors in `App.tsx` and `Documentation.tsx` (escaped angle brackets).
-- [x] **Documentation Integration**: Replaced raw docs with the `Documentation` component.
+### Zuletzt abgeschlossen (20.11.2026)
+- [x] Repo-Sync (8 Commits nachgezogen) + vollständige Stack-Verifizierung
+- [x] 5 Bugfix-Commits: start.mjs Windows-Spawn, ollamaAgent-Crash (spawn EINVAL),
+      timesFmWorker venv-Pfad, package.json TimesFM-Skripte, timesFmForecast Silent-Nulls
+- [x] ADR-032: Volatilitäts-Censoring (grobe Feed-Auflösung ≠ toter Markt) — implementiert, getestet, live verifiziert
+- [x] TimesFM aktiviert (Worker läuft, 3 Mints mit frischen Forecasts)
+- [x] Live-Befund dokumentiert: Forecast Pulse 0 Trades vs. Nova Pulse −14,59 %
+      auf demselben Token (SIM, Abwärtstrend) → CHANGELOG_NOVEMBER_2026.md
 
-### Next Steps / Roadmap
+### Nächste Session: ADR-033 — Trade-Gate-Untersuchung (in dieser Reihenfolge)
+- [ ] **1. Gate-Observability:** Alle Gate-Entscheidungscodes loggen/zählen
+      (`no_signal`, `not_adverse`, `stale` …), nicht nur demote/allow_exit
+      (`src/forecastGate.ts`, Aufruf `src/botInstance.ts` ~1612)
+- [ ] **2. Counterfactual-Backtest:** `forecast_log` ⋈ `trades` (SQLite) —
+      Gate-Varianten V0–V3 durchrechnen (siehe ADR-033 §Untersuchungsplan);
+      Metrik: vermiedener PnL vs. Opportunity-Cost
+- [ ] **3. Datensammlung:** Nova-SIM-01 + Pulse-SIM-01 laufen lassen bis
+      ≥ 20 Roundtrips mit aktivem Gate (Paper-Modus)
+- [ ] **4. Entscheidung & Umsetzung:** `FORECAST_GATE_DEFAULTS` anpassen,
+      `forecastGate.test.ts` um choppy-bearish Case ergänzen, ADR-033 → Akzeptiert
 
-#### Technical Refinement (Backend & Engine)
-- [ ] **Strategy Format (.strategy.json)**:
-  - Implement full import/export functionality in the engine.
-  - Add "Export Strategy" button to the UI.
-- [ ] **OllamaAgent Fine-Tuning**:
-  - Review prompts in `src/ollamaAgent.ts`.
-  - Ensure confidence-based application of settings.
-- [ ] **Data Source Expansion**:
-  - Finalize GeckoTerminal historical import integration for backtesting.
-
-#### UI/UX Enhancements
-- [ ] **Aggregated Live Chart**: Add more detailed bar-chart visualizations in the terminal as requested.
-- [ ] **Process Monitoring**: Add more information about the current backend process/health.
-- [ ] **Interactive Logs**: Implement filtering or search functionality for the terminal logs.
-
-#### Finalization for Phase 4
-- [ ] **Verification**: Confirm data fetching and trading behavior (Data collection vs. active trading).
-- [ ] **Performance Audit**: Ensure the frontend remains responsive with high-frequency SSE updates.
+### Backlog (bestehend)
+- [ ] **Strategy Format (.strategy.json)**: Import/Export in der Engine + UI-Button
+- [ ] **OllamaAgent Fine-Tuning**: Prompts reviewen, Confidence-Anwendung prüfen
+- [ ] **GeckoTerminal-Import** für Backtesting finalisieren
+- [ ] **Aggregated Live Chart**: Detailreichere Bar-Charts im Terminal
+- [ ] **Process Monitoring**: Backend-Health im UI
+- [ ] **Interactive Logs**: Filter/Suche für Terminal-Logs
+- [ ] **Performance Audit**: Frontend-Responsiveness bei hoher SSE-Frequenz
 
 ### Bug Log
 - [x] `Unexpected token. Did you mean {'>'} or &gt;?` in `App.tsx` (Fixed)

@@ -42,6 +42,7 @@ Jede ADR erklärt **das "Warum"** einer Entscheidung – nicht das "Was" (das st
 | [030](adr-030-dev-stack-port-start.md) | Ein-Befehl-Dev-Stack & konfigurierbarer Backend-Port | Akzeptiert & Implementiert | Entwicklung / Betrieb / Konfiguration |
 | [031](adr-031-timesfm-quality-strategy-coverage.md) | TimesFM-Ausbau für alle Strategien — Qualitätsnachweis, Unsicherheit (Quantile) & universelle Forecast-Policy | Vorgeschlagen | Forecast / Strategie / Runtime-Adaption / Risk |
 | [032](adr-032-volatility-quantization-censoring.md) | Quantisierungs-Censoring für Volatilität — grobe Feed-Auflösung ≠ toter Markt | Akzeptiert & Implementiert | Strategie / Runtime-Adaption / Datenqualität |
+| [033](adr-033-forecast-gate-sensitivity.md) | Forecast-Trade-Gate — Sensitivität & Wirksamkeit im Abwärtstrend (Gate feuerte 0× bei −14,59 % Nova-Verlust) | Vorgeschlagen | Forecast / Trade-Gate / Risk |
 
 > **Status-Werte:** `Vorgeschlagen` → `Akzeptiert` → `Veraltet` / `Ersetzt durch ADR-0XXX`
 > Ein `Vorgeschlagen`-ADR beschreibt einen geplanten, noch **nicht** implementierten Change.
