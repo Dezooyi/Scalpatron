@@ -57,17 +57,28 @@ export async function forecastMint(mintAddress: string): Promise<TimesFmForecast
   `).all(mintAddress, TIMESFM_CONTEXT_LENGTH) as PriceRow[];
   const orderedRows = rows.reverse().filter(row => Number.isFinite(row.price) && Number.isFinite(row.timestamp));
   const prices = orderedRows.map(row => Number(row.price));
-  if (prices.length < 32) return null;
+  if (prices.length < 32) {
+    console.warn(`[TimesFM] forecastMint: nur ${prices.length} Kontextpunkte (<32) für ${mintAddress.slice(0, 8)}… — warte auf mehr Feed-Historie.`);
+    return null;
+  }
 
   const intervals = orderedRows.slice(1)
     .map((row, index) => row.timestamp - orderedRows[index].timestamp)
     .filter(interval => interval > 0);
-  if (intervals.length < 16) return null;
+  if (intervals.length < 16) {
+    console.warn(`[TimesFM] forecastMint: nur ${intervals.length} Intervalle (<16) für ${mintAddress.slice(0, 8)}… — warte auf mehr Feed-Historie.`);
+    return null;
+  }
   intervals.sort((a, b) => a - b);
   const medianIntervalMs = intervals[Math.floor(intervals.length / 2)];
   const maxGapMs = intervals.at(-1) ?? medianIntervalMs;
   // Missing polls make a sequential model interpret stale time as real ticks.
-  if (maxGapMs > medianIntervalMs * 3) return null;
+  if (maxGapMs > medianIntervalMs * 3) {
+    // Transient nach Restart/Crash: heilt von selbst, sobald die Lücke aus dem
+    // Kontextfenster läuft (ca. contextLength Ticks).
+    console.warn(`[TimesFM] forecastMint: Feed-Lücke ${Math.round(maxGapMs / 1000)}s > 3×Median ${Math.round(medianIntervalMs / 1000)}s für ${mintAddress.slice(0, 8)}… — Forecast bis Fenster-Recovery pausiert.`);
+    return null;
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMESFM_TIMEOUT_MS);
@@ -122,7 +133,11 @@ export async function forecastMint(mintAddress: string): Promise<TimesFmForecast
       maxGapMs,
       referencePrice: lastPrice,
     };
-  } catch {
+  } catch (e) {
+    // Silent-Null ist beabsichtigt (Advisor-Signal, kein Trading-Dependency),
+    // aber der Grund muss sichtbar bleiben — sonst sind Forecast-Ausfälle
+    // im Betrieb nicht diagnostizierbar.
+    console.warn(`[TimesFM] forecastMint fehlgeschlagen: ${(e as Error)?.message ?? e}`);
     return null;
   } finally {
     clearTimeout(timeout);

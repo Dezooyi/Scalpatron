@@ -6,7 +6,10 @@ import { getTimesFmSettings } from './timesFmSettings.js';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workerScript = path.join(projectRoot, 'scripts', 'timesfm_service.py');
-const virtualEnvPython = path.join(projectRoot, '.venv-timesfm', 'bin', 'python');
+// venv-Python plattformabhängig: Windows nutzt Scripts/python.exe, POSIX bin/python.
+const virtualEnvPython = process.platform === 'win32'
+  ? path.join(projectRoot, '.venv-timesfm', 'Scripts', 'python.exe')
+  : path.join(projectRoot, '.venv-timesfm', 'bin', 'python');
 
 let worker: ChildProcess | null = null;
 let stopping = false;
@@ -39,7 +42,7 @@ export function isTimesFmInstalled(): boolean {
 
 /**
  * Startet den lokalen TimesFM-Worker, sofern das Feature aktiv ist und die
- * Voraussetzungen erfüllt sind (`.venv-timesfm/bin/python` oder externer
+ * Voraussetzungen erfüllt sind (venv-Python unter `.venv-timesfm` oder externer
  * Service via TIMESFM_URL). Fehlt die Installation, wird einmalig ein Hinweis
  * auf `npm run timesfm:setup` geloggt — kein Crash, Fallback bleibt aktiv.
  */

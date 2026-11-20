@@ -763,7 +763,7 @@ export class OllamaAgent {
   async listOpenCodeModels(): Promise<string[]> {
     const command = process.env.OPENCODE_BIN ?? (process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
     return new Promise((resolve) => {
-      execFile(command, ['models'], { timeout: 15_000, maxBuffer: 512 * 1024 }, (error, stdout) => {
+      execFile(command, ['models'], { timeout: 15_000, maxBuffer: 512 * 1024, shell: process.platform === 'win32' }, (error, stdout) => {
         if (error) {
           console.error(`[OllamaAgent] OpenCode-Modellliste konnte nicht geladen werden: ${error.message}`);
           resolve([]);
@@ -1517,7 +1517,9 @@ ${formatCandleRows(m15Candles, 5)}`;
 
         console.log(`[OllamaAgent] Executing: ${opencodeCmd} ${args.join(' ')}`);
 
-        const child = spawn(opencodeCmd, args, { shell: false, timeout: 180000 });
+        // Windows: .cmd-Dateien dürfen nicht ohne shell gestartet werden
+        // (CVE-2024-27980, sonst synchroner EINVAL-Crash des Backends).
+        const child = spawn(opencodeCmd, args, { shell: process.platform === 'win32', timeout: 180000 });
         child.stdin?.end();
 
         let stdout = '';

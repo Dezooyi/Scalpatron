@@ -103,3 +103,5 @@ memory/
 .omo/
 .kilo/
 .opencode/
+# TimesFM Python venv (lokal, wird per npm run timesfm:setup erzeugt)
+.venv-timesfm/
