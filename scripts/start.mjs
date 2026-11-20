@@ -135,12 +135,15 @@ const children = [];
 const closing = { flag: false };
 
 function spawnNpm(args, cwd, extraEnv = {}) {
-  const cmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const isWin = process.platform === 'win32';
+  const cmd = isWin ? 'npm.cmd' : 'npm';
   const child = spawn(cmd, args, {
     cwd,
     env: { ...process.env, ...extraEnv },
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
+    // Windows blockiert das direkte Spawnen von .cmd-Dateien (CVE-2024-27980) → shell nötig
+    shell: isWin,
   });
   children.push(child);
   return child;

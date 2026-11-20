@@ -393,7 +393,7 @@ export class BotInstance {
       this.activeStrategyConfig.pulse_settings = normalizePulseSettings(config.pulse_settings);
     }
     this.syncPulseConfig();
-    this.strategyEngine = new StrategyEngine(this.activeStrategyConfig);
+    this.strategyEngine = new StrategyEngine(this.activeStrategyConfig, undefined, this.name);
     // ADR-021 (Bug-Fix Cross-Bot-Leak): Per-Bot-Persistierung. Vorher schrieb
     // updateStrategy nichts → Self-Opt-Tweaks waren nach Restart weg und
     // mehrten sich zudem via strategies-Template auf andere Bots. Jetzt:

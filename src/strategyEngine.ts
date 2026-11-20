@@ -50,9 +50,14 @@ export class StrategyEngine {
   // is lifted so the bot does not buy on an unstable floor.
   private warmupTicksElapsed = 0;
 
-  constructor(config: StrategyConfig, forkRegistry?: ForkRegistry) {
+  // Optionaler Kontext-Label (Bot-Name) für Log-Zeilen — wichtig bei
+  // mehreren laufenden Bots, sonst sind Engine-Logs nicht zuordenbar.
+  private logLabel: string;
+
+  constructor(config: StrategyConfig, forkRegistry?: ForkRegistry, logLabel = '') {
     this.config = config;
     this.forkRegistry = forkRegistry ?? globalForkRegistry;
+    this.logLabel = logLabel ? ` [${logLabel}]` : '';
 
     if (isScalpingType(config.strategy_type)) {
       const ss = config.scalping_settings ?? {};
@@ -189,7 +194,7 @@ export class StrategyEngine {
       const settingsKey = JSON.stringify(adaptedConfig.scalping_settings);
       if (settingsKey !== this.lastLoggedSettings) {
         console.log(
-          `[StrategyEngine] adaptive scalping context: session=${context.session}, volatility=${context.volatility.toFixed(2)}%, ` +
+          `[StrategyEngine]${this.logLabel} adaptive scalping context: session=${context.session}, volatility=${context.volatility.toFixed(2)}%, ` +
           `trend=${context.trendBias}, htf=${context.higherTimeframeSignal ?? 'n/a'} | ` +
           `spike=${adaptedSettings.spikeThreshold.toFixed(2)}%, drop=${adaptedSettings.sellDropThreshold.toFixed(2)}%, ` +
           `cooldown=${adaptedSettings.cooldownTicks}${warmupProgress < 1 ? ` (warmup ${(warmupProgress * 100).toFixed(0)}%)` : ''}`
