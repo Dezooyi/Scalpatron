@@ -135,14 +135,19 @@ export class WalletService {
    */
   public resolvePrimaryAddress(): string {
     if (this.primaryAddress) return this.primaryAddress;
-    const row = db.prepare(`
-      SELECT walletAddress FROM bots
-      WHERE paperMode = 0 AND walletAddress IS NOT NULL AND walletAddress <> ''
-      ORDER BY rowid ASC LIMIT 1
-    `).get() as { walletAddress: string } | undefined;
-    if (row?.walletAddress) {
-      this.primaryAddress = row.walletAddress;
-      return this.primaryAddress;
+    try {
+      const row = db.prepare(`
+        SELECT walletAddress FROM bots
+        WHERE paperMode = 0 AND walletAddress IS NOT NULL AND walletAddress <> ''
+        ORDER BY rowid ASC LIMIT 1
+      `).get() as { walletAddress: string } | undefined;
+      if (row?.walletAddress) {
+        this.primaryAddress = row.walletAddress;
+        return this.primaryAddress;
+      }
+    } catch (e: any) {
+      // Bei frischer DB ist initDB() noch nicht gelaufen (Modul-Import läuft zuerst)
+      console.warn(`[WalletService] bots-Tabelle nicht lesbar, Fallback auf Keypair: ${e.message}`);
     }
     try {
       this.primaryAddress = loadOrCreateKeypair('live').publicKey.toBase58();
